@@ -1,5 +1,5 @@
 import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import crypto from 'node:crypto';
-export type Clone={path:string;repositoryId:number;normalizedRemote:string;name:string};
+export type Clone={path:string;repositoryId:number;normalizedRemote:string;name:string;branch?:string;headSha?:string;remoteHeadSha?:string};
 export type Config={serverUrl:string;userToken?:string;agentToken?:string;agentId?:number;workspaceId?:number;watchedPaths:string[];clones:Clone[];reporter:'codex'|'hermes';pollMs:number};
 export type Queued={eventKey:string;repositoryId:number;type:string;occurredAt:string;data:Record<string,unknown>;attempts:number;nextAttempt:number};
 export const stateDir=()=>process.env.TRACEMINI_HOME||path.join(os.homedir(),'.tracemini');

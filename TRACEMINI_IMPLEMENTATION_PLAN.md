@@ -898,9 +898,9 @@ Once functionality is stable, make the agent pleasant to use.
 
 Provide a systemd user service.
 
-### Windows
+### Other platforms
 
-Provide a Windows background service or startup task.
+Windows and macOS installation and background startup are deferred; the current implementation is Linux-only.
 
 The desired experience is:
 
@@ -913,7 +913,7 @@ followed by automatic background operation.
 Tasks:
 
 - [ ] Linux service
-- [ ] Windows service/startup support
+- [ ] Windows and macOS service/startup support (deferred)
 - [ ] Automatic startup
 - [ ] Clean shutdown
 - [ ] Agent status command

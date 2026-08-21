@@ -1,6 +1,143 @@
-import fs from 'node:fs';import path from 'node:path';import {api} from './api.js';import {type Config,loadQueue,saveQueue,eventKey} from './config.js';import {git,stagedData} from './git.js';import {CodexRunner,HermesRunner} from './runner.js';
-export async function flush(c:Config){const q=loadQueue(),remain=[];for(const e of q){if(e.nextAttempt>Date.now()){remain.push(e);continue}try{await api(c,'/api/activity',{method:'POST',body:JSON.stringify(e)})}catch{e.attempts++;e.nextAttempt=Date.now()+Math.min(60000,1000*2**e.attempts);remain.push(e)}}saveQueue(remain);return {sent:q.length-remain.length,pending:remain.length}}
-function contextPrompt(ctx:any,clones:Config['clones']){const grouped=new Map<string,any[]>();for(const e of ctx.events){const a=grouped.get(e.normalized_remote)||[];a.push(e);grouped.set(e.normalized_remote,a)}let text=`Generate a factual Markdown personal development report for ${ctx.job.start_date} through ${ctx.job.end_date}. Use only the supplied Git evidence. Do not modify files. Structure: Summary, Repositories Worked On, Major Changes, Technical Details, Commits, Branches and Merges, Files/Areas Modified, Overall Progress.\n\n`;for(const [remote,events] of grouped){const clone=clones.find(x=>x.normalizedRemote===remote);text+=`Repository: ${events[0].repository_name} (${remote})\nLocal clone: ${clone?.path||'unavailable'}\n`;for(const e of events){text+=`- ${e.occurred_at} ${e.type}: ${JSON.stringify(e.data)}\n`;if(clone&&e.type==='commit'&&e.data.commitSha)try{text+=git(clone.path,['show','--stat','--format=fuller','--no-ext-diff',e.data.commitSha]).slice(0,30000)+'\n'}catch{}}}return text}
-export async function processJob(c:Config,job:any){await api(c,`/api/agents/jobs/${job.id}/claim`,{method:'POST'});try{const ctx=await api<any>(c,`/api/agents/jobs/${job.id}/context`);const cwd=c.clones.find(x=>ctx.events.some((e:any)=>e.normalized_remote===x.normalizedRemote))?.path||process.cwd();const runner=job.reporter==='hermes'?new HermesRunner():new CodexRunner();const markdown=await runner.generate(contextPrompt(ctx,c.clones),cwd);await api(c,`/api/agents/jobs/${job.id}/complete`,{method:'POST',body:JSON.stringify({markdown})})}catch(e:any){await api(c,`/api/agents/jobs/${job.id}/fail`,{method:'POST',body:JSON.stringify({error:String(e.message||e).slice(0,2000)})});throw e}}
-export async function tick(c:Config,indexState:Map<string,{mtime:number,timer?:NodeJS.Timeout}>){await flush(c);await api(c,'/api/agents/heartbeat',{method:'POST'});for(const clone of c.clones){let index;try{index=git(clone.path,['rev-parse','--git-path','index']);index=path.isAbsolute(index)?index:path.join(clone.path,index);const m=fs.statSync(index).mtimeMs;const state=indexState.get(clone.path)||{mtime:m};if(m!==state.mtime){state.mtime=m;clearTimeout(state.timer);state.timer=setTimeout(()=>{const data=stagedData(clone.path);if(data.filesChanged){const q=loadQueue();q.push({eventKey:eventKey(['stage',clone.repositoryId,m,data]),repositoryId:clone.repositoryId,type:'stage',occurredAt:new Date().toISOString(),data,attempts:0,nextAttempt:0});saveQueue(q)}},1200)}indexState.set(clone.path,state)}catch{}}const jobs=await api<any[]>(c,'/api/agents/jobs');if(jobs[0])await processJob(c,jobs[0])}
-export async function runAgent(c:Config,once=false){const states=new Map();do{try{await tick(c,states as any)}catch(e){console.error(new Date().toISOString(),String(e))}if(once)return;await new Promise(r=>setTimeout(r,c.pollMs))}while(true)}
+import fs from 'node:fs';
+import path from 'node:path';
+import {api} from './api.js';
+import {type Config, loadQueue, saveConfig, saveQueue, eventKey} from './config.js';
+import {confirmPush, discover, git, inspectRepo, installHooks, observeRepositoryState, readRepositoryState, stagedData} from './git.js';
+import {CodexRunner, HermesRunner} from './runner.js';
+
+export async function flush(config: Config) {
+  const queue = loadQueue();
+  const remaining = [];
+  for (const event of queue) {
+    if (event.nextAttempt > Date.now()) { remaining.push(event); continue; }
+    try { await api(config, '/api/activity', {method: 'POST', body: JSON.stringify(event)}); }
+    catch { event.attempts++; event.nextAttempt = Date.now() + Math.min(60_000, 1000 * 2 ** event.attempts); remaining.push(event); }
+  }
+  saveQueue(remaining);
+  return {sent: queue.length - remaining.length, pending: remaining.length};
+}
+
+export async function scanWatchedRoots(config: Config) {
+  if (!config.workspaceId) throw new Error('agent has no selected workspace');
+  let found = 0;
+  for (const root of config.watchedPaths) {
+    for (const repoPath of discover(root)) {
+      let info;
+      try { info = inspectRepo(repoPath); } catch { continue; }
+      const repository = await api<any>(config, '/api/repositories/register', {method: 'POST', body: JSON.stringify({workspaceId: String(config.workspaceId), name: info.name, remoteUrl: info.remoteUrl, localKey: info.path, branch: info.branch, headSha: info.headSha, remoteHeadSha: info.remoteHeadSha})});
+      config.clones = config.clones.filter(clone => clone.path !== info.path);
+      config.clones.push({path: info.path, repositoryId: repository.id, normalizedRemote: repository.normalized_remote, name: repository.name, branch: info.branch, headSha: info.headSha, remoteHeadSha: info.remoteHeadSha});
+      installHooks(info.path);
+      found++;
+    }
+  }
+  saveConfig(config);
+  return found;
+}
+
+async function processRefresh(config: Config) {
+  const requests = await api<any[]>(config, '/api/agents/refresh-requests');
+  const request = requests[0];
+  if (!request) return;
+  await api(config, `/api/agents/refresh-requests/${request.id}/claim`, {method: 'POST'});
+  try {
+    config.workspaceId = request.workspace_id;
+    const repositoriesFound = await scanWatchedRoots(config);
+    await api(config, `/api/agents/refresh-requests/${request.id}/complete`, {method: 'POST', body: JSON.stringify({repositoriesFound})});
+  } catch (error: any) {
+    await api(config, `/api/agents/refresh-requests/${request.id}/complete`, {method: 'POST', body: JSON.stringify({error: String(error.message || error).slice(0, 2000)})});
+  }
+}
+
+async function processPushes(config: Config) {
+  const pushes = await api<any[]>(config, '/api/agents/pushes');
+  const configuredDelay = Number(process.env.TRACEMINI_PUSH_CONFIRM_DELAY_MS);
+  const confirmationDelayMs = Number.isFinite(configuredDelay) ? Math.max(0, configuredDelay) : 8_000;
+  for (const push of pushes) {
+    // pre-push runs before Git contacts the remote. Give the push time to finish
+    // rather than permanently marking a successful in-flight push unconfirmed.
+    if (Date.now() - Date.parse(push.occurred_at) < confirmationDelayMs) continue;
+    const result = confirmPush({remoteName: push.remote_name, remoteUrl: push.remote_url, ref: push.ref, expectedSha: push.expected_sha});
+    await api(config, `/api/agents/pushes/${push.id}/complete`, {method: 'POST', body: JSON.stringify(result)});
+  }
+}
+
+function contextPrompt(context: any, clones: Config['clones']) {
+  const grouped = new Map<string, any[]>();
+  for (const event of context.events) grouped.set(event.normalized_remote, [...(grouped.get(event.normalized_remote) || []), event]);
+  let text = `Generate a factual Markdown personal development report for ${context.job.start_date} through ${context.job.end_date}. Use only the supplied Git evidence. Do not modify files.\n\n`;
+  for (const [remote, events] of grouped) {
+    const clone = clones.find(item => item.normalizedRemote === remote);
+    text += `Repository: ${events[0].repository_name} (${remote})\nLocal clone: ${clone?.path || 'unavailable'}\n`;
+    for (const event of events) {
+      text += `- ${event.occurred_at} ${event.type}: ${JSON.stringify(event.data)}\n`;
+      if (clone && event.type === 'commit' && event.data.commitSha) {
+        try { text += `${git(clone.path, ['show', '--stat', '--format=fuller', '--no-ext-diff', event.data.commitSha]).slice(0, 30_000)}\n`; } catch {}
+      }
+    }
+  }
+  return text;
+}
+
+export async function processJob(config: Config, job: any) {
+  await api(config, `/api/agents/jobs/${job.id}/claim`, {method: 'POST'});
+  try {
+    const context = await api<any>(config, `/api/agents/jobs/${job.id}/context`);
+    const cwd = config.clones.find(clone => context.events.some((event: any) => event.normalized_remote === clone.normalizedRemote))?.path || process.cwd();
+    const runner = job.reporter === 'hermes' ? new HermesRunner() : new CodexRunner();
+    const markdown = await runner.generate(contextPrompt(context, config.clones), cwd);
+    await api(config, `/api/agents/jobs/${job.id}/complete`, {method: 'POST', body: JSON.stringify({markdown})});
+  } catch (error: any) {
+    await api(config, `/api/agents/jobs/${job.id}/fail`, {method: 'POST', body: JSON.stringify({error: String(error.message || error).slice(0, 2000)})});
+    throw error;
+  }
+}
+
+export async function tick(config: Config, indexState: Map<string, {mtime: number; timer?: NodeJS.Timeout}>) {
+  await flush(config);
+  await api(config, '/api/agents/heartbeat', {method: 'POST'});
+  await processRefresh(config);
+  await processPushes(config);
+  for (const clone of config.clones) {
+    try {
+      const current = readRepositoryState(clone.path);
+      if (clone.headSha && clone.branch) {
+        const observation = observeRepositoryState({branch: clone.branch, headSha: clone.headSha, remoteHeadSha: clone.remoteHeadSha}, current);
+        if (observation.event) {
+          const queue = loadQueue();
+          queue.push({eventKey: eventKey(['pull', clone.repositoryId, current.headSha]), repositoryId: clone.repositoryId, type: 'pull', occurredAt: new Date().toISOString(), data: current, attempts: 0, nextAttempt: 0});
+          saveQueue(queue);
+        }
+      }
+      Object.assign(clone, current);
+      let index = git(clone.path, ['rev-parse', '--git-path', 'index']);
+      index = path.isAbsolute(index) ? index : path.join(clone.path, index);
+      const mtime = fs.statSync(index).mtimeMs;
+      const state = indexState.get(clone.path) || {mtime};
+      if (mtime !== state.mtime) {
+        state.mtime = mtime;
+        clearTimeout(state.timer);
+        state.timer = setTimeout(() => {
+          const data = stagedData(clone.path);
+          if (!data.filesChanged) return;
+          const queue = loadQueue();
+          queue.push({eventKey: eventKey(['stage', clone.repositoryId, mtime, data]), repositoryId: clone.repositoryId, type: 'stage', occurredAt: new Date().toISOString(), data, attempts: 0, nextAttempt: 0});
+          saveQueue(queue);
+        }, 1200);
+      }
+      indexState.set(clone.path, state);
+    } catch {}
+  }
+  saveConfig(config);
+  const jobs = await api<any[]>(config, '/api/agents/jobs');
+  if (jobs[0]) await processJob(config, jobs[0]);
+}
+
+export async function runAgent(config: Config, once = false) {
+  const states = new Map<string, {mtime: number; timer?: NodeJS.Timeout}>();
+  do {
+    try { await tick(config, states); } catch (error) { console.error(new Date().toISOString(), String(error)); }
+    if (once) return;
+    await new Promise(resolve => setTimeout(resolve, config.pollMs));
+  } while (true);
+}

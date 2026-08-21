@@ -1,17 +1,16 @@
 # TraceMini
 
-TraceMini is a small self-hosted activity dashboard plus a local Git agent for 4–6 developers. The server stores accounts, Git metadata, activity, jobs, and Markdown reports in SQLite. Source code and local clone paths stay on each developer's machine.
+TraceMini is a small self-hosted activity dashboard and local Git agent for 4–6 developers. Express serves the API and built React/Vite app, SQLite stores metadata and Markdown reports, and the local TypeScript CLI observes explicitly watched Git roots. TraceMini does not store source code or call Git-hosting provider APIs.
 
-## Requirements
+## Requirements and verification
 
-- Node.js 22 (tested with 22.23.2), npm 10+, and Git
-- Optional for generated reports: an authenticated `codex` or `hermes` executable on the agent machine
-
-## Install, verify, and run
+- Node.js 22 (the package engine requirement; development is also checked under the current local Node runtime)
+- npm 10+
+- Git
+- Linux with a working systemd user session
+- Optional for report generation: an authenticated local `codex` or `hermes` executable
 
 ```bash
-nvm install 22
-nvm use 22
 npm install
 npm test
 npm run typecheck
@@ -20,64 +19,64 @@ npm run acceptance
 npm start -w @tracemini/server
 ```
 
-The built Express process serves both the API and `apps/web/dist` at `http://localhost:3000`. It uses `PORT=3000` and `TRACEMINI_DB=./data/tracemini.db` by default. For development, run `npm run dev -w @tracemini/server` and `npm run dev -w @tracemini/web` in separate terminals; the single-process shape applies to the production build.
+The built Express process serves the API and `apps/web/dist` at `http://localhost:3000`. Configuration defaults are `PORT=3000` and `TRACEMINI_DB=./data/tracemini.db`.
 
-## First workspace and agent
+## Workspace and CLI onboarding
 
-Register in the web UI and create a workspace. The register/login HTTP response contains the simple user bearer token needed to bootstrap the agent. Build and link the CLI once on each developer machine:
+Roles are only **Manager** and **Member**. A workspace creator is its first Manager. Managers can promote/demote existing members, remove members, rotate or disable the invite, archive repositories, revoke agents, and delete the workspace. A mutation that would leave zero Managers is rejected. Members cannot perform management mutations.
+
+From **Install CLI** in the authenticated web app, generate and copy the Linux install command. The command uses `curl` to download a server-generated installer file and then runs that local file; it does not pipe network content directly into a shell. The installer contains a short-lived, single-use opaque install token, installs the compiled dependency-free CLI under `~/.local/share/tracemini/cli`, creates `~/.local/bin/tracemini`, exchanges the token for a dedicated agent credential, and enables and starts `tracemini.service` with `systemd --user`. It requires Node.js 22+ but does not require npm, a package registry, sudo, or a preinstalled `tracemini` command.
 
 ```bash
-npm run build -w @tracemini/cli
-npm link ./packages/cli
-tracemini login --server http://localhost:3000 --token USER_BEARER_TOKEN
-tracemini use-workspace WORKSPACE_ID
-tracemini watch /absolute/path/to/explicit/watch/root
+export PATH="$HOME/.local/bin:$PATH"
+command -v tracemini
 tracemini status
-tracemini start
+systemctl --user status tracemini.service --no-pager
+journalctl --user -u tracemini.service -n 50 --no-pager
+tracemini watch /absolute/path/to/a/root
 ```
 
-A joining user runs `tracemini join INVITE_CODE` after login, then `watch` and `start`. `watch` recursively discovers repositories only beneath the explicit root, requires an `origin`, registers clones, and installs hooks. Configuration, agent credentials, retry queue, and watched paths live in `~/.tracemini` with user-only file permissions. `TRACEMINI_HOME` overrides that directory.
+Add `export PATH="$HOME/.local/bin:$PATH"` to the appropriate shell startup file if `~/.local/bin` is not already on `PATH`. A newly started service can have no journal output; `-- No entries --` is normal immediately after installation. Agent credentials, watched roots, clone state, and the retry queue are stored with user-only permissions under `~/.tracemini`; `TRACEMINI_HOME` overrides the state directory.
 
-## Events and hooks
+Each installed agent is bound to one selected workspace. Repository, refresh, push, activity, and report operations are rejected outside that binding. Removing a member revokes that member's agents for the workspace and fails their unfinished report jobs.
 
-Supported installed hooks are `post-commit`, `post-checkout`, `post-merge`, `post-rewrite`, and `pre-push`. An existing hook is moved once to `<hook>.tracemini-original`, and the wrapper executes it first. Explicit recording supports automation and operations Git cannot confirm with a client hook:
+Windows installation and startup support is explicitly deferred.
 
-```bash
-tracemini event --repo /path/to/repo --type commit
-tracemini event --repo /path/to/repo --type branch
-tracemini event --repo /path/to/repo --type merge
-tracemini event --repo /path/to/repo --type push
-tracemini event --repo /path/to/repo --type pull
-tracemini event --repo /path/to/repo --type stage
-```
+The dashboard shows agent online/offline state. “Online” means a heartbeat was seen within 60 seconds; it is not a process-health guarantee.
 
-The running agent polls registered Git indexes and emits debounced staged-state events. It flushes the JSON retry queue, sends heartbeats, and polls personal report jobs.
+## Discovery and refresh
 
-## Reports
+`watch` recursively discovers repositories only below an explicit root, requires an `origin`, registers remote-normalized repositories/clones, and installs hooks. **Refresh repositories** creates one SQLite-backed request for each non-revoked agent in the workspace. Each polling agent rescans its own stored watched roots, registers newly found clones and hooks, and completes its request with a repository count or error. There is no queue service or extra worker process; requests for offline agents remain queued.
 
-Request a date range and Codex or Hermes in the web UI. The agent claims the job, fetches activity metadata, adds bounded `git show --stat` evidence for relevant local commits, and runs the local executable in the involved clone. Commands are based on installed CLI help:
+## Git activity and push confirmation
 
-- Codex: `codex exec --ephemeral --sandbox read-only --ask-for-approval never -C <clone> -`
-- Hermes: `hermes --oneshot <prompt> --safe-mode`
+Managed hooks are `post-commit`, `post-checkout`, `post-merge`, `post-rewrite`, and `pre-push`. A pre-existing hook is preserved as `<hook>.tracemini-original` and runs first.
 
-The resulting Markdown is stored in report history and rendered in the UI. No diff or source file is sent to the server.
+`pre-push` records a pending push with the remote name/URL and every advertised remote ref and expected local SHA. Because that hook runs before the transfer, the polling agent waits eight seconds before using bounded (8-second), noninteractive `git ls-remote --refs <remote> <ref>`. It stores a push event as `confirmed` only if the observed SHA exactly matches; failed checks are retried twice at ten-second intervals before becoming `unconfirmed`. Network/auth failures, exceptionally long in-flight pushes, later force-pushes, deleted refs, unsupported remote behavior, and mismatches can still end as `unconfirmed`. This is intentionally not universal push confirmation and does not prove what happened between the original push and the later observation.
 
-## Test coverage
+The agent persists each clone’s branch, local HEAD, and upstream-tracking SHA. It infers a pull/update only when the same branch’s local HEAD and upstream state both move and converge. Ordinary local commits (HEAD-only movement) and branch checkouts are excluded where observable. Exact limitations:
 
-`npm test` uses a real in-memory SQLite database through the real Express app and creates a temporary real Git repository. It covers two-user membership, workspace isolation, normalized clone grouping, event deduplication, report transitions, recursive discovery, staged/commit metadata, and chained-hook preservation.
+- A fetch followed by reset/rebase to the upstream tip may look like a pull/update.
+- A pull that does not make local HEAD equal the upstream-tracking SHA may not be inferred.
+- Remote-tracking refs are local cached state until some Git operation updates them; TraceMini does not fetch merely to detect pulls.
+- `post-merge` records merges but cannot always distinguish `git pull` from a local merge.
+- Hook execution requires `tracemini` on `PATH`; failure of a preserved original hook stops the wrapper first.
 
-`npm run acceptance` starts the compiled server with temporary SQLite, creates two users and two local clones, drives the CLI, creates a real commit through the installed `post-commit` hook, verifies grouped activity, and exercises claim/context/complete/report-history flow. It completes the report with deterministic Markdown instead of spending an external AI invocation.
+## Dashboard and reports
 
-## Deferred / limitations
+Dashboard cards and daily trends aggregate **commit events only** for commits, files changed, insertions, and deletions; stage events are deliberately excluded. User and repository drill-down pages have stable URLs and the same date filters/stats API. Repository archiving hides it from the active dashboard but preserves clones and all activity.
 
-- Team reports are deliberately omitted, as allowed by the plan.
-- Git has no supported client-side `post-push`; `pre-push` records an attempt, not confirmed success. Use explicit `event --type push` after success when confirmation matters.
-- Pulls have no dedicated hook. A merging pull appears as `post-merge`; use explicit `event --type pull` when the distinction matters. Fast-forward pulls are not independently inferred.
-- Commit polling fallback is not implemented; hooks are the MVP mechanism. Index polling runs only while `tracemini start` runs.
-- Hooks require `tracemini` on `PATH`. A failing pre-existing hook stops the wrapper before TraceMini, preserving chained-hook semantics.
-- Background operation is a foreground process. systemd/Windows startup packaging and automatic startup are deferred.
-- Repositories without `origin` are skipped because identity is remote-based.
-- The JSON queue does not support concurrent agents sharing one `TRACEMINI_HOME`.
-- The UI refreshes on navigation/filter changes, caps activity at 500 events, and has lightweight drill-down rather than production analytics.
-- Codex/Hermes subprocess construction is implemented from installed help, but authenticated paid model execution is not run by deterministic tests. Missing tools, timeouts, and failures mark jobs failed.
-- HTTPS belongs at a deployment reverse proxy. Password reset, invite rotation, session expiry, service installers, and production hardening are deferred.
+Reports have URL-addressable history/detail pages. Stored Markdown is rendered with `react-markdown` plus `remark-gfm`, including GFM tables and task lists. The polling local agent claims personal jobs, adds bounded `git show --stat` evidence for relevant local commits, and invokes the selected local Codex/Hermes executable. Tests complete reports with deterministic Markdown and do not spend model invocations.
+
+## Exact limitations and exclusions
+
+- No provider APIs/webhooks, source upload, queues, Redis, message broker, additional service, deployment automation, or browser automation.
+- No agent crash recovery or concurrent-agent coordination for one shared `TRACEMINI_HOME`; retry storage is a single local JSON file.
+- No team reports, account management extras, password reset, OAuth, or broad AI/report-output testing.
+- Install commands contain bearer-like install tokens internally. They expire after 10 minutes and are single-use, but commands can remain in shell history; protect terminal history and use HTTPS outside localhost.
+- The server must be deployed with built CLI artifacts. The installer is not a signed OS package and does not elevate privileges.
+- Linux installation depends on a working systemd user session. Windows and macOS startup installation are deferred.
+- Repository identity requires `origin` and is based on normalized remote text; unusual aliases can group incorrectly.
+- Activity endpoints cap results at 500. UI freshness is polling-based.
+- Deleting a workspace is permanent. Archiving repositories is the preservation-oriented alternative.
+- HTTPS, backups, process supervision for the Express server, and production hardening belong to the deployment environment.
