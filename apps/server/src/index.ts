@@ -1,0 +1,2 @@
+import path from 'node:path';import {fileURLToPath} from 'node:url';import {openDb} from './db.js';import {createApp} from './app.js';
+const here=path.dirname(fileURLToPath(import.meta.url));const db=openDb(process.env.TRACEMINI_DB||path.resolve('data/tracemini.db'));const port=+(process.env.PORT||3000);const web=path.resolve(here,'../../web/dist');createApp(db,web).listen(port,()=>console.log(`TraceMini listening on http://localhost:${port}`));
