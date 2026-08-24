@@ -1,4 +1,4 @@
-export type RouteView = 'dashboard' | 'install' | 'settings' | 'workspace-required' | 'report';
+export type RouteView = 'dashboard' | 'reports' | 'install' | 'settings' | 'workspace-required' | 'report';
 
 export type RouteContext = {workspaceId?: number; reportId?: number};
 
@@ -25,5 +25,6 @@ export function getRouteView(pathname: string, workspaceId: number): RouteView {
   if (isInstall) return 'install';
   if (isSettings) return 'settings';
   if (/\/reports\/\d+\/?$/.test(pathname)) return 'report';
+  if (/\/reports\/?$/.test(pathname)) return 'reports';
   return 'dashboard';
 }

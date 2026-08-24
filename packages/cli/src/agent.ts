@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {api} from './api.js';
 import {type Config, loadConfig, loadQueue, saveConfig, saveQueue, eventKey} from './config.js';
-import {confirmPush, discover, git, inspectRepo, installHooks, observeRepositoryState, readRepositoryState, stagedData} from './git.js';
+import {commitHistory, commitHistoryAfterHeads, confirmPush, discover, git, historyHeads, inspectRepo, installHooks, observeRepositoryState, readRepositoryState, stagedData} from './git.js';
 import {CodexRunner, HermesRunner} from './runner.js';
 
 export async function flush(config: Config) {
@@ -18,15 +18,29 @@ export async function flush(config: Config) {
 }
 
 export async function scanWatchedRoots(config: Config) {
-  if (!config.workspaceId) throw new Error('agent has no selected workspace');
+  if (!config.workspaceId) throw new Error('device has no selected workspace');
   let found = 0;
   for (const root of config.watchedPaths) {
     for (const repoPath of discover(root)) {
       let info;
       try { info = inspectRepo(repoPath); } catch { continue; }
+      const scanStartedAt = new Date().toISOString();
       const repository = await api<any>(config, '/api/repositories/register', {method: 'POST', body: JSON.stringify({workspaceId: String(config.workspaceId), name: info.name, remoteUrl: info.remoteUrl, localKey: info.path, branch: info.branch, headSha: info.headSha, remoteHeadSha: info.remoteHeadSha})});
+      const existing = config.clones.find(clone => clone.path === info.path && clone.repositoryId === repository.id);
+      const currentHistoryHeads = historyHeads(info.path);
+      const incrementalHistory = existing?.historyHeads?.length ? commitHistoryAfterHeads(info.path, existing.historyHeads) : undefined;
+      const history = incrementalHistory ?? commitHistory(info.path, new Date(Date.parse(scanStartedAt) - 90 * 24 * 60 * 60_000).toISOString(), scanStartedAt);
+      for (const data of history) {
+        await api(config, '/api/activity', {method: 'POST', body: JSON.stringify({
+          eventKey: eventKey(['commit-history', repository.id, data.commitSha]),
+          repositoryId: repository.id,
+          type: 'commit',
+          occurredAt: data.commitTimestamp,
+          data: {...data, importedFromHistory: true},
+        })});
+      }
       config.clones = config.clones.filter(clone => clone.path !== info.path);
-      config.clones.push({path: info.path, repositoryId: repository.id, normalizedRemote: repository.normalized_remote, name: repository.name, branch: info.branch, headSha: info.headSha, remoteHeadSha: info.remoteHeadSha});
+      config.clones.push({path: info.path, repositoryId: repository.id, normalizedRemote: repository.normalized_remote, name: repository.name, branch: info.branch, headSha: info.headSha, remoteHeadSha: info.remoteHeadSha, historyHeads: currentHistoryHeads});
       installHooks(info.path);
       found++;
     }

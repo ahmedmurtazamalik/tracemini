@@ -24,6 +24,9 @@ const dateOnly = (value: unknown) => {
 };
 const hash = (value: string) => crypto.createHash('sha256').update(value).digest('hex');
 const token = () => crypto.randomBytes(24).toString('base64url');
+const uniqueViolationText = (error: any) => `${error?.constraint || ''} ${error?.detail || ''} ${error?.message || ''}`;
+const inviteCodeCollision = (error: any) => error?.code === '23505' && /invite_code|workspaces_invite_code_key/i.test(uniqueViolationText(error));
+const emailCollision = (error: any) => error?.code === '23505' && /users_email_key|users.*email|email.*users/i.test(uniqueViolationText(error));
 
 function validatePublicOrigin(value: string, production: boolean) {
   let parsed: URL;
@@ -137,7 +140,7 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, optio
   const agentAuth = async (req: Authed, res: Response, next: NextFunction) => {
     const raw = req.headers.authorization?.replace(/^Bearer\s+/i, '');
     const row: any = raw && await db.prepare("SELECT a.*,u.name user_name FROM agents a JOIN users u ON u.id=a.user_id LEFT JOIN workspace_members wm ON wm.workspace_id=a.workspace_id AND wm.user_id=a.user_id WHERE a.token_hash=? AND a.revoked_at IS NULL AND (a.workspace_id IS NULL OR wm.user_id IS NOT NULL)").get(hash(raw));
-    if (!row) return res.status(401).json({error: 'unauthorized agent'});
+    if (!row) return res.status(401).json({error: 'unauthorized device'});
     req.agent = row;
     await db.prepare('UPDATE agents SET last_seen=? WHERE id=?').run(now(), row.id);
     next();
@@ -155,23 +158,52 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, optio
   };
   const managerCount = async (workspaceId: number) => (await db.prepare("SELECT COUNT(*)::INTEGER count FROM workspace_members WHERE workspace_id=? AND role='Manager'").get(workspaceId) as any).count as number;
   const hasLockedManagerAuthority = async (workspaceId: number, userId: number) => Boolean(await db.prepare("SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=? AND role='Manager'").get(workspaceId, userId));
+  const freshInviteCode = async () => {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const code = crypto.randomBytes(5).toString('hex').toUpperCase();
+      if (!(await db.prepare('SELECT 1 FROM workspaces WHERE invite_code=?').get(code))) return code;
+    }
+    throw new Error('could not allocate workspace invite code');
+  };
 
-  app.get('/api/health', async (_req, res) => res.json({ok: true}));
+  app.get('/api/health', async (_req, res, next) => {
+    try {
+      await db.query('SELECT 1');
+      res.json({ok: true, database: 'ready'});
+    } catch (error) {
+      next(error);
+    }
+  });
   app.post('/api/auth/register', required(['name', 'email', 'password']), async (req, res, next) => {
     try {
       const email = req.body.email.trim().toLowerCase();
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({error: 'valid email required'});
       if (req.body.password.length < 8) return res.status(400).json({error: 'password must be at least 8 characters'});
       const raw = token();
+      const name = req.body.name.trim();
+      if (!name) return res.status(400).json({error: 'name required'});
       const passwordHash = await bcrypt.hash(req.body.password, 10);
-      const userId = await db.transaction(async () => {
-        const result = await db.prepare('INSERT INTO users(name,email,password_hash,created_at) VALUES(?,?,?,?) RETURNING id').run(req.body.name.trim(), email, passwordHash, now());
-        await db.prepare('INSERT INTO sessions(token_hash,user_id,created_at,auth_version) VALUES(?,?,?,0)').run(hash(raw), result.lastInsertRowid, now());
-        return Number(result.lastInsertRowid);
-      });
-      res.status(201).json({token: raw, user: {id: userId, name: req.body.name, email}});
+      let created: {userId: number; workspaceId: number} | undefined;
+      for (let attempt = 0; attempt < 3 && !created; attempt++) {
+        const personalInviteCode = await freshInviteCode();
+        try {
+          created = await db.transaction(async () => {
+            const result = await db.prepare('INSERT INTO users(name,email,password_hash,created_at) VALUES(?,?,?,?) RETURNING id').run(name, email, passwordHash, now());
+            const userId = Number(result.lastInsertRowid);
+            await db.prepare('INSERT INTO sessions(token_hash,user_id,created_at,auth_version) VALUES(?,?,?,0)').run(hash(raw), userId, now());
+            const workspace = await db.prepare('INSERT INTO workspaces(name,owner_id,invite_code,created_at) VALUES(?,?,?,?) RETURNING id').run(`${name}'s workspace`, userId, personalInviteCode, now());
+            const workspaceId = Number(workspace.lastInsertRowid);
+            await db.prepare("INSERT INTO workspace_members VALUES(?,?,'Manager')").run(workspaceId, userId);
+            return {userId, workspaceId};
+          });
+        } catch (error: any) {
+          if (!inviteCodeCollision(error) || attempt === 2) throw error;
+        }
+      }
+      if (!created) throw new Error('could not allocate workspace invite code');
+      res.status(201).json({token: raw, user: {id: created.userId, name, email}, workspaceId: created.workspaceId});
     } catch (error: any) {
-      if (error?.code === '23505') return res.status(409).json({error: 'email already registered'});
+      if (emailCollision(error)) return res.status(409).json({error: 'email already registered'});
       next(error);
     }
   });
@@ -294,15 +326,26 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, optio
     res.status(204).end();
   });
   app.post('/api/workspaces/:id/invite/regenerate', userAuth, requireManager, async (req: Authed, res) => {
-    const inviteCode = crypto.randomBytes(5).toString('hex').toUpperCase();
-    const updated = await db.transaction(async () => {
-      const workspace = await db.prepare('SELECT id FROM workspaces WHERE id=? FOR UPDATE').get(req.params.id);
-      if (!workspace || !(await hasLockedManagerAuthority(+req.params.id, req.user.id))) return false;
-      await db.prepare('UPDATE workspaces SET invite_code=?,invite_enabled=TRUE WHERE id=?').run(inviteCode, req.params.id);
-      return true;
-    });
-    if (!updated) return res.status(403).json({error: 'Manager required'});
-    res.json({inviteCode});
+    const refreshedAt = now();
+    const cooldownCutoff = new Date(Date.now() - 60_000).toISOString();
+    let inviteCode = '';
+    let updated: {changes: number} | undefined;
+    for (let attempt = 0; attempt < 3 && !updated; attempt++) {
+      inviteCode = await freshInviteCode();
+      try {
+        updated = await db.prepare("UPDATE workspaces SET invite_code=?,invite_enabled=TRUE,invite_refreshed_at=? WHERE id=? AND (invite_refreshed_at IS NULL OR invite_refreshed_at<=?) AND id IN (SELECT workspace_id FROM workspace_members WHERE workspace_id=? AND user_id=? AND role='Manager')").run(inviteCode, refreshedAt, req.params.id, cooldownCutoff, req.params.id, req.user.id);
+      } catch (error: any) {
+        if (!inviteCodeCollision(error) || attempt === 2) throw error;
+      }
+    }
+    if (!updated) throw new Error('could not allocate workspace invite code');
+    if (!updated.changes) {
+      if (!(await hasLockedManagerAuthority(+req.params.id, req.user.id))) return res.status(403).json({error: 'Manager required'});
+      const workspace: any = await db.prepare('SELECT invite_refreshed_at FROM workspaces WHERE id=?').get(req.params.id);
+      const retryAfter = Math.max(1, Math.ceil((new Date(workspace.invite_refreshed_at).getTime() + 60_000 - Date.now()) / 1000));
+      return res.status(429).set('retry-after', String(retryAfter)).json({error: 'Invite code can only be refreshed once per minute.', retryAfter});
+    }
+    res.json({inviteCode, refreshedAt});
   });
   app.post('/api/workspaces/:id/invite/disable', userAuth, requireManager, async (req: Authed, res) => {
     const updated = await db.transaction(async () => {
@@ -377,9 +420,9 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, optio
     if (!(await membership(req.agent.user_id, workspaceId))) return res.status(403).json({error: 'forbidden'});
     await db.transaction(async () => {
       if (req.agent.workspace_id && req.agent.workspace_id !== workspaceId) {
-        await db.prepare("UPDATE refresh_requests SET status='error',error='agent changed workspace',completed_at=? WHERE agent_id=? AND status IN ('queued','running')").run(now(), req.agent.id);
+        await db.prepare("UPDATE refresh_requests SET status='error',error='device changed workspace',completed_at=? WHERE agent_id=? AND status IN ('queued','running')").run(now(), req.agent.id);
         await db.prepare("UPDATE pending_pushes SET status='unconfirmed',completed_at=? WHERE agent_id=? AND status='pending'").run(now(), req.agent.id);
-        await db.prepare("UPDATE report_jobs SET status='failed',error='agent changed workspace',completed_at=? WHERE agent_id=? AND status='running'").run(now(), req.agent.id);
+        await db.prepare("UPDATE report_jobs SET status='failed',error='device changed workspace',completed_at=? WHERE agent_id=? AND status='running'").run(now(), req.agent.id);
       }
       await db.prepare('UPDATE agents SET workspace_id=? WHERE id=?').run(workspaceId, req.agent.id);
     });
@@ -389,7 +432,7 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, optio
   app.post('/api/agents/heartbeat', agentAuth, async (_req, res) => res.json({ok: true, at: now()}));
   app.get('/api/workspaces/:id/agents', userAuth, requireMember, async (req, res) => {
     const cutoff = new Date(Date.now() - 60_000).toISOString();
-    const rows = await db.prepare("SELECT a.id,a.machine_name,a.last_seen,a.revoked_at,u.name user_name,CASE WHEN a.revoked_at IS NOT NULL THEN 'revoked' WHEN a.last_seen>=? THEN 'online' ELSE 'offline' END status FROM agents a JOIN users u ON u.id=a.user_id WHERE a.workspace_id=? ORDER BY a.id").all(cutoff, req.params.id);
+    const rows = await db.prepare("SELECT a.id,a.user_id,a.machine_name,a.last_seen,a.revoked_at,u.name user_name,CASE WHEN a.revoked_at IS NOT NULL THEN 'revoked' WHEN a.last_seen>=? THEN 'online' ELSE 'offline' END status FROM agents a JOIN users u ON u.id=a.user_id WHERE a.workspace_id=? ORDER BY a.id").all(cutoff, req.params.id);
     res.json(rows);
   });
   app.post('/api/workspaces/:id/agents/:agentId/revoke', userAuth, requireManager, async (req: Authed, res) => {
@@ -399,19 +442,19 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, optio
       const agent: any = await db.prepare('SELECT id FROM agents WHERE id=? AND workspace_id=? FOR UPDATE').get(req.params.agentId, req.params.id);
       if (!agent) return 'missing';
       await db.prepare('UPDATE agents SET revoked_at=? WHERE id=? AND revoked_at IS NULL').run(now(), agent.id);
-      await db.prepare("UPDATE refresh_requests SET status='error',error='agent revoked',completed_at=? WHERE agent_id=? AND status IN ('queued','running')").run(now(), agent.id);
+      await db.prepare("UPDATE refresh_requests SET status='error',error='device revoked',completed_at=? WHERE agent_id=? AND status IN ('queued','running')").run(now(), agent.id);
       await db.prepare("UPDATE pending_pushes SET status='unconfirmed',completed_at=? WHERE agent_id=? AND status='pending'").run(now(), agent.id);
-      await db.prepare("UPDATE report_jobs SET status='failed',error='agent revoked',completed_at=? WHERE agent_id=? AND status='running'").run(now(), agent.id);
+      await db.prepare("UPDATE report_jobs SET status='failed',error='device revoked',completed_at=? WHERE agent_id=? AND status='running'").run(now(), agent.id);
       return 'revoked';
     });
     if (outcome === 'forbidden') return res.status(403).json({error: 'Manager required'});
-    if (outcome === 'missing') return res.status(404).json({error: 'agent not found'});
+    if (outcome === 'missing') return res.status(404).json({error: 'device not found'});
     res.json({ok: true});
   });
 
   app.post('/api/repositories/register', agentAuth, required(['workspaceId', 'name', 'remoteUrl', 'localKey']), async (req: Authed, res) => {
     const workspaceId = Number(req.body.workspaceId);
-    if (req.agent.workspace_id !== workspaceId) return res.status(403).json({error: 'agent belongs to another workspace'});
+    if (req.agent.workspace_id !== workspaceId) return res.status(403).json({error: 'device belongs to another workspace'});
     const normalized = normalizeRemote(req.body.remoteUrl);
     if (!normalized) return res.status(400).json({error: 'remote URL required'});
     await db.prepare('INSERT INTO repositories(workspace_id,name,remote_url,normalized_remote,created_at) VALUES(?,?,?,?,?) ON CONFLICT DO NOTHING').run(workspaceId, req.body.name, req.body.remoteUrl, normalized, now());
@@ -592,6 +635,8 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, optio
   }
   app.use((error: any, _req: Request, res: Response, _next: NextFunction) => {
     console.error(error);
+    const databaseBusy = error?.code === 'EMAXCONNSESSION' || /max clients reached in session mode/i.test(error?.message || '');
+    if (databaseBusy) return res.status(503).set('retry-after', '5').json({error: 'TraceMini database is temporarily busy. Please retry in a few seconds.'});
     res.status(500).json({error: 'internal error'});
   });
   return app;

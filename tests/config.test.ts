@@ -13,6 +13,24 @@ afterEach(() => {
 });
 
 describe('concurrent CLI configuration', () => {
+  it('watches the user home directory by default, including existing empty configs', () => {
+    const state = fs.mkdtempSync(path.join(os.tmpdir(), 'tracemini-default-home-'));
+    const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'tracemini-user-home-'));
+    process.env.TRACEMINI_HOME = state;
+    const originalUserHome = process.env.HOME;
+    process.env.HOME = fakeHome;
+    try {
+      expect(loadConfig().watchedPaths).toEqual([fakeHome]);
+      fs.writeFileSync(path.join(state, 'config.json'), JSON.stringify({watchedPaths: []}));
+      expect(loadConfig().watchedPaths).toEqual([fakeHome]);
+    } finally {
+      if (originalUserHome === undefined) delete process.env.HOME;
+      else process.env.HOME = originalUserHome;
+      fs.rmSync(state, {recursive: true, force: true});
+      fs.rmSync(fakeHome, {recursive: true, force: true});
+    }
+  });
+
   it('serializes real cross-process config writers without losing updates', async () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'tracemini-config-processes-'));
     process.env.TRACEMINI_HOME = home;
@@ -30,7 +48,7 @@ describe('concurrent CLI configuration', () => {
     fs.writeFileSync(gate, 'go');
     await Promise.all(children.map(child => new Promise<void>((resolve, reject) => child.once('exit', code => code === 0 ? resolve() : reject(new Error(`config writer exited ${code}`))))));
 
-    expect(loadConfig().watchedPaths.sort()).toEqual([...roots].sort());
+    expect(loadConfig().watchedPaths.sort()).toEqual([os.homedir(), ...roots].sort());
     fs.rmSync(home, {recursive: true, force: true});
   }, 20_000);
 
@@ -48,7 +66,7 @@ describe('concurrent CLI configuration', () => {
     saveConfig(staleAgentConfig);
 
     expect(loadConfig()).toMatchObject({
-      watchedPaths: ['/tmp/watched'],
+      watchedPaths: [os.homedir(), '/tmp/watched'],
       clones: [{path: '/tmp/watched/repo', repositoryId: 7}],
     });
     fs.rmSync(home, {recursive: true, force: true});

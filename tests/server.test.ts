@@ -1,4 +1,4 @@
-import {afterEach, describe, expect, it} from 'vitest';
+import {afterEach, describe, expect, it, vi} from 'vitest';
 import request from 'supertest';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -6,12 +6,19 @@ import path from 'node:path';
 import {execFile, execFileSync} from 'node:child_process';
 import {promisify} from 'node:util';
 import {AsyncLocalStorage} from 'node:async_hooks';
+import crypto from 'node:crypto';
 import type {DB} from '../apps/server/src/db.js';
 import {openTestDb} from '../apps/server/src/test-db.js';
 import {createApp} from '../apps/server/src/app.js';
 
 let db: DB;
-afterEach(async () => db && await db.close());
+afterEach(async () => {
+  vi.restoreAllMocks();
+  if (db) {
+    await db.close();
+    db = undefined as unknown as DB;
+  }
+});
 const auth = (token: string) => ({authorization: `Bearer ${token}`});
 const installToken = (installation: any) => decodeURIComponent(installation.installCommand.match(/\/api\/installers\/linux\/([^']+)/)[1]);
 const execFileAsync = promisify(execFile);
@@ -114,11 +121,93 @@ class ManagerPreflightGateDb {
 }
 
 describe('approved server workflows', () => {
+  it('uses database-aware health and returns a retryable response when hosted sessions are exhausted', async () => {
+    const failure: any = new Error('MaxClientsInSessionMode: max clients reached in session mode');
+    failure.code = 'EMAXCONNSESSION';
+    const unavailable = {query: async () => { throw failure; }} as unknown as DB;
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const response = await request(createApp(unavailable)).get('/api/health').expect(503);
+    expect(response.body.error).toContain('temporarily busy');
+    expect(response.headers['retry-after']).toBe('5');
+    logged.mockRestore();
+  });
+
+  it('describes the installed background service as a device', () => {
+    const installerSource = fs.readFileSync(path.resolve('packages/cli/src/install.ts'), 'utf8');
+    expect(installerSource).toContain('Description=TraceMini local Git device');
+    expect(installerSource).not.toContain('Description=TraceMini local Git agent');
+  });
+
+  it('creates a personal Manager workspace with a random invite when a user registers', async () => {
+    db = await openTestDb();
+    const app = createApp(db);
+    expect((await request(app).get('/api/agents/status').set(auth('invalid-device-token')).expect(401)).body).toEqual({error: 'unauthorized device'});
+
+    const joey = (await request(app).post('/api/auth/register').send({name: 'Joey', email: 'joey@test.local', password: 'password123'}).expect(201)).body;
+    const workspaces = (await request(app).get('/api/workspaces').set(auth(joey.token)).expect(200)).body;
+
+    expect(workspaces).toHaveLength(1);
+    expect(workspaces[0]).toMatchObject({name: "Joey's workspace", role: 'Manager', invite_enabled: true});
+    expect(workspaces[0].invite_code).toMatch(/^[A-F0-9]{10}$/);
+
+    const jane = (await request(app).post('/api/auth/register').send({name: 'Jane', email: 'jane@test.local', password: 'password123'}).expect(201)).body;
+    const janeWorkspace = (await request(app).get('/api/workspaces').set(auth(jane.token)).expect(200)).body[0];
+    expect(janeWorkspace.invite_code).not.toBe(workspaces[0].invite_code);
+  });
+
+  it('retries invite-code collisions without misreporting them as duplicate email', async () => {
+    db = await openTestDb();
+    const app = createApp(db);
+    const holder = (await request(app).post('/api/auth/register').send({name: 'Holder', email: 'holder@test.local', password: 'password123'}).expect(201)).body;
+    const holderWorkspace = (await request(app).get('/api/workspaces').set(auth(holder.token)).expect(200)).body[0];
+    await db.prepare('UPDATE workspaces SET invite_code=? WHERE id=?').run('AAAAAAAAAA', holderWorkspace.id);
+
+    const realRandomBytes = crypto.randomBytes.bind(crypto);
+    const inviteBytes = ['aaaaaaaaaa', 'bbbbbbbbbb', 'cccccccccc'];
+    vi.spyOn(crypto, 'randomBytes').mockImplementation(((size: number) =>
+      size === 5 ? Buffer.from(inviteBytes.shift()!, 'hex') : realRandomBytes(size)) as any);
+
+    const newcomer = (await request(app).post('/api/auth/register').send({name: 'Collision', email: 'collision@test.local', password: 'password123'}).expect(201)).body;
+    const newcomerWorkspace = (await request(app).get('/api/workspaces').set(auth(newcomer.token)).expect(200)).body[0];
+    expect(newcomerWorkspace.invite_code).toBe('BBBBBBBBBB');
+
+    const refreshed = await request(app).post(`/api/workspaces/${newcomerWorkspace.id}/invite/regenerate`).set(auth(newcomer.token)).expect(200);
+    expect(refreshed.body.inviteCode).toBe('CCCCCCCCCC');
+  });
+
+  it('serializes invite refreshes and permits only one new code per minute', async () => {
+    db = await openTestDb();
+    const app = createApp(db);
+    const user = (await request(app).post('/api/auth/register').send({name: 'Invite', email: 'invite@test.local', password: 'password123'}).expect(201)).body;
+    const workspace = (await request(app).get('/api/workspaces').set(auth(user.token)).expect(200)).body[0];
+
+    const responses = await Promise.all([
+      request(app).post(`/api/workspaces/${workspace.id}/invite/regenerate`).set(auth(user.token)),
+      request(app).post(`/api/workspaces/${workspace.id}/invite/regenerate`).set(auth(user.token)),
+    ]);
+
+    expect(responses.map(response => response.status).sort()).toEqual([200, 429]);
+    const refreshed = responses.find(response => response.status === 200)!.body.inviteCode;
+    expect(refreshed).toMatch(/^[A-F0-9]{10}$/);
+    expect(refreshed).not.toBe(workspace.invite_code);
+    const limited = responses.find(response => response.status === 429)!;
+    expect(limited.body).toMatchObject({error: expect.stringContaining('once per minute'), retryAfter: expect.any(Number)});
+    expect(limited.headers['retry-after']).toBe(String(limited.body.retryAfter));
+    expect((await db.prepare('SELECT invite_code FROM workspaces WHERE id=?').get(workspace.id) as any).invite_code).toBe(refreshed);
+
+    await db.prepare('UPDATE workspaces SET invite_refreshed_at=? WHERE id=?').run(new Date(Date.now() - 61_000).toISOString(), workspace.id);
+    const afterBoundary = await request(app).post(`/api/workspaces/${workspace.id}/invite/regenerate`).set(auth(user.token)).expect(200);
+    expect(afterBoundary.body.inviteCode).not.toBe(refreshed);
+  });
+
   it('rejects invalid registration email and password values at the API boundary', async () => {
     db = await openTestDb();
     const app = createApp(db);
     await request(app).post('/api/auth/register').send({name: 'Short', email: 'short@example.test', password: 'short'}).expect(400);
     await request(app).post('/api/auth/register').send({name: 'Invalid', email: 'not-an-email', password: 'password123'}).expect(400);
+    await request(app).post('/api/auth/register').send({name: '   ', email: 'blank@example.test', password: 'password123'}).expect(400);
+    await request(app).post('/api/auth/register').send({name: 'Duplicate', email: 'duplicate@example.test', password: 'password123'}).expect(201);
+    await request(app).post('/api/auth/register').send({name: 'Duplicate again', email: 'duplicate@example.test', password: 'password123'}).expect(409);
   });
 
   it('exchanges an install token once and enforces Manager invariants', async () => {
@@ -130,6 +219,9 @@ describe('approved server workflows', () => {
     const workspace = (await request(app).post('/api/workspaces').set(auth(manager.token)).send({name: 'Managed'}).expect(201)).body;
     expect((await request(app).get('/api/workspaces').set(auth(manager.token))).body[0].role).toBe('Manager');
     await request(app).post('/api/workspaces/join').set(auth(memberUser.token)).send({inviteCode: workspace.inviteCode}).expect(200);
+    const visibleMembers = (await request(app).get(`/api/workspaces/${workspace.id}/members`).set(auth(memberUser.token)).expect(200)).body;
+    expect(visibleMembers.map((member: any) => member.name)).toEqual(expect.arrayContaining(['manager', 'member']));
+    await request(app).get(`/api/workspaces/${workspace.id}/repositories`).set(auth(memberUser.token)).expect(200);
 
     const installation = (await request(app).post('/api/agents/installations').set(auth(memberUser.token)).send({workspaceId: workspace.id}).expect(201)).body;
     expect(installation).not.toHaveProperty('code');
@@ -202,6 +294,8 @@ else if(command==='status'){console.log(JSON.stringify(JSON.parse(fs.readFileSyn
     const workspace = (await request(app).post('/api/workspaces').set(auth(user.token)).send({name: 'Mini'}).expect(201)).body;
     const installation = (await request(app).post('/api/agents/installations').set(auth(user.token)).send({workspaceId: workspace.id}).expect(201)).body;
     const agent = (await request(app).post('/api/agents/install/exchange').send({installToken: installToken(installation), machineName: 'ada-box'}).expect(201)).body;
+    const detectedDevices = (await request(app).get(`/api/workspaces/${workspace.id}/agents`).set(auth(user.token)).expect(200)).body;
+    expect(detectedDevices).toContainEqual(expect.objectContaining({id: agent.agentId, user_id: user.user.id, machine_name: 'ada-box'}));
     const repo = (await request(app).post('/api/repositories/register').set(auth(agent.agentToken)).send({workspaceId: String(workspace.id), name: 'Project', remoteUrl: 'file:///tmp/remote.git', localKey: '/clone', branch: 'main', headSha: 'abc', remoteHeadSha: 'abc'}).expect(200)).body;
 
     const refresh = (await request(app).post(`/api/workspaces/${workspace.id}/refresh`).set(auth(user.token)).expect(201)).body;
@@ -229,7 +323,7 @@ else if(command==='status'){console.log(JSON.stringify(JSON.parse(fs.readFileSyn
     await request(app).post(`/api/workspaces/${workspace.id}/agents/${agent.agentId}/revoke`).set(auth(user.token)).expect(200);
     await request(app).post('/api/agents/heartbeat').set(auth(agent.agentToken)).expect(401);
     await request(app).delete(`/api/workspaces/${workspace.id}`).set(auth(user.token)).expect(204);
-    expect((await request(app).get('/api/workspaces').set(auth(user.token)).expect(200)).body).toEqual([]);
+    expect((await request(app).get('/api/workspaces').set(auth(user.token)).expect(200)).body).toMatchObject([{name: "Ada's workspace", role: 'Manager'}]);
   });
 
   it('allows only one concurrent push finalizer to publish the winning outcome', async () => {

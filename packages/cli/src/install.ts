@@ -9,7 +9,7 @@ export function installStartup(platform = process.platform, executable = process
   const service = path.join(directory, 'tracemini.service');
   const escape = (value: string) => value.replace(/([\\"])/g, '\\$1');
   fs.mkdirSync(directory, {recursive: true, mode: 0o700});
-  fs.writeFileSync(service, `[Unit]\nDescription=TraceMini local Git agent\nAfter=network-online.target\n\n[Service]\nType=simple\nEnvironment=PATH=%h/.local/bin:%h/bin:/usr/local/bin:/usr/bin:/bin\nExecStart="${escape(process.execPath)}" "${escape(executable)}" start\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n`, {mode: 0o600});
+  fs.writeFileSync(service, `[Unit]\nDescription=TraceMini local Git device\nAfter=network-online.target\n\n[Service]\nType=simple\nEnvironment=PATH=%h/.local/bin:%h/bin:/usr/local/bin:/usr/bin:/bin\nExecStart="${escape(process.execPath)}" "${escape(executable)}" start\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n`, {mode: 0o600});
   execFileSync('systemctl', ['--user', 'daemon-reload'], {stdio: 'ignore'});
   execFileSync('systemctl', ['--user', 'enable', '--now', 'tracemini.service'], {stdio: 'ignore'});
   return service;
