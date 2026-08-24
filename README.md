@@ -11,7 +11,7 @@ TraceMini is a small self-hosted activity dashboard and local Git agent for 4–
 - Optional for report generation: an authenticated local `codex` or `hermes` executable
 
 ```bash
-npm install
+npm install --workspaces --include-workspace-root
 npm test
 npm run typecheck
 npm run build
@@ -20,6 +20,10 @@ npm start -w @tracemini/server
 ```
 
 The built Express process serves the API and `apps/web/dist` at `http://localhost:3000`. Set `DATABASE_URL` to the Supabase PostgreSQL Session Pooler connection string; the backend connects directly with `pg` and applies versioned migrations under a PostgreSQL advisory lock at startup. Connections using `sslmode=require` are upgraded to certificate and hostname verification with the bundled Supabase Root 2021 CA (or the certificate at `PGSSLROOTCERT`). Keep the Supabase Data API disabled because clients access data only through this backend. `PORT` defaults to `3000`. Tests and acceptance use isolated in-memory PostgreSQL emulation; the release gate additionally runs a temporary, cleaned-up workflow against the hosted PostgreSQL database. No persistent SQLite volume is required.
+
+### Password recovery
+
+Password reset links expire after 30 minutes, work once, and invalidate all existing sessions when used. Request responses are intentionally identical for known and unknown email addresses. For local development, reset messages are written as owner-only JSON files under `data/password-reset-outbox`; `TRACEMINI_RESET_OUTBOX` overrides that path. For hosted email delivery, configure both `RESEND_API_KEY` and `TRACEMINI_RESET_FROM`, and set `TRACEMINI_PUBLIC_ORIGIN` to the trusted browser-visible HTTPS origin. Vercel deployments must use email delivery because their local filesystem is not durable.
 
 ## Workspace and CLI onboarding
 
@@ -36,7 +40,7 @@ journalctl --user -u tracemini.service -n 50 --no-pager
 tracemini watch /absolute/path/to/a/root
 ```
 
-Add `export PATH="$HOME/.local/bin:$PATH"` to the appropriate shell startup file if `~/.local/bin` is not already on `PATH`. A newly started service can have no journal output; `-- No entries --` is normal immediately after installation. Agent credentials, watched roots, clone state, and the retry queue are stored with user-only permissions under `~/.tracemini`; `TRACEMINI_HOME` overrides the state directory.
+Add `export PATH="$HOME/.local/bin:$PATH"` to the appropriate shell startup file if `~/.local/bin` is not already on `PATH`. A newly started service can have no journal output; `-- No entries --` is normal immediately after installation. Agent credentials, watched roots, clone state, and the retry queue are stored with user-only permissions under `~/.tracemini`; `TRACEMINI_HOME` overrides the state directory. Configuration writes are atomic, and the background service reloads roots and clones written by interactive `tracemini watch` commands instead of overwriting them with an older in-memory snapshot.
 
 Each installed agent is bound to one selected workspace. Repository, refresh, push, activity, and report operations are rejected outside that binding. Removing a member revokes that member's agents for the workspace and fails their unfinished report jobs.
 
@@ -66,13 +70,13 @@ The agent persists each clone’s branch, local HEAD, and upstream-tracking SHA.
 
 Dashboard cards and daily trends aggregate **commit events only** for commits, files changed, insertions, and deletions; stage events are deliberately excluded. User and repository drill-down pages have stable URLs and the same date filters/stats API. Repository archiving hides it from the active dashboard but preserves clones and all activity.
 
-Reports have URL-addressable history/detail pages. Stored Markdown is rendered with `react-markdown` plus `remark-gfm`, including GFM tables and task lists. The polling local agent claims personal jobs, adds bounded `git show --stat` evidence for relevant local commits, and invokes the selected local Codex/Hermes executable. Tests complete reports with deterministic Markdown and do not spend model invocations.
+Reports have URL-addressable history/detail pages and can be downloaded as portable UTF-8 Markdown files. Stored Markdown is rendered with `react-markdown` plus `remark-gfm`, including GFM tables and task lists. The polling local agent claims personal jobs, adds bounded `git show --stat` evidence for relevant local commits, and invokes the selected local Codex/Hermes executable. Tests complete reports with deterministic Markdown and do not spend model invocations.
 
 ## Exact limitations and exclusions
 
 - No provider APIs/webhooks, source upload, queues, Redis, message broker, additional service, deployment automation, or browser automation.
 - No agent crash recovery or concurrent-agent coordination for one shared `TRACEMINI_HOME`; retry storage is a single local JSON file.
-- No team reports, account management extras, password reset, OAuth, or broad AI/report-output testing.
+- No team reports, OAuth, or broad AI/report-output testing. Account management is intentionally limited to registration, login/logout, and password recovery.
 - Install commands contain bearer-like install tokens internally. They expire after 10 minutes and are single-use, but commands can remain in shell history; protect terminal history and use HTTPS outside localhost.
 - The server must be deployed with built CLI artifacts. The installer is not a signed OS package and does not elevate privileges.
 - Linux installation depends on a working systemd user session. Windows and macOS startup installation are deferred.

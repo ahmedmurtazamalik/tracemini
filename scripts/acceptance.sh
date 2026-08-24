@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset TRACEMINI_HOME
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 TMP=$(mktemp -d)
@@ -60,6 +61,9 @@ ITOKEN_B=$(printf '%s' "$INSTALL_B" | node -e "let s='';process.stdin.on('data',
 HOME="$TMP/home-a" PATH="$TMP/bin:$PATH" sh -c "$INSTALL_COMMAND_A" >/dev/null
 test -x "$TMP/home-a/.local/bin/tracemini"
 test -f "$TMP/home-a/.config/systemd/user/tracemini.service"
+test -f "$TMP/home-a/.tracemini/config.json"
+INSTALLED_WID=$(node -e "console.log(require(process.argv[1]).workspaceId || '')" "$TMP/home-a/.tracemini/config.json")
+if [ "$INSTALLED_WID" != "$WID" ]; then echo "installed workspace mismatch: expected $WID, got ${INSTALLED_WID:-missing}" >&2; exit 1; fi
 HOME="$TMP/home-a" PATH="$TMP/bin:$PATH" "$TMP/home-a/.local/bin/tracemini" status >/dev/null
 AGENT_B=$(api -X POST "$BASE/api/agents/install/exchange" -d "{\"installToken\":\"$ITOKEN_B\",\"machineName\":\"bob-box\"}")
 node -e "require('fs').writeFileSync(process.argv[1],JSON.stringify({serverUrl:process.argv[2],agentToken:JSON.parse(process.argv[3]).agentToken,agentId:JSON.parse(process.argv[3]).agentId,workspaceId:Number(process.argv[4]),watchedPaths:[],clones:[],reporter:'codex',pollMs:2000}))" "$TMP/home-b/config.json" "$BASE" "$AGENT_B" "$WID"
