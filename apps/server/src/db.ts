@@ -111,7 +111,7 @@ export function postgresPoolConfig(connectionString: string): PoolConfig {
   return {
     connectionString: normalizePostgresConnectionString(connectionString),
     ssl,
-    max: 3,
+    max: process.env.VERCEL ? 1 : 3,
     connectionTimeoutMillis: 10_000,
     idleTimeoutMillis: 30_000,
     options: '-c timezone=UTC',

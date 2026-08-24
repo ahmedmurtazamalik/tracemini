@@ -20,6 +20,14 @@ describe('PostgreSQL database', () => {
     expect(normalized.searchParams.has('sslmode')).toBe(false);
     expect(config.ssl).toMatchObject({rejectUnauthorized: true});
     expect(config.max).toBe(3);
+    const previousVercel = process.env.VERCEL;
+    process.env.VERCEL = '1';
+    try {
+      expect(postgresPoolConfig(connectionString).max).toBe(1);
+    } finally {
+      if (previousVercel === undefined) delete process.env.VERCEL;
+      else process.env.VERCEL = previousVercel;
+    }
     expect((config.ssl as {ca: string}).ca).toContain('BEGIN CERTIFICATE');
   });
 
