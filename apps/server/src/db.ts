@@ -71,6 +71,19 @@ ALTER TABLE reports
   ALTER COLUMN created_at TYPE TIMESTAMPTZ USING created_at::TIMESTAMPTZ;
 `;
 
+const passwordResetMigrationSql = `
+ALTER TABLE users ADD COLUMN IF NOT EXISTS auth_version INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS auth_version INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+  token_hash TEXT PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  expires_at TIMESTAMPTZ NOT NULL,
+  used_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_password_reset_user ON password_reset_tokens(user_id,expires_at);
+`;
+
 export function normalizePostgresConnectionString(connectionString: string) {
   const url = new URL(connectionString);
   url.searchParams.delete('sslmode');
@@ -172,6 +185,7 @@ export class DB {
       const migrations = [
         {version: 1, name: 'initial PostgreSQL schema', sql: schemaSql},
         ...(compatibilityMigrations ? [{version: 2, name: 'PostgreSQL native temporal and JSON types', sql: nativeTypesMigrationSql}] : []),
+        {version: 3, name: 'password recovery tokens', sql: passwordResetMigrationSql},
       ];
       for (const migration of migrations) {
         const checksum = crypto.createHash('sha256').update(migration.sql).digest('hex');

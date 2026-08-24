@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {api} from './api.js';
-import {type Config, loadQueue, saveConfig, saveQueue, eventKey} from './config.js';
+import {type Config, loadConfig, loadQueue, saveConfig, saveQueue, eventKey} from './config.js';
 import {confirmPush, discover, git, inspectRepo, installHooks, observeRepositoryState, readRepositoryState, stagedData} from './git.js';
 import {CodexRunner, HermesRunner} from './runner.js';
 
@@ -31,7 +31,7 @@ export async function scanWatchedRoots(config: Config) {
       found++;
     }
   }
-  saveConfig(config);
+  saveConfig(config, {preserveCurrentScalars: true});
   return found;
 }
 
@@ -128,7 +128,7 @@ export async function tick(config: Config, indexState: Map<string, {mtime: numbe
       indexState.set(clone.path, state);
     } catch {}
   }
-  saveConfig(config);
+  saveConfig(config, {preserveCurrentScalars: true});
   const jobs = await api<any[]>(config, '/api/agents/jobs');
   if (jobs[0]) await processJob(config, jobs[0]);
 }
@@ -136,6 +136,9 @@ export async function tick(config: Config, indexState: Map<string, {mtime: numbe
 export async function runAgent(config: Config, once = false) {
   const states = new Map<string, {mtime: number; timer?: NodeJS.Timeout}>();
   do {
+    // Pick up roots/clones written by interactive CLI commands while this
+    // long-running process is alive instead of retaining its startup snapshot.
+    config = loadConfig();
     try { await tick(config, states); } catch (error) { console.error(new Date().toISOString(), String(error)); }
     if (once) return;
     await new Promise(resolve => setTimeout(resolve, config.pollMs));

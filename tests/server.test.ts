@@ -114,6 +114,13 @@ class ManagerPreflightGateDb {
 }
 
 describe('approved server workflows', () => {
+  it('rejects invalid registration email and password values at the API boundary', async () => {
+    db = await openTestDb();
+    const app = createApp(db);
+    await request(app).post('/api/auth/register').send({name: 'Short', email: 'short@example.test', password: 'short'}).expect(400);
+    await request(app).post('/api/auth/register').send({name: 'Invalid', email: 'not-an-email', password: 'password123'}).expect(400);
+  });
+
   it('exchanges an install token once and enforces Manager invariants', async () => {
     db = await openTestDb();
     const app = createApp(db);
