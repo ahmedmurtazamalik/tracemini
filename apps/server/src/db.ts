@@ -92,6 +92,13 @@ const removePasswordRecoveryMigrationSql = `
 DROP TABLE IF EXISTS password_reset_tokens;
 `;
 
+const reportEvidenceMigrationSql = `
+ALTER TABLE report_jobs ADD COLUMN IF NOT EXISTS timezone TEXT NOT NULL DEFAULT 'Asia/Karachi';
+ALTER TABLE report_jobs ADD COLUMN IF NOT EXISTS include_diff BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE reports ADD COLUMN IF NOT EXISTS timezone TEXT NOT NULL DEFAULT 'Asia/Karachi';
+ALTER TABLE reports ADD COLUMN IF NOT EXISTS include_diff BOOLEAN NOT NULL DEFAULT FALSE;
+`;
+
 const reportRegenerationMigrationSql = `
 ALTER TABLE report_jobs ADD COLUMN IF NOT EXISTS custom_prompt TEXT;
 ALTER TABLE report_jobs ADD COLUMN IF NOT EXISTS target_report_id INTEGER;
@@ -214,6 +221,7 @@ export class DB {
         {version: 3, name: 'password recovery tokens', sql: passwordResetMigrationSql},
         {version: 4, name: 'workspace invite refresh cooldown', sql: inviteRefreshMigrationSql},
         {version: 5, name: 'remove password recovery', sql: removePasswordRecoveryMigrationSql},
+        {version: 6, name: 'report timezone and detailed evidence consent', sql: reportEvidenceMigrationSql},
         {version: 9, name: 'prompted report regeneration', sql: reportRegenerationMigrationSql},
         {version: 11, name: 'report naming', sql: reportNamingMigrationSql},
         {version: 12, name: 'hide removed revoked devices', sql: removedDevicesMigrationSql},

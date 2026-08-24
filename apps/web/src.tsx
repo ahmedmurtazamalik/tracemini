@@ -19,6 +19,7 @@ import {
 import { downloadReport } from "./report-download.js";
 import { checkCliConnection, deviceManagementAction } from "./device-connection.js";
 import { reportJobProgress, type ReportJob } from "./report-progress.js";
+import { TIMEZONE_OPTIONS, formatInTimezone, normalizeTimezone, todayInTimezone } from "./timezone.js";
 import "./style.css";
 
 const request = async (path: string, init: RequestInit = {}) => {
@@ -46,7 +47,7 @@ const navigate = (path: string) => {
   history.pushState({}, "", path);
   dispatchEvent(new PopStateEvent("popstate"));
 };
-const today = () => new Date().toISOString().slice(0, 10);
+const initialTimezone = () => normalizeTimezone(localStorage.getItem("timezone"));
 
 function Brand() {
   return (
@@ -442,9 +443,11 @@ function Trend({ daily }: { daily: any[] }) {
 function Activity({
   events,
   workspaceId,
+  timezone,
 }: {
   events: any[];
   workspaceId: number;
+  timezone: string;
 }) {
   return (
     <section className="card activity-card">
@@ -489,7 +492,7 @@ function Activity({
                 {event.type === "push" &&
                   ` · ${event.data.confirmation || "unconfirmed"}`}
               </p>
-              <time>{new Date(event.occurred_at).toLocaleString()}</time>
+              <time>{formatInTimezone(event.occurred_at, timezone)}</time>
             </div>
           </article>
         ))
@@ -912,6 +915,7 @@ function Dashboard({
   agents,
   reload,
   error,
+  timezone,
 }: any) {
   const [refreshPending, setRefreshPending] = useState(false);
   const [actionError, setActionError] = useState("");
@@ -965,7 +969,7 @@ function Dashboard({
       </div>
       <Trend daily={stats.daily} />
       <div className="dashboard-grid">
-        <Activity events={events} workspaceId={workspaceId} />
+        <Activity events={events} workspaceId={workspaceId} timezone={timezone} />
         <aside className="card insight-card">
           <div className="section-heading">
             <div>
@@ -1176,11 +1180,12 @@ function ReportDetail({ report, workspaceId, currentUserId, reload }: any) {
   );
 }
 
-function Reports({ workspaceId, dates, setDates, reports, reload, error }: any) {
+function Reports({ workspaceId, dates, setDates, reports, reload, error, timezone }: any) {
   const [reporter, setReporter] = useState("hermes");
   const [name, setName] = useState("");
   const [pending, setPending] = useState(false);
   const [job, setJob] = useState<ReportJob>();
+  const [includeDiff, setIncludeDiff] = useState(false);
   const [actionError, setActionError] = useState("");
   const progress = job ? reportJobProgress(job) : undefined;
   useEffect(() => {
@@ -1273,6 +1278,8 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error }: any) 
                     endDate: dates.to,
                     reporter,
                     name,
+                    timezone,
+                    includeDiff,
                   }),
                 });
                 setName("");
@@ -1292,7 +1299,13 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error }: any) 
             {progress.active ? <BusyIndicator label={progress.label} /> : progress.label}
           </div>
         )}
-
+        <label className="diff-consent">
+          <input type="checkbox" checked={includeDiff} onChange={(event) => setIncludeDiff(event.target.checked)} />
+          <span>
+            <strong>Analyze code changes in detail</strong>
+            <small>Includes bounded Git diff excerpts so the report can explain exact features and behavior. Selected source excerpts are sent to the configured AI generator.</small>
+          </span>
+        </label>
         {actionError && <div className="alert error" role="alert">{actionError}</div>}
       </section>
       <section className="card reports-list-card">
@@ -1334,7 +1347,11 @@ function App() {
   const [stats, setStats] = useState<any>({ totals: {}, daily: [] });
   const [report, setReport] = useState<any>();
   const [error, setError] = useState("");
-  const [dates, setDates] = useState({ from: today(), to: today() });
+  const [timezone, setTimezone] = useState(initialTimezone);
+  const [dates, setDates] = useState(() => {
+    const date = todayInTimezone(initialTimezone());
+    return {from: date, to: date};
+  });
   const [dialog, setDialog] = useState<"create" | "join">();
   const [logoutPending, setLogoutPending] = useState(false);
   const [logoutError, setLogoutError] = useState("");
@@ -1398,8 +1415,8 @@ function App() {
         /^\/workspaces\/\d+\/(users|repositories)\/(\d+)/,
       );
       const eventPath = match
-        ? `/${match[1]}/${match[2]}/activity?workspaceId=${selectedWorkspace}&from=${dates.from}&to=${dates.to}`
-        : `/workspaces/${selectedWorkspace}/activity?from=${dates.from}&to=${dates.to}`;
+        ? `/${match[1]}/${match[2]}/activity?workspaceId=${selectedWorkspace}&from=${dates.from}&to=${dates.to}&timezone=${encodeURIComponent(timezone)}`
+        : `/workspaces/${selectedWorkspace}/activity?from=${dates.from}&to=${dates.to}&timezone=${encodeURIComponent(timezone)}`;
       const statsFilter = match
         ? `&${match[1] === "users" ? "userId" : "repositoryId"}=${match[2]}`
         : "";
@@ -1423,7 +1440,7 @@ function App() {
         request(`/workspaces/${selectedWorkspace}/agents`),
         request(`/workspaces/${selectedWorkspace}/refresh`),
         request(
-          `/workspaces/${selectedWorkspace}/stats?from=${dates.from}&to=${dates.to}${statsFilter}`,
+          `/workspaces/${selectedWorkspace}/stats?from=${dates.from}&to=${dates.to}&timezone=${encodeURIComponent(timezone)}${statsFilter}`,
         ),
         routeContext.reportId
           ? request(`/reports/${routeContext.reportId}`)
@@ -1466,7 +1483,7 @@ function App() {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [workspaceId, route, dates.from, dates.to]);
+  }, [workspaceId, route, dates.from, dates.to, timezone]);
   if (!token) return <Auth onLogin={setToken} route={route} />;
   const view = getRouteView(route, workspaceId);
   const openWorkspace = async (preferredId?: number) => {
@@ -1508,6 +1525,19 @@ function App() {
                 {item.name}
               </option>
             ))}
+          </select>
+        </label>
+        <label className="workspace-select">
+          Timezone
+          <select
+            value={timezone}
+            onChange={(event) => {
+              const selected = normalizeTimezone(event.target.value);
+              localStorage.setItem("timezone", selected);
+              setTimezone(selected);
+            }}
+          >
+            {TIMEZONE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
           </select>
         </label>
         <nav aria-label="Primary navigation">
@@ -1605,6 +1635,7 @@ function App() {
               reports={reports}
               reload={loadWorkspace}
               error={error}
+              timezone={timezone}
             />
           ) : view === "report" ? (
             reportMatchesRoute(report, route) ? (
@@ -1632,6 +1663,7 @@ function App() {
               agents={agents}
               reload={loadWorkspace}
               error={error}
+              timezone={timezone}
             />
           )}
         </main>
