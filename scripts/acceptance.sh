@@ -7,14 +7,20 @@ PORT_NUM=${TRACEMINI_ACCEPTANCE_PORT:-43117}
 BASE="http://127.0.0.1:$PORT_NUM"
 SERVER_PID=''
 cleanup() {
+  local status=$?
+  if [ "$status" -ne 0 ] && [ -f "$TMP/server.log" ]; then
+    printf '%s\n' '--- TraceMini acceptance server log ---' >&2
+    node -e "process.stderr.write(require('fs').readFileSync(process.argv[1],'utf8'))" "$TMP/server.log"
+  fi
   if [ -n "$SERVER_PID" ]; then kill "$SERVER_PID" 2>/dev/null || true; wait "$SERVER_PID" 2>/dev/null || true; fi
   rm -rf "$TMP"
+  return "$status"
 }
 trap cleanup EXIT
 json() { node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s)[process.argv[1]]))" "$1"; }
 api() { curl -fsS -H 'content-type: application/json' "$@"; }
 
-TRACEMINI_DB="$TMP/acceptance.db" PORT="$PORT_NUM" node "$ROOT/apps/server/dist/index.js" >"$TMP/server.log" 2>&1 &
+NODE_ENV=test DATABASE_URL='pg-mem://isolated' PORT="$PORT_NUM" node "$ROOT/apps/server/dist/index.js" >"$TMP/server.log" 2>&1 &
 SERVER_PID=$!
 for _ in $(seq 1 50); do curl -fsS "$BASE/api/health" >/dev/null 2>&1 && break; sleep .1; done
 
@@ -42,9 +48,10 @@ done
 
 CLI=(node "$ROOT/packages/cli/dist/index.js")
 mkdir -p "$TMP/bin"
+printf '#!/bin/sh\nif [ "${1:-}" = -p ]; then printf "22\\n"; else exec "%s" "$@"; fi\n' "$(command -v node)" >"$TMP/bin/node"
 printf '#!/bin/sh\nexec node "%s" "$@"\n' "$ROOT/packages/cli/dist/index.js" >"$TMP/bin/tracemini"
 printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "$HOME/systemctl.log"\n' >"$TMP/bin/systemctl"
-chmod +x "$TMP/bin/tracemini" "$TMP/bin/systemctl"
+chmod +x "$TMP/bin/node" "$TMP/bin/tracemini" "$TMP/bin/systemctl"
 INSTALL_A=$(api -X POST "$BASE/api/agents/installations" -H "authorization: Bearer $AT" -d "{\"workspaceId\":$WID}")
 INSTALL_B=$(api -X POST "$BASE/api/agents/installations" -H "authorization: Bearer $BT" -d "{\"workspaceId\":$WID}")
 INSTALL_COMMAND_A=$(printf '%s' "$INSTALL_A" | json installCommand)

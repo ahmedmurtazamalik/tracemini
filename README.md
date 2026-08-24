@@ -1,6 +1,6 @@
 # TraceMini
 
-TraceMini is a small self-hosted activity dashboard and local Git agent for 4–6 developers. Express serves the API and built React/Vite app, SQLite stores metadata and Markdown reports, and the local TypeScript CLI observes explicitly watched Git roots. TraceMini does not store source code or call Git-hosting provider APIs.
+TraceMini is a small self-hosted activity dashboard and local Git agent for 4–6 developers. Express serves the API and built React/Vite app, Supabase-hosted PostgreSQL stores metadata and Markdown reports, and the local TypeScript CLI observes explicitly watched Git roots. TraceMini does not store source code or call Git-hosting provider APIs.
 
 ## Requirements and verification
 
@@ -19,7 +19,7 @@ npm run acceptance
 npm start -w @tracemini/server
 ```
 
-The built Express process serves the API and `apps/web/dist` at `http://localhost:3000`. Configuration defaults are `PORT=3000` and `TRACEMINI_DB=./data/tracemini.db`.
+The built Express process serves the API and `apps/web/dist` at `http://localhost:3000`. Set `DATABASE_URL` to the Supabase PostgreSQL Session Pooler connection string; the backend connects directly with `pg` and applies versioned migrations under a PostgreSQL advisory lock at startup. Connections using `sslmode=require` are upgraded to certificate and hostname verification with the bundled Supabase Root 2021 CA (or the certificate at `PGSSLROOTCERT`). Keep the Supabase Data API disabled because clients access data only through this backend. `PORT` defaults to `3000`. Tests and acceptance use isolated in-memory PostgreSQL emulation; the release gate additionally runs a temporary, cleaned-up workflow against the hosted PostgreSQL database. No persistent SQLite volume is required.
 
 ## Workspace and CLI onboarding
 
@@ -46,7 +46,7 @@ The dashboard shows agent online/offline state. “Online” means a heartbeat w
 
 ## Discovery and refresh
 
-`watch` recursively discovers repositories only below an explicit root, requires an `origin`, registers remote-normalized repositories/clones, and installs hooks. **Refresh repositories** creates one SQLite-backed request for each non-revoked agent in the workspace. Each polling agent rescans its own stored watched roots, registers newly found clones and hooks, and completes its request with a repository count or error. There is no queue service or extra worker process; requests for offline agents remain queued.
+`watch` recursively discovers repositories only below an explicit root, requires an `origin`, registers remote-normalized repositories/clones, and installs hooks. **Refresh repositories** creates one PostgreSQL-backed request for each non-revoked agent in the workspace. Each polling agent rescans its own stored watched roots, registers newly found clones and hooks, and completes its request with a repository count or error. There is no queue service or extra worker process; requests for offline agents remain queued.
 
 ## Git activity and push confirmation
 

@@ -17,7 +17,7 @@ TraceMini Web
     ↓
 TraceMini Backend
     ↓
-SQLite
+Supabase-hosted PostgreSQL via `DATABASE_URL` (direct backend `pg` access; Data API disabled)
     ↑
 TraceMini CLI/Agent
     ↓
@@ -72,7 +72,7 @@ Choose whichever keeps development easiest.
 - [ ] Set up backend
 - [ ] Set up CLI package
 - [ ] Set up shared types
-- [ ] Set up SQLite
+- [x] Set up the versioned PostgreSQL schema, advisory migration lock, and isolated pg-mem tests (no SQLite data migration or persistent volume)
 - [ ] Add environment configuration
 - [ ] Add basic development scripts
 - [ ] Write initial README
@@ -1051,7 +1051,7 @@ It should explicitly not require:
 If implementation time is limited, follow this exact sequence:
 
 ```text
-1. Backend + SQLite
+1. Backend + PostgreSQL
         ↓
 2. Authentication
         ↓

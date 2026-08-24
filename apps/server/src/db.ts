@@ -1,93 +1,201 @@
-import Database from 'better-sqlite3';
+import {Pool, type PoolClient, type PoolConfig, type QueryResult} from 'pg';
+import {AsyncLocalStorage} from 'node:async_hooks';
 import fs from 'node:fs';
 import path from 'node:path';
+import {fileURLToPath} from 'node:url';
+import crypto from 'node:crypto';
 
-const migrations = [
-  `
-  CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE COLLATE NOCASE, password_hash TEXT NOT NULL, created_at TEXT NOT NULL);
-  CREATE TABLE sessions(token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, created_at TEXT NOT NULL);
-  CREATE TABLE workspaces(id INTEGER PRIMARY KEY, name TEXT NOT NULL, owner_id INTEGER NOT NULL REFERENCES users(id), invite_code TEXT UNIQUE, created_at TEXT NOT NULL);
-  CREATE TABLE workspace_members(workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, role TEXT NOT NULL, PRIMARY KEY(workspace_id,user_id));
-  CREATE TABLE agents(id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), machine_name TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, last_seen TEXT, created_at TEXT NOT NULL);
-  CREATE TABLE repositories(id INTEGER PRIMARY KEY, workspace_id INTEGER NOT NULL REFERENCES workspaces(id), name TEXT NOT NULL, remote_url TEXT NOT NULL, normalized_remote TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(workspace_id,normalized_remote));
-  CREATE TABLE local_clones(id INTEGER PRIMARY KEY, agent_id INTEGER NOT NULL REFERENCES agents(id), repository_id INTEGER NOT NULL REFERENCES repositories(id), local_key TEXT NOT NULL, branch TEXT, last_seen TEXT NOT NULL, UNIQUE(agent_id,local_key));
-  CREATE TABLE activity_events(id INTEGER PRIMARY KEY, event_key TEXT NOT NULL UNIQUE, user_id INTEGER NOT NULL REFERENCES users(id), agent_id INTEGER NOT NULL REFERENCES agents(id), repository_id INTEGER NOT NULL REFERENCES repositories(id), type TEXT NOT NULL, occurred_at TEXT NOT NULL, data TEXT NOT NULL, created_at TEXT NOT NULL);
-  CREATE INDEX activity_scope ON activity_events(repository_id,user_id,occurred_at);
-  CREATE TABLE report_jobs(id INTEGER PRIMARY KEY, workspace_id INTEGER NOT NULL REFERENCES workspaces(id), user_id INTEGER NOT NULL REFERENCES users(id), reporter TEXT NOT NULL, start_date TEXT NOT NULL, end_date TEXT NOT NULL, status TEXT NOT NULL, agent_id INTEGER REFERENCES agents(id), error TEXT, created_at TEXT NOT NULL, claimed_at TEXT, completed_at TEXT);
-  CREATE TABLE reports(id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL UNIQUE REFERENCES report_jobs(id), workspace_id INTEGER NOT NULL REFERENCES workspaces(id), user_id INTEGER NOT NULL REFERENCES users(id), start_date TEXT NOT NULL, end_date TEXT NOT NULL, markdown TEXT NOT NULL, created_at TEXT NOT NULL);
-  `,
-  `
-  UPDATE workspace_members SET role='Manager' WHERE lower(role) IN ('owner','manager');
-  UPDATE workspace_members SET role='Member' WHERE lower(role)='member';
-  ALTER TABLE agents ADD COLUMN revoked_at TEXT;
-  ALTER TABLE repositories ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;
-  ALTER TABLE local_clones ADD COLUMN head_sha TEXT;
-  ALTER TABLE local_clones ADD COLUMN remote_head_sha TEXT;
-  CREATE TABLE setup_codes(
-    code_hash TEXT PRIMARY KEY,
-    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-    expires_at TEXT NOT NULL,
-    used_at TEXT,
-    created_at TEXT NOT NULL
-  );
-  CREATE TABLE refresh_requests(
-    id INTEGER PRIMARY KEY,
-    workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-    requested_by INTEGER NOT NULL REFERENCES users(id),
-    agent_id INTEGER REFERENCES agents(id),
-    status TEXT NOT NULL,
-    repositories_found INTEGER,
-    error TEXT,
-    created_at TEXT NOT NULL,
-    claimed_at TEXT,
-    completed_at TEXT
-  );
-  CREATE TABLE pending_pushes(
-    id INTEGER PRIMARY KEY,
-    event_key TEXT NOT NULL UNIQUE,
-    user_id INTEGER NOT NULL REFERENCES users(id),
-    agent_id INTEGER NOT NULL REFERENCES agents(id),
-    repository_id INTEGER NOT NULL REFERENCES repositories(id),
-    remote_name TEXT NOT NULL,
-    remote_url TEXT NOT NULL,
-    ref TEXT NOT NULL,
-    expected_sha TEXT NOT NULL,
-    observed_sha TEXT,
-    status TEXT NOT NULL,
-    occurred_at TEXT NOT NULL,
-    completed_at TEXT
-  );
-  `,
-  `ALTER TABLE workspaces ADD COLUMN invite_enabled INTEGER NOT NULL DEFAULT 1;`,
-  `
-  ALTER TABLE pending_pushes ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;
-  ALTER TABLE pending_pushes ADD COLUMN next_check_at TEXT;
-  `,
-  `
-  ALTER TABLE agents ADD COLUMN workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE;
-  UPDATE agents SET workspace_id=(SELECT wm.workspace_id FROM workspace_members wm WHERE wm.user_id=agents.user_id ORDER BY wm.workspace_id LIMIT 1) WHERE workspace_id IS NULL;
-  CREATE INDEX idx_agents_workspace ON agents(workspace_id);
-  `,
-];
+const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
+const bundledSupabaseCa = path.resolve(moduleDirectory, '../certs/supabase-prod-ca-2021.crt');
 
-export type DB = Database.Database;
+export const schemaSql = `
+CREATE TABLE IF NOT EXISTS users(id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL);
+CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, created_at TIMESTAMPTZ NOT NULL);
+CREATE TABLE IF NOT EXISTS workspaces(id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, name TEXT NOT NULL, owner_id INTEGER NOT NULL REFERENCES users(id), invite_code TEXT UNIQUE, invite_enabled BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL);
+CREATE TABLE IF NOT EXISTS workspace_members(workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, role TEXT NOT NULL CHECK(role IN ('Manager','Member')), PRIMARY KEY(workspace_id,user_id));
+CREATE INDEX IF NOT EXISTS idx_workspace_members_user ON workspace_members(user_id,workspace_id);
+CREATE TABLE IF NOT EXISTS agents(id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE, machine_name TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, last_seen TIMESTAMPTZ, revoked_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_agents_workspace ON agents(workspace_id);
+CREATE TABLE IF NOT EXISTS repositories(id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, name TEXT NOT NULL, remote_url TEXT NOT NULL, normalized_remote TEXT NOT NULL, archived BOOLEAN NOT NULL DEFAULT FALSE, created_at TIMESTAMPTZ NOT NULL, UNIQUE(workspace_id,normalized_remote));
+CREATE INDEX IF NOT EXISTS idx_repositories_workspace ON repositories(workspace_id,id);
+CREATE TABLE IF NOT EXISTS local_clones(id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, agent_id INTEGER NOT NULL REFERENCES agents(id) ON DELETE CASCADE, repository_id INTEGER NOT NULL REFERENCES repositories(id) ON DELETE CASCADE, local_key TEXT NOT NULL, branch TEXT, last_seen TIMESTAMPTZ NOT NULL, head_sha TEXT, remote_head_sha TEXT, UNIQUE(agent_id,local_key));
+CREATE INDEX IF NOT EXISTS idx_local_clones_repository ON local_clones(repository_id);
+CREATE TABLE IF NOT EXISTS activity_events(id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, event_key TEXT NOT NULL UNIQUE, user_id INTEGER NOT NULL REFERENCES users(id), agent_id INTEGER NOT NULL REFERENCES agents(id) ON DELETE CASCADE, repository_id INTEGER NOT NULL REFERENCES repositories(id) ON DELETE CASCADE, type TEXT NOT NULL, occurred_at TIMESTAMPTZ NOT NULL, data JSONB NOT NULL, created_at TIMESTAMPTZ NOT NULL);
+CREATE INDEX IF NOT EXISTS activity_scope ON activity_events(repository_id,user_id,occurred_at);
+CREATE TABLE IF NOT EXISTS setup_codes(code_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, expires_at TIMESTAMPTZ NOT NULL, used_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_setup_codes_expiry ON setup_codes(expires_at) WHERE used_at IS NULL;
+CREATE TABLE IF NOT EXISTS refresh_requests(id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, requested_by INTEGER NOT NULL REFERENCES users(id), agent_id INTEGER REFERENCES agents(id) ON DELETE SET NULL, status TEXT NOT NULL CHECK(status IN ('queued','running','completed','error')), repositories_found INTEGER CHECK(repositories_found IS NULL OR repositories_found >= 0), error TEXT, created_at TIMESTAMPTZ NOT NULL, claimed_at TIMESTAMPTZ, completed_at TIMESTAMPTZ);
+CREATE INDEX IF NOT EXISTS idx_refresh_agent_status ON refresh_requests(agent_id,status,id);
+CREATE TABLE IF NOT EXISTS pending_pushes(id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, event_key TEXT NOT NULL UNIQUE, user_id INTEGER NOT NULL REFERENCES users(id), agent_id INTEGER NOT NULL REFERENCES agents(id) ON DELETE CASCADE, repository_id INTEGER NOT NULL REFERENCES repositories(id) ON DELETE CASCADE, remote_name TEXT NOT NULL, remote_url TEXT NOT NULL, ref TEXT NOT NULL, expected_sha TEXT NOT NULL, observed_sha TEXT, status TEXT NOT NULL CHECK(status IN ('pending','confirmed','unconfirmed')), occurred_at TIMESTAMPTZ NOT NULL, completed_at TIMESTAMPTZ, attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0), next_check_at TIMESTAMPTZ);
+CREATE INDEX IF NOT EXISTS idx_pending_push_agent_status ON pending_pushes(agent_id,status,next_check_at,id);
+CREATE TABLE IF NOT EXISTS report_jobs(id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, user_id INTEGER NOT NULL REFERENCES users(id), reporter TEXT NOT NULL CHECK(reporter IN ('codex','hermes')), start_date DATE NOT NULL, end_date DATE NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending','running','completed','failed')), agent_id INTEGER REFERENCES agents(id) ON DELETE SET NULL, error TEXT, created_at TIMESTAMPTZ NOT NULL, claimed_at TIMESTAMPTZ, completed_at TIMESTAMPTZ);
+CREATE INDEX IF NOT EXISTS idx_report_jobs_claim ON report_jobs(user_id,workspace_id,status,id);
+CREATE TABLE IF NOT EXISTS reports(id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, job_id INTEGER NOT NULL UNIQUE REFERENCES report_jobs(id) ON DELETE CASCADE, workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, user_id INTEGER NOT NULL REFERENCES users(id), start_date DATE NOT NULL, end_date DATE NOT NULL, markdown TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL);
+`;
 
-export function openDb(filename: string): DB {
-  if (filename !== ':memory:') {
-    fs.mkdirSync(path.dirname(path.resolve(filename)), {recursive: true});
+const nativeTypesMigrationSql = `
+ALTER TABLE users ALTER COLUMN created_at TYPE TIMESTAMPTZ USING created_at::TIMESTAMPTZ;
+ALTER TABLE sessions ALTER COLUMN created_at TYPE TIMESTAMPTZ USING created_at::TIMESTAMPTZ;
+ALTER TABLE workspaces ALTER COLUMN created_at TYPE TIMESTAMPTZ USING created_at::TIMESTAMPTZ;
+ALTER TABLE agents
+  ALTER COLUMN last_seen TYPE TIMESTAMPTZ USING last_seen::TIMESTAMPTZ,
+  ALTER COLUMN revoked_at TYPE TIMESTAMPTZ USING revoked_at::TIMESTAMPTZ,
+  ALTER COLUMN created_at TYPE TIMESTAMPTZ USING created_at::TIMESTAMPTZ;
+ALTER TABLE repositories ALTER COLUMN created_at TYPE TIMESTAMPTZ USING created_at::TIMESTAMPTZ;
+ALTER TABLE local_clones ALTER COLUMN last_seen TYPE TIMESTAMPTZ USING last_seen::TIMESTAMPTZ;
+ALTER TABLE activity_events
+  ALTER COLUMN occurred_at TYPE TIMESTAMPTZ USING occurred_at::TIMESTAMPTZ,
+  ALTER COLUMN data TYPE JSONB USING data::JSONB,
+  ALTER COLUMN created_at TYPE TIMESTAMPTZ USING created_at::TIMESTAMPTZ;
+ALTER TABLE setup_codes
+  ALTER COLUMN expires_at TYPE TIMESTAMPTZ USING expires_at::TIMESTAMPTZ,
+  ALTER COLUMN used_at TYPE TIMESTAMPTZ USING used_at::TIMESTAMPTZ,
+  ALTER COLUMN created_at TYPE TIMESTAMPTZ USING created_at::TIMESTAMPTZ;
+ALTER TABLE refresh_requests
+  ALTER COLUMN created_at TYPE TIMESTAMPTZ USING created_at::TIMESTAMPTZ,
+  ALTER COLUMN claimed_at TYPE TIMESTAMPTZ USING claimed_at::TIMESTAMPTZ,
+  ALTER COLUMN completed_at TYPE TIMESTAMPTZ USING completed_at::TIMESTAMPTZ;
+ALTER TABLE pending_pushes
+  ALTER COLUMN occurred_at TYPE TIMESTAMPTZ USING occurred_at::TIMESTAMPTZ,
+  ALTER COLUMN completed_at TYPE TIMESTAMPTZ USING completed_at::TIMESTAMPTZ,
+  ALTER COLUMN next_check_at TYPE TIMESTAMPTZ USING next_check_at::TIMESTAMPTZ;
+ALTER TABLE report_jobs
+  ALTER COLUMN start_date TYPE DATE USING start_date::DATE,
+  ALTER COLUMN end_date TYPE DATE USING end_date::DATE,
+  ALTER COLUMN created_at TYPE TIMESTAMPTZ USING created_at::TIMESTAMPTZ,
+  ALTER COLUMN claimed_at TYPE TIMESTAMPTZ USING claimed_at::TIMESTAMPTZ,
+  ALTER COLUMN completed_at TYPE TIMESTAMPTZ USING completed_at::TIMESTAMPTZ;
+ALTER TABLE reports
+  ALTER COLUMN start_date TYPE DATE USING start_date::DATE,
+  ALTER COLUMN end_date TYPE DATE USING end_date::DATE,
+  ALTER COLUMN created_at TYPE TIMESTAMPTZ USING created_at::TIMESTAMPTZ;
+`;
+
+export function normalizePostgresConnectionString(connectionString: string) {
+  const url = new URL(connectionString);
+  url.searchParams.delete('sslmode');
+  url.searchParams.delete('uselibpqcompat');
+  return url.toString();
+}
+
+export function postgresPoolConfig(connectionString: string): PoolConfig {
+  const url = new URL(connectionString);
+  const sslMode = url.searchParams.get('sslmode');
+  const isSupabase = url.hostname.endsWith('.supabase.com');
+  if (isSupabase && sslMode === 'disable') throw new Error('Supabase PostgreSQL connections must use TLS');
+  const caPath = process.env.PGSSLROOTCERT || (isSupabase ? bundledSupabaseCa : undefined);
+  const ssl = isSupabase || (sslMode && sslMode !== 'disable')
+    ? {rejectUnauthorized: true, ...(caPath ? {ca: fs.readFileSync(caPath, 'utf8')} : {})}
+    : undefined;
+  return {
+    connectionString: normalizePostgresConnectionString(connectionString),
+    ssl,
+    max: 10,
+    connectionTimeoutMillis: 10_000,
+    idleTimeoutMillis: 30_000,
+    options: '-c timezone=UTC',
+  };
+}
+
+type Queryable = {query(text: string, values?: any[]): Promise<QueryResult<any>>};
+
+// Converts the legacy SQLite-style parameter marker while preserving question
+// marks inside SQL literals, quoted identifiers, dollar-quoted bodies, and
+// comments. New queries should prefer native PostgreSQL $1…$n parameters.
+export function postgresSql(sql: string) {
+  let output = '';
+  let parameter = 0;
+  let index = 0;
+  let state: 'normal' | 'single' | 'double' | 'line' | 'block' | 'dollar' = 'normal';
+  let dollarTag = '';
+  while (index < sql.length) {
+    const char = sql[index];
+    const next = sql[index + 1];
+    if (state === 'normal') {
+      if (char === "'") state = 'single';
+      else if (char === '"') state = 'double';
+      else if (char === '-' && next === '-') { state = 'line'; output += '--'; index += 2; continue; }
+      else if (char === '/' && next === '*') { state = 'block'; output += '/*'; index += 2; continue; }
+      else if (char === '$') {
+        const match = sql.slice(index).match(/^\$[A-Za-z_][A-Za-z0-9_]*\$|^\$\$/);
+        if (match) { state = 'dollar'; dollarTag = match[0]; output += dollarTag; index += dollarTag.length; continue; }
+      } else if (char === '?') { output += `$${++parameter}`; index++; continue; }
+    } else if (state === 'single' && char === "'") {
+      if (next === "'") { output += char + next; index += 2; continue; }
+      state = 'normal';
+    } else if (state === 'double' && char === '"') {
+      if (next === '"') { output += char + next; index += 2; continue; }
+      state = 'normal';
+    } else if (state === 'line' && char === '\n') state = 'normal';
+    else if (state === 'block' && char === '*' && next === '/') { output += char + next; index += 2; state = 'normal'; continue; }
+    else if (state === 'dollar' && sql.startsWith(dollarTag, index)) {
+      output += dollarTag; index += dollarTag.length; state = 'normal'; continue;
+    }
+    output += char;
+    index++;
   }
-  const db = new Database(filename);
-  db.pragma('foreign_keys = ON');
-  db.pragma('journal_mode = WAL');
-  db.exec('CREATE TABLE IF NOT EXISTS migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)');
-  migrations.forEach((sql, index) => {
-    const version = index + 1;
-    if (db.prepare('SELECT 1 FROM migrations WHERE version=?').get(version)) return;
-    db.transaction(() => {
-      db.exec(sql);
-      db.prepare('INSERT INTO migrations VALUES(?,?)').run(version, new Date().toISOString());
-    })();
-  });
-  return db;
+  return output;
+}
+
+export class DB {
+  private readonly transactions = new AsyncLocalStorage<PoolClient>();
+  constructor(private readonly pool: Pool) {}
+  private executor(): Queryable { return this.transactions.getStore() ?? this.pool; }
+  query(text: string, values: any[] = []) { return this.executor().query(text, values); }
+  prepare(sql: string) {
+    const text = postgresSql(sql);
+    return {
+      get: async (...values: any[]) => (await this.executor().query(text, values)).rows[0],
+      all: async (...values: any[]) => (await this.executor().query(text, values)).rows,
+      run: async (...values: any[]) => {
+        const result = await this.executor().query(text, values);
+        return {changes: result.rowCount ?? 0, rows: result.rows, lastInsertRowid: result.rows[0]?.id};
+      },
+    };
+  }
+  async transaction<T>(fn: (db: DB) => Promise<T>): Promise<T> {
+    const client = await this.pool.connect();
+    try { await client.query('BEGIN'); const value = await this.transactions.run(client, () => fn(this)); await client.query('COMMIT'); return value; }
+    catch (error) { await client.query('ROLLBACK'); throw error; }
+    finally { client.release(); }
+  }
+  async migrate({advisoryLock = true, compatibilityMigrations = true}: {advisoryLock?: boolean; compatibilityMigrations?: boolean} = {}) {
+    await this.transaction(async () => {
+      if (advisoryLock) await this.query('SELECT pg_advisory_xact_lock($1)', [2026082401]);
+      await this.query(`CREATE TABLE IF NOT EXISTS schema_migrations(
+        version INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        checksum TEXT NOT NULL,
+        applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`);
+      const applied = new Map((await this.query('SELECT version,checksum FROM schema_migrations')).rows.map((row: any) => [row.version, row.checksum]));
+      const migrations = [
+        {version: 1, name: 'initial PostgreSQL schema', sql: schemaSql},
+        ...(compatibilityMigrations ? [{version: 2, name: 'PostgreSQL native temporal and JSON types', sql: nativeTypesMigrationSql}] : []),
+      ];
+      for (const migration of migrations) {
+        const checksum = crypto.createHash('sha256').update(migration.sql).digest('hex');
+        if (applied.has(migration.version)) {
+          if (applied.get(migration.version) !== checksum) throw new Error(`PostgreSQL migration ${migration.version} checksum mismatch`);
+          continue;
+        }
+        await this.query(migration.sql);
+        await this.query('INSERT INTO schema_migrations(version,name,checksum) VALUES($1,$2,$3)', [migration.version, migration.name, checksum]);
+      }
+    });
+  }
+  async close() { await this.pool.end(); }
+}
+
+export async function openPostgresDb(connectionString: string) {
+  const pool = new Pool(postgresPoolConfig(connectionString));
+  pool.on('error', (error) => console.error('PostgreSQL idle client error:', error.message));
+  const db = new DB(pool);
+  try {
+    await db.migrate();
+    return db;
+  } catch (error) {
+    await db.close();
+    throw error;
+  }
 }

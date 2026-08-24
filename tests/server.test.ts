@@ -5,18 +5,117 @@ import os from 'node:os';
 import path from 'node:path';
 import {execFile, execFileSync} from 'node:child_process';
 import {promisify} from 'node:util';
-import {openDb, type DB} from '../apps/server/src/db.js';
+import {AsyncLocalStorage} from 'node:async_hooks';
+import type {DB} from '../apps/server/src/db.js';
+import {openTestDb} from '../apps/server/src/test-db.js';
 import {createApp} from '../apps/server/src/app.js';
 
 let db: DB;
-afterEach(() => db?.close());
+afterEach(async () => db && await db.close());
 const auth = (token: string) => ({authorization: `Bearer ${token}`});
 const installToken = (installation: any) => decodeURIComponent(installation.installCommand.match(/\/api\/installers\/linux\/([^']+)/)[1]);
 const execFileAsync = promisify(execFile);
 
+class SerializedTransactionsDb {
+  private tail: Promise<void> = Promise.resolve();
+  private readonly transactionContext = new AsyncLocalStorage<boolean>();
+  private pendingPushReads = 0;
+  private releasePendingPushReads?: () => void;
+  private readonly pendingPushReadsReady = new Promise<void>(resolve => { this.releasePendingPushReads = resolve; });
+
+  constructor(private readonly inner: DB) {}
+
+  prepare(sql: string) {
+    const statement = this.inner.prepare(sql);
+    if (sql !== "SELECT * FROM pending_pushes WHERE id=? AND agent_id=? AND status='pending'") return statement;
+    return {
+      ...statement,
+      get: async (...values: any[]) => {
+        const row = await statement.get(...values);
+        if (!this.transactionContext.getStore()) {
+          this.pendingPushReads += 1;
+          if (this.pendingPushReads === 2) this.releasePendingPushReads?.();
+          await this.pendingPushReadsReady;
+        }
+        return row;
+      },
+    };
+  }
+
+  query(text: string, values?: any[]) { return this.inner.query(text, values); }
+
+  async transaction<T>(fn: (db: DB) => Promise<T>): Promise<T> {
+    let release!: () => void;
+    const previous = this.tail;
+    this.tail = new Promise<void>(resolve => { release = resolve; });
+    await previous;
+    try {
+      return await this.inner.transaction(async () => this.transactionContext.run(true, () => fn(this as unknown as DB)));
+    } finally {
+      release();
+    }
+  }
+}
+
+class TransactionRecordingDb {
+  readonly calls: Array<{sql: string; inTransaction: boolean}> = [];
+  private readonly transactionContext = new AsyncLocalStorage<boolean>();
+
+  constructor(private readonly inner: DB) {}
+
+  prepare(sql: string) {
+    const statement = this.inner.prepare(sql);
+    const record = (fn: (...values: any[]) => any) => async (...values: any[]) => {
+      this.calls.push({sql, inTransaction: Boolean(this.transactionContext.getStore())});
+      return fn(...values);
+    };
+    return {get: record(statement.get), all: record(statement.all), run: record(statement.run)};
+  }
+
+  query(text: string, values?: any[]) { return this.inner.query(text, values); }
+  transaction<T>(fn: (db: DB) => Promise<T>): Promise<T> {
+    return this.inner.transaction(async () => this.transactionContext.run(true, () => fn(this as unknown as DB)));
+  }
+  reset() { this.calls.length = 0; }
+}
+
+class ManagerPreflightGateDb {
+  private readonly transactionContext = new AsyncLocalStorage<boolean>();
+  private triggered = false;
+  private signalReached!: () => void;
+  private releaseGate!: () => void;
+  readonly reached = new Promise<void>(resolve => { this.signalReached = resolve; });
+  private readonly released = new Promise<void>(resolve => { this.releaseGate = resolve; });
+
+  constructor(private readonly inner: DB) {}
+
+  prepare(sql: string) {
+    const statement = this.inner.prepare(sql);
+    if (sql !== 'SELECT * FROM workspace_members WHERE user_id=? AND workspace_id=?') return statement;
+    return {
+      ...statement,
+      get: async (...values: any[]) => {
+        const row = await statement.get(...values);
+        if (!this.triggered && !this.transactionContext.getStore()) {
+          this.triggered = true;
+          this.signalReached();
+          await this.released;
+        }
+        return row;
+      },
+    };
+  }
+
+  query(text: string, values?: any[]) { return this.inner.query(text, values); }
+  transaction<T>(fn: (db: DB) => Promise<T>): Promise<T> {
+    return this.inner.transaction(async () => this.transactionContext.run(true, () => fn(this as unknown as DB)));
+  }
+  release() { this.releaseGate(); }
+}
+
 describe('approved server workflows', () => {
   it('exchanges an install token once and enforces Manager invariants', async () => {
-    db = openDb(':memory:');
+    db = await openTestDb();
     const app = createApp(db);
     const register = async (name: string) => (await request(app).post('/api/auth/register').send({name, email: `${name}@test.local`, password: 'password123'}).expect(201)).body;
     const manager = await register('manager');
@@ -43,7 +142,7 @@ describe('approved server workflows', () => {
   });
 
   it('serves and runs the Linux CLI bundle in an isolated home', async () => {
-    db = openDb(':memory:');
+    db = await openTestDb();
     const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'tracemini-installer-'));
     const home = path.join(temporary, "home with ' quote");
     const cliDir = path.join(temporary, 'compiled-cli');
@@ -90,7 +189,7 @@ else if(command==='status'){console.log(JSON.stringify(JSON.parse(fs.readFileSyn
   });
 
   it('queues refresh and push work, exposes stats, archive and agent status', async () => {
-    db = openDb(':memory:');
+    db = await openTestDb();
     const app = createApp(db);
     const user = (await request(app).post('/api/auth/register').send({name: 'Ada', email: 'ada@test.local', password: 'password123'}).expect(201)).body;
     const workspace = (await request(app).post('/api/workspaces').set(auth(user.token)).send({name: 'Mini'}).expect(201)).body;
@@ -108,7 +207,7 @@ else if(command==='status'){console.log(JSON.stringify(JSON.parse(fs.readFileSyn
     expect((await request(app).get('/api/agents/pushes').set(auth(agent.agentToken)).expect(200)).body[0].id).toBe(pending.id);
     expect((await request(app).post(`/api/agents/pushes/${pending.id}/complete`).set(auth(agent.agentToken)).send({status: 'unconfirmed'}).expect(200)).body.retrying).toBe(true);
     expect((await request(app).get('/api/agents/pushes').set(auth(agent.agentToken)).expect(200)).body).toEqual([]);
-    db.prepare("UPDATE pending_pushes SET attempts=2,next_check_at='2000-01-01T00:00:00.000Z' WHERE id=?").run(pending.id);
+    await db.prepare("UPDATE pending_pushes SET attempts=2,next_check_at='2000-01-01T00:00:00.000Z' WHERE id=?").run(pending.id);
     await request(app).post(`/api/agents/pushes/${pending.id}/complete`).set(auth(agent.agentToken)).send({status: 'confirmed', observedSha: 'abc'}).expect(200);
 
     await request(app).post('/api/activity').set(auth(agent.agentToken)).send({eventKey: 'commit-stat', repositoryId: repo.id, type: 'commit', occurredAt: '2026-08-21T10:00:00.000Z', data: {filesChanged: 3, insertions: 12, deletions: 4}}).expect(201);
@@ -126,8 +225,94 @@ else if(command==='status'){console.log(JSON.stringify(JSON.parse(fs.readFileSyn
     expect((await request(app).get('/api/workspaces').set(auth(user.token)).expect(200)).body).toEqual([]);
   });
 
+  it('allows only one concurrent push finalizer to publish the winning outcome', async () => {
+    db = await openTestDb();
+    const app = createApp(new SerializedTransactionsDb(db) as unknown as DB);
+    const user = (await request(app).post('/api/auth/register').send({name: 'Push', email: 'push-race@test.local', password: 'password123'}).expect(201)).body;
+    const workspace = (await request(app).post('/api/workspaces').set(auth(user.token)).send({name: 'Push Race'}).expect(201)).body;
+    const installation = (await request(app).post('/api/agents/installations').set(auth(user.token)).send({workspaceId: workspace.id}).expect(201)).body;
+    const agent = (await request(app).post('/api/agents/install/exchange').send({installToken: installToken(installation), machineName: 'push-box'}).expect(201)).body;
+    const repository = (await request(app).post('/api/repositories/register').set(auth(agent.agentToken)).send({workspaceId: String(workspace.id), name: 'Race', remoteUrl: 'file:///tmp/race.git', localKey: '/race'}).expect(200)).body;
+    const pending = (await request(app).post('/api/pushes/pending').set(auth(agent.agentToken)).send({repositoryId: repository.id, eventKey: 'push-race', remoteName: 'origin', remoteUrl: 'file:///tmp/race.git', ref: 'refs/heads/main', expectedSha: 'expected', occurredAt: '2026-08-24T00:00:00.000Z'}).expect(201)).body;
+    await db.prepare('UPDATE pending_pushes SET attempts=2 WHERE id=?').run(pending.id);
+
+    const responses = await Promise.all([
+      request(app).post(`/api/agents/pushes/${pending.id}/complete`).set(auth(agent.agentToken)).send({status: 'confirmed', observedSha: 'confirmed-sha'}),
+      request(app).post(`/api/agents/pushes/${pending.id}/complete`).set(auth(agent.agentToken)).send({status: 'unconfirmed', observedSha: 'unconfirmed-sha'}),
+    ]);
+
+    expect(responses.map(response => response.status).sort()).toEqual([200, 409]);
+    const push: any = await db.prepare('SELECT * FROM pending_pushes WHERE id=?').get(pending.id);
+    const event: any = await db.prepare('SELECT * FROM activity_events WHERE event_key=?').get('push-race');
+    const eventData = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
+    expect(eventData).toMatchObject({confirmation: push.status, observedSha: push.observed_sha});
+  });
+
+  it('rejects a privileged member mutation when manager authority becomes stale', async () => {
+    db = await openTestDb();
+    const setupApp = createApp(db);
+    const register = async (name: string) => (await request(setupApp).post('/api/auth/register').send({name, email: `${name}@manager-race.test`, password: 'password123'}).expect(201)).body;
+    const actor = await register('stale-manager');
+    const backup = await register('backup-manager');
+    const target = await register('promotion-target');
+    const workspace = (await request(setupApp).post('/api/workspaces').set(auth(actor.token)).send({name: 'Authority Race'}).expect(201)).body;
+    for (const user of [backup, target]) await request(setupApp).post('/api/workspaces/join').set(auth(user.token)).send({inviteCode: workspace.inviteCode}).expect(200);
+    await request(setupApp).patch(`/api/workspaces/${workspace.id}/members/${backup.user.id}`).set(auth(actor.token)).send({role: 'Manager'}).expect(200);
+
+    const gated = new ManagerPreflightGateDb(db);
+    const app = createApp(gated as unknown as DB);
+    const responsePromise = request(app).patch(`/api/workspaces/${workspace.id}/members/${target.user.id}`).set(auth(actor.token)).send({role: 'Manager'}).then(response => response);
+    await gated.reached;
+    await db.prepare("UPDATE workspace_members SET role='Member' WHERE workspace_id=? AND user_id=?").run(workspace.id, actor.user.id);
+    gated.release();
+
+    const response = await responsePromise;
+    expect(response.status).toBe(403);
+    expect((await db.prepare('SELECT role FROM workspace_members WHERE workspace_id=? AND user_id=?').get(workspace.id, target.user.id) as any).role).toBe('Member');
+  });
+
+  it('keeps lifecycle authority and target selection inside workspace transactions', async () => {
+    db = await openTestDb();
+    const recording = new TransactionRecordingDb(db);
+    const app = createApp(recording as unknown as DB);
+    const register = async (name: string) => (await request(app).post('/api/auth/register').send({name, email: `${name}@locks.test`, password: 'password123'}).expect(201)).body;
+    const manager = await register('locking-manager');
+    const member = await register('locking-member');
+    const workspace = (await request(app).post('/api/workspaces').set(auth(manager.token)).send({name: 'Locked'}).expect(201)).body;
+    await request(app).post('/api/workspaces/join').set(auth(member.token)).send({inviteCode: workspace.inviteCode}).expect(200);
+    const installation = (await request(app).post('/api/agents/installations').set(auth(member.token)).send({workspaceId: workspace.id}).expect(201)).body;
+
+    recording.reset();
+    const exchanged = (await request(app).post('/api/agents/install/exchange').send({installToken: installToken(installation), machineName: 'locked-box'}).expect(201)).body;
+    const exchangeSql = recording.calls.filter(call => call.inTransaction).map(call => call.sql);
+    expect(exchangeSql.findIndex(sql => sql === 'SELECT id FROM workspaces WHERE id=? FOR UPDATE')).toBeLessThan(exchangeSql.findIndex(sql => sql.includes('FROM setup_codes') && sql.includes('FOR UPDATE')));
+    expect(exchangeSql).toContain('SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=?');
+
+    recording.reset();
+    await request(app).patch(`/api/workspaces/${workspace.id}/members/${member.user.id}`).set(auth(manager.token)).send({role: 'Manager'}).expect(200);
+    expect(recording.calls).toContainEqual({sql: "SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=? AND role='Manager'", inTransaction: true});
+
+    recording.reset();
+    await request(app).post(`/api/workspaces/${workspace.id}/refresh`).set(auth(manager.token)).expect(201);
+    expect(recording.calls.some(call => call.inTransaction && call.sql.includes('FROM agents a') && call.sql.includes('a.revoked_at IS NULL') && call.sql.includes('workspace_members'))).toBe(true);
+
+    recording.reset();
+    await request(app).post(`/api/workspaces/${workspace.id}/agents/${exchanged.agentId}/revoke`).set(auth(manager.token)).expect(200);
+    const revokeSql = recording.calls.filter(call => call.inTransaction).map(call => call.sql);
+    expect(revokeSql.findIndex(sql => sql.includes('FROM agents') && sql.includes('FOR UPDATE'))).toBeLessThan(revokeSql.findIndex(sql => sql.startsWith('UPDATE refresh_requests')));
+    expect(recording.calls).toContainEqual({sql: "SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=? AND role='Manager'", inTransaction: true});
+
+    recording.reset();
+    await request(app).delete(`/api/workspaces/${workspace.id}/members/${member.user.id}`).set(auth(manager.token)).expect(204);
+    expect(recording.calls).toContainEqual({sql: "SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=? AND role='Manager'", inTransaction: true});
+
+    recording.reset();
+    await request(app).delete(`/api/workspaces/${workspace.id}`).set(auth(manager.token)).expect(204);
+    expect(recording.calls).toContainEqual({sql: "SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=? AND role='Manager'", inTransaction: true});
+  });
+
   it('binds agents and report work to one workspace and revokes them on member removal', async () => {
-    db = openDb(':memory:');
+    db = await openTestDb();
     const app = createApp(db);
     const createUser = async (name: string) => (await request(app).post('/api/auth/register').send({name, email: `${name}@isolation.test`, password: 'password123'}).expect(201)).body;
     const member = await createUser('bound-member');
