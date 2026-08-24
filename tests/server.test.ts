@@ -142,6 +142,8 @@ describe('approved server workflows', () => {
     db = await openTestDb();
     const app = createApp(db);
     expect((await request(app).get('/api/agents/status').set(auth('invalid-device-token')).expect(401)).body).toEqual({error: 'unauthorized device'});
+    await request(app).post('/api/auth/password-reset/request').send({email: 'joey@test.local'}).expect(404);
+    await request(app).post('/api/auth/password-reset/complete').send({token: 'removed', password: 'password123'}).expect(404);
 
     const joey = (await request(app).post('/api/auth/register').send({name: 'Joey', email: 'joey@test.local', password: 'password123'}).expect(201)).body;
     const workspaces = (await request(app).get('/api/workspaces').set(auth(joey.token)).expect(200)).body;

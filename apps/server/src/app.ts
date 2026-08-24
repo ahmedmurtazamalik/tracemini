@@ -28,55 +28,6 @@ const uniqueViolationText = (error: any) => `${error?.constraint || ''} ${error?
 const inviteCodeCollision = (error: any) => error?.code === '23505' && /invite_code|workspaces_invite_code_key/i.test(uniqueViolationText(error));
 const emailCollision = (error: any) => error?.code === '23505' && /users_email_key|users.*email|email.*users/i.test(uniqueViolationText(error));
 
-function validatePublicOrigin(value: string, production: boolean) {
-  let parsed: URL;
-  try { parsed = new URL(value); } catch { throw new Error('password-reset origin must be a valid URL'); }
-  if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.search || parsed.hash || parsed.pathname !== '/') {
-    throw new Error('password-reset origin must be a root HTTP(S) origin');
-  }
-  const local = ['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname);
-  if (production && parsed.protocol !== 'https:' && !local) throw new Error('password-reset origin must use HTTPS in production');
-  return parsed.origin;
-}
-
-export interface PasswordResetDelivery {
-  email: string;
-  resetUrl: string;
-  expiresAt: string;
-}
-
-export interface AppOptions {
-  publicOrigin?: string;
-  deliverPasswordReset?: (delivery: PasswordResetDelivery) => Promise<void>;
-}
-
-async function defaultPasswordResetDelivery(delivery: PasswordResetDelivery) {
-  const apiKey = process.env.RESEND_API_KEY;
-  const from = process.env.TRACEMINI_RESET_FROM;
-  if (Boolean(apiKey) !== Boolean(from)) throw new Error('RESEND_API_KEY and TRACEMINI_RESET_FROM must be configured together');
-  if (apiKey && from) {
-    const response = await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      signal: AbortSignal.timeout(10_000),
-      headers: {authorization: ['Bearer', apiKey].join(' '), 'content-type': 'application/json'},
-      body: JSON.stringify({
-        from,
-        to: [delivery.email],
-        subject: 'Reset your TraceMini password',
-        text: `Reset your TraceMini password using this link:\n\n${delivery.resetUrl}\n\nThis link expires at ${delivery.expiresAt}. If you did not request it, you can ignore this message.`,
-      }),
-    });
-    if (!response.ok) throw new Error(`email provider returned ${response.status}`);
-    return;
-  }
-  if (process.env.VERCEL) throw new Error('Resend password-reset delivery is not configured');
-  const outbox = path.resolve(process.env.TRACEMINI_RESET_OUTBOX || 'data/password-reset-outbox');
-  fs.mkdirSync(outbox, {recursive: true, mode: 0o700});
-  fs.chmodSync(outbox, 0o700);
-  const filename = `${Date.now()}-${crypto.randomBytes(8).toString('hex')}.json`;
-  fs.writeFileSync(path.join(outbox, filename), JSON.stringify(delivery, null, 2), {mode: 0o600});
-}
-
 export function normalizeRemote(value: string) {
   let normalized = value.trim().replace(/\\/g, '/').replace(/\.git\/?$/i, '').replace(/\/$/, '');
   const scp = normalized.match(/^(?:[^@/]+@)?([^:/]+):(.+)$/);
@@ -103,32 +54,9 @@ const required = (keys: string[]) => (req: Request, res: Response, next: NextFun
 const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
 const defaultCliDir = path.resolve(moduleDirectory, '../../../packages/cli/dist');
 
-export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, options: AppOptions = {}) {
-  const rawPublicOrigin = options.publicOrigin || process.env.TRACEMINI_PUBLIC_ORIGIN;
-  if (process.env.NODE_ENV === 'production' && !rawPublicOrigin) {
-    throw new Error('TRACEMINI_PUBLIC_ORIGIN is required in production');
-  }
-  const configuredPublicOrigin = rawPublicOrigin ? validatePublicOrigin(rawPublicOrigin, process.env.NODE_ENV === 'production') : undefined;
-  if (process.env.VERCEL && !options.deliverPasswordReset && (!process.env.RESEND_API_KEY || !process.env.TRACEMINI_RESET_FROM)) {
-    throw new Error('RESEND_API_KEY and TRACEMINI_RESET_FROM are required on Vercel');
-  }
+export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
   const app = express();
   app.use(express.json({limit: '512kb'}));
-  const authAttempts = new Map<string, {count: number; resetsAt: number}>();
-  const permitAuthAttempt = (key: string, maximum: number, windowMs = 15 * 60_000) => {
-    const time = Date.now();
-    if (!authAttempts.has(key) && authAttempts.size >= 10_000) {
-      for (const [attemptKey, attempt] of authAttempts) if (attempt.resetsAt <= time) authAttempts.delete(attemptKey);
-      while (authAttempts.size >= 10_000) authAttempts.delete(authAttempts.keys().next().value!);
-    }
-    const existing = authAttempts.get(key);
-    if (!existing || existing.resetsAt <= time) {
-      authAttempts.set(key, {count: 1, resetsAt: time + windowMs});
-      return true;
-    }
-    existing.count++;
-    return existing.count <= maximum;
-  };
 
   const userAuth = async (req: Authed, res: Response, next: NextFunction) => {
     const raw = req.headers.authorization?.replace(/^Bearer\s+/i, '');
@@ -220,51 +148,6 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, optio
   });
   app.get('/api/auth/me', userAuth, async (req: Authed, res) => res.json({id: req.user.id, name: req.user.name, email: req.user.email}));
 
-  app.post('/api/auth/password-reset/request', required(['email']), async (req, res) => {
-    const message = 'Check your inbox for password reset instructions.';
-    const email = req.body.email.trim().toLowerCase();
-    const requestAllowed = permitAuthAttempt(`reset-request-ip:${req.ip}`, 30)
-      && permitAuthAttempt(`reset-request-email:${hash(email)}`, 5);
-    if (!requestAllowed) return res.status(202).json({message});
-    const user: any = await db.prepare('SELECT id,email FROM users WHERE email=?').get(email);
-    if (!user) return res.status(202).json({message});
-    const raw = crypto.randomBytes(32).toString('base64url');
-    const expiresAt = new Date(Date.now() + 30 * 60_000).toISOString();
-    await db.transaction(async () => {
-      await db.prepare('DELETE FROM password_reset_tokens WHERE expires_at<=?').run(now());
-      await db.prepare('INSERT INTO password_reset_tokens(token_hash,user_id,expires_at,created_at) VALUES(?,?,?,?)').run(hash(raw), user.id, expiresAt, now());
-    });
-    try {
-      const origin = (configuredPublicOrigin || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
-      const deliver = options.deliverPasswordReset || defaultPasswordResetDelivery;
-      await deliver({email: user.email, resetUrl: `${origin}/reset-password?token=${encodeURIComponent(raw)}`, expiresAt});
-    } catch {
-      await db.prepare('DELETE FROM password_reset_tokens WHERE token_hash=?').run(hash(raw));
-      console.error('TraceMini password reset delivery failed; check email or outbox configuration.');
-    }
-    res.status(202).json({message});
-  });
-
-  app.post('/api/auth/password-reset/complete', required(['token', 'password']), async (req, res) => {
-    if (req.body.password.length < 8) return res.status(400).json({error: 'password must be at least 8 characters'});
-    const tokenHash = hash(req.body.token);
-    if (!permitAuthAttempt(`reset-complete-ip:${req.ip}`, 30) || !permitAuthAttempt(`reset-complete-token:${tokenHash}`, 5)) {
-      return res.status(429).json({error: 'too many reset attempts; try again later'});
-    }
-    const candidate: any = await db.prepare('SELECT user_id FROM password_reset_tokens WHERE token_hash=? AND used_at IS NULL AND expires_at>?').get(tokenHash, now());
-    if (!candidate) return res.status(400).json({error: 'reset link is invalid or expired'});
-    const passwordHash = await bcrypt.hash(req.body.password, 10);
-    const changed = await db.transaction(async () => {
-      const reset: any = await db.prepare('SELECT * FROM password_reset_tokens WHERE token_hash=? AND used_at IS NULL AND expires_at>? FOR UPDATE').get(tokenHash, now());
-      if (!reset) return false;
-      await db.prepare('UPDATE users SET password_hash=?,auth_version=auth_version+1 WHERE id=?').run(passwordHash, reset.user_id);
-      await db.prepare('DELETE FROM sessions WHERE user_id=?').run(reset.user_id);
-      await db.prepare('DELETE FROM password_reset_tokens WHERE user_id=?').run(reset.user_id);
-      return true;
-    });
-    if (!changed) return res.status(400).json({error: 'reset link is invalid or expired'});
-    res.json({ok: true});
-  });
 
   app.post('/api/workspaces', userAuth, required(['name']), async (req: Authed, res) => {
     const inviteCode = crypto.randomBytes(5).toString('hex').toUpperCase();

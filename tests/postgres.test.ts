@@ -28,7 +28,7 @@ describe('PostgreSQL database', () => {
     const db = await openTestDb();
     try {
       const migrations = await db.query('SELECT version,name,checksum FROM schema_migrations ORDER BY version');
-      expect(migrations.rows.map((row: any) => row.version)).toEqual([1, 3, 4]);
+      expect(migrations.rows.map((row: any) => row.version)).toEqual([1, 3, 4, 5]);
       for (const migration of migrations.rows) expect(migration.checksum).toMatch(/^[a-f0-9]{64}$/);
       const tables = await db.query(
         "SELECT table_name FROM information_schema.tables WHERE table_schema='public' ORDER BY table_name",
@@ -40,7 +40,6 @@ describe('PostgreSQL database', () => {
         'agents',
         'repositories',
         'activity_events',
-        'password_reset_tokens',
         'report_jobs',
         'reports',
       ]));

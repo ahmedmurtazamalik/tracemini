@@ -21,10 +21,6 @@ npm start -w @tracemini/server
 
 The built Express process serves the API and `apps/web/dist` at `http://localhost:3000`. Set `DATABASE_URL` to the Supabase PostgreSQL Session Pooler connection string; the backend connects directly with `pg` and applies versioned migrations under a PostgreSQL advisory lock at startup. Connections using `sslmode=require` are upgraded to certificate and hostname verification with the bundled Supabase Root 2021 CA (or the certificate at `PGSSLROOTCERT`). Keep the Supabase Data API disabled because clients access data only through this backend. `PORT` defaults to `3000`. Tests and acceptance use isolated in-memory PostgreSQL emulation; the release gate additionally runs a temporary, cleaned-up workflow against the hosted PostgreSQL database. No persistent SQLite volume is required.
 
-### Password recovery
-
-Password reset links expire after 30 minutes, work once, and invalidate all existing sessions when used. Request responses are intentionally identical for known and unknown email addresses. For local development, reset messages are written as owner-only JSON files under `data/password-reset-outbox`; `TRACEMINI_RESET_OUTBOX` overrides that path. For hosted email delivery, configure both `RESEND_API_KEY` and `TRACEMINI_RESET_FROM`, and set `TRACEMINI_PUBLIC_ORIGIN` to the trusted browser-visible HTTPS origin. Vercel deployments must use email delivery because their local filesystem is not durable.
-
 ## Workspace and CLI onboarding
 
 Roles are only **Manager** and **Member**. A workspace creator is its first Manager. Managers can promote/demote existing members, remove members, rotate or disable the invite, archive repositories, revoke agents, and delete the workspace. A mutation that would leave zero Managers is rejected. Members cannot perform management mutations.

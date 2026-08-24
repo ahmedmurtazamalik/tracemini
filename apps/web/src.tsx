@@ -134,8 +134,6 @@ function Auth({
   const mode = route === "/register" ? "register" : "login";
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
-  if (route === "/forgot-password") return <ForgotPassword />;
-  if (route === "/reset-password") return <ResetPassword />;
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setError("");
@@ -203,168 +201,13 @@ function Auth({
       </form>
       <div className="auth-links">
         {mode === "login" ? (
-          <>
-            <button onClick={() => navigate("/forgot-password")}>
-              Forgot password?
-            </button>
-            <button onClick={() => navigate("/register")}>
-              Create an account
-            </button>
-          </>
+          <button onClick={() => navigate("/register")}>
+            Create an account
+          </button>
         ) : (
           <button onClick={() => navigate("/")}>Back to sign in</button>
         )}
       </div>
-    </AuthShell>
-  );
-}
-
-function ForgotPassword() {
-  const [message, setMessage] = useState("");
-  const [error, setError] = useState("");
-  const [pending, setPending] = useState(false);
-  return (
-    <AuthShell
-      eyebrow="Account recovery"
-      title="Reset your password."
-      description="Enter your account email and TraceMini will send reset instructions."
-    >
-      <form
-        className="auth-form"
-        onSubmit={async (event) => {
-          event.preventDefault();
-          setError("");
-          setPending(true);
-          try {
-            const result = await request("/auth/password-reset/request", {
-              method: "POST",
-              body: JSON.stringify(
-                Object.fromEntries(new FormData(event.currentTarget)),
-              ),
-            });
-            setMessage(result.message);
-          } catch (caught: any) {
-            setError(caught.message);
-          } finally {
-            setPending(false);
-          }
-        }}
-      >
-        {error && (
-          <div className="alert error" role="alert">
-            {error}
-          </div>
-        )}
-        {message && (
-          <div className="alert success" role="status">
-            {message}
-          </div>
-        )}
-        <label>
-          Email
-          <input name="email" type="email" autoComplete="email" required />
-        </label>
-        <button className="button primary" disabled={pending}>
-          {pending ? "Sending…" : "Send reset instructions"}
-        </button>
-      </form>
-      <div className="auth-links">
-        <button onClick={() => navigate("/")}>Back to sign in</button>
-      </div>
-    </AuthShell>
-  );
-}
-
-function ResetPassword() {
-  const [error, setError] = useState("");
-  const [done, setDone] = useState(false);
-  const [pending, setPending] = useState(false);
-  const token = new URLSearchParams(location.search).get("token") || "";
-  return (
-    <AuthShell
-      eyebrow="Account recovery"
-      title="Choose a new password."
-      description="Use at least eight characters. This reset link works only once."
-    >
-      {done ? (
-        <div className="recovery-complete">
-          <div className="alert success" role="status">
-            Password updated. All previous sessions were signed out.
-          </div>
-          <button className="button primary" onClick={() => navigate("/")}>
-            Continue to sign in
-          </button>
-        </div>
-      ) : (
-        <form
-          className="auth-form"
-          onSubmit={async (event) => {
-            event.preventDefault();
-            setError("");
-            const form = new FormData(event.currentTarget);
-            const password = String(form.get("password") || "");
-            const confirmation = String(form.get("confirmation") || "");
-            if (password !== confirmation) {
-              setError("Passwords do not match.");
-              return;
-            }
-            setPending(true);
-            try {
-              await request("/auth/password-reset/complete", {
-                method: "POST",
-                body: JSON.stringify({ token, password }),
-              });
-              history.replaceState({}, "", "/reset-password");
-              setDone(true);
-            } catch (caught: any) {
-              setError(caught.message);
-            } finally {
-              setPending(false);
-            }
-          }}
-        >
-          {error && (
-            <div className="alert error" role="alert">
-              {error}
-            </div>
-          )}
-          {!token && (
-            <div className="alert error" role="alert">
-              This reset link is missing its token. Request a new link.
-            </div>
-          )}
-          <label>
-            New password
-            <input
-              name="password"
-              type="password"
-              autoComplete="new-password"
-              minLength={8}
-              required
-            />
-          </label>
-          <label>
-            Confirm password
-            <input
-              name="confirmation"
-              type="password"
-              autoComplete="new-password"
-              minLength={8}
-              required
-            />
-          </label>
-          <button className="button primary" disabled={pending || !token}>
-            {pending ? "Updating…" : "Update password"}
-          </button>
-        </form>
-      )}
-      {!done && (
-        <div className="auth-links">
-          <button onClick={() => navigate("/forgot-password")}>
-            Request a new link
-          </button>
-        </div>
-      )}
     </AuthShell>
   );
 }
