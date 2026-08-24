@@ -23,7 +23,11 @@ describe('PostgreSQL database', () => {
     const previousVercel = process.env.VERCEL;
     process.env.VERCEL = '1';
     try {
-      expect(postgresPoolConfig(connectionString).max).toBe(1);
+      const serverlessConfig = postgresPoolConfig(connectionString);
+      expect(serverlessConfig.max).toBe(1);
+      expect(new URL(serverlessConfig.connectionString!).port).toBe('6543');
+      expect(serverlessConfig.options).toBeUndefined();
+      expect(serverlessConfig.idleTimeoutMillis).toBe(1_000);
     } finally {
       if (previousVercel === undefined) delete process.env.VERCEL;
       else process.env.VERCEL = previousVercel;

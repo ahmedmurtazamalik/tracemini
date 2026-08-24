@@ -11,7 +11,10 @@ describe('Vercel deployment configuration', () => {
     expect(entrypoint).toContain("import('../apps/server/src/vercel.js')");
     expect(config.buildCommand).toBe('npm run build');
     expect(config.outputDirectory).toBe('apps/web/dist');
-    expect(config.rewrites).toContainEqual({source: '/(.*)', destination: '/api/index'});
+    expect(config.rewrites).toEqual([
+      {source: '/api/(.*)', destination: '/api/index'},
+      {source: '/((?!api/).*)', destination: '/index.html'},
+    ]);
     expect(config.functions['api/index.ts'].includeFiles)
       .toBe('{apps/web/dist/**,packages/cli/dist/**,apps/server/certs/**}');
   });
