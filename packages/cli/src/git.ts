@@ -9,6 +9,7 @@ export const git = (repo: string, args: string[]) => execFileSync('git', ['-C', 
 
 export function discover(root: string) {
   const found: string[] = [];
+  const excluded = new Set(['node_modules', '.cache', '.local', '.npm', '.pnpm-store', '.cargo', '.rustup', '.hermes']);
   const walk = (directory: string) => {
     let entries: fs.Dirent[];
     try { entries = fs.readdirSync(directory, {withFileTypes: true}); } catch { return; }
@@ -17,7 +18,7 @@ export function discover(root: string) {
       return;
     }
     for (const entry of entries) {
-      if (entry.isDirectory() && !entry.isSymbolicLink() && !['node_modules', '.cache'].includes(entry.name)) walk(path.join(directory, entry.name));
+      if (entry.isDirectory() && !entry.isSymbolicLink() && !excluded.has(entry.name)) walk(path.join(directory, entry.name));
     }
   };
   walk(path.resolve(root));
@@ -70,9 +71,9 @@ export function observeRepositoryState(previous: RepositoryState, current: Repos
   return {event: sameBranch && localMoved && remoteMoved && converged && !locallyCreatedCommit ? 'pull' as const : undefined, current};
 }
 
-export function commitData(repo: string) {
-  const raw = git(repo, ['show', '-s', '--format=%H%n%s%n%aI%n%an%n%ae', 'HEAD']).split('\n');
-  const stat = git(repo, ['show', '--format=', '--numstat', 'HEAD']).split('\n').filter(Boolean);
+function commitDataAt(repo: string, ref: string) {
+  const raw = git(repo, ['show', '-s', '--format=%H%n%s%n%aI%n%an%n%ae', ref]).split('\n');
+  const stat = git(repo, ['show', '--format=', '--numstat', ref]).split('\n').filter(Boolean);
   return {
     commitSha: raw[0], message: raw[1], commitTimestamp: raw[2], authorName: raw[3], authorEmail: raw[4],
     branch: git(repo, ['branch', '--show-current']) || '(detached)',
@@ -81,6 +82,32 @@ export function commitData(repo: string) {
     deletions: stat.reduce((sum, line) => sum + (parseInt(line.split('\t')[1]) || 0), 0),
     changedFiles: stat.map(line => line.split('\t').slice(2).join('\t')),
   };
+}
+
+export function commitData(repo: string) {
+  return commitDataAt(repo, 'HEAD');
+}
+
+export function commitHistory(repo: string, since: string, until: string) {
+  const commits = git(repo, ['log', '--all', '--reverse', '--format=%H', `--since=${since}`, `--until=${until}`]).split('\n').filter(Boolean);
+  return commits.map(commit => commitDataAt(repo, commit));
+}
+
+export function historyHeads(repo: string) {
+  const refs = git(repo, ['for-each-ref', '--format=%(objectname)', 'refs/heads', 'refs/remotes', 'refs/tags']).split('\n').filter(Boolean);
+  try { refs.push(git(repo, ['rev-parse', 'HEAD'])); } catch {}
+  return [...new Set(refs.filter(ref => {
+    try { git(repo, ['cat-file', '-e', `${ref}^{commit}`]); return true; } catch { return false; }
+  }))].sort();
+}
+
+export function commitHistoryAfterHeads(repo: string, previousHeads: string[]) {
+  const validHeads = previousHeads.filter(ref => {
+    try { git(repo, ['cat-file', '-e', `${ref}^{commit}`]); return true; } catch { return false; }
+  });
+  if (!validHeads.length) return undefined;
+  const commits = git(repo, ['rev-list', '--all', '--reverse', '--not', ...validHeads]).split('\n').filter(Boolean);
+  return commits.map(commit => commitDataAt(repo, commit));
 }
 
 export function stagedData(repo: string) {

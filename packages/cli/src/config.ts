@@ -1,11 +1,11 @@
 import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import crypto from 'node:crypto';
-export type Clone={path:string;repositoryId:number;normalizedRemote:string;name:string;branch?:string;headSha?:string;remoteHeadSha?:string};
+export type Clone={path:string;repositoryId:number;normalizedRemote:string;name:string;branch?:string;headSha?:string;remoteHeadSha?:string;historyHeads?:string[]};
 export type Config={serverUrl:string;userToken?:string;agentToken?:string;agentId?:number;workspaceId?:number;watchedPaths:string[];clones:Clone[];reporter:'codex'|'hermes';pollMs:number};
 export type Queued={eventKey:string;repositoryId:number;type:string;occurredAt:string;data:Record<string,unknown>;attempts:number;nextAttempt:number};
 export const stateDir=()=>process.env.TRACEMINI_HOME||path.join(os.homedir(),'.tracemini');
-const file=(n:string)=>path.join(stateDir(),n);const defaults:Config={serverUrl:'http://localhost:3000',watchedPaths:[],clones:[],reporter:'codex',pollMs:2000};
+const file=(n:string)=>path.join(stateDir(),n);const defaults=():Config=>({serverUrl:'http://localhost:3000',watchedPaths:[os.homedir()],clones:[],reporter:'codex',pollMs:2000});
 function readStored():Partial<Config>{try{return JSON.parse(fs.readFileSync(file('config.json'),'utf8'))}catch{return {}}}
-export function loadConfig():Config{fs.mkdirSync(stateDir(),{recursive:true,mode:0o700});return {...defaults,...readStored()}}
+export function loadConfig():Config{fs.mkdirSync(stateDir(),{recursive:true,mode:0o700});const stored=readStored();return {...defaults(),...stored,watchedPaths:stored.watchedPaths?.length?stored.watchedPaths:[os.homedir()]}}
 const wait=(milliseconds:number)=>Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,milliseconds);
 function withConfigLock<T>(operation:()=>T):T{
   const lock=file('config.lock');
@@ -58,7 +58,7 @@ export function saveConfig(c:Config, options:{preserveCurrentScalars?:boolean}={
   }else{
     for(const source of sources)for(const clone of source.clones||[])clones.set(clone.path,clone);
   }
-  const scalarConfig=options.preserveCurrentScalars?{...defaults,...current}:c;
+  const scalarConfig=options.preserveCurrentScalars?{...defaults(),...current}:c;
   const merged={...scalarConfig,watchedPaths:[...new Set(sources.flatMap(source=>source.watchedPaths||[]))],clones:[...clones.values()]};
   const target=file('config.json');
   const temporary=`${target}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;

@@ -24,55 +24,9 @@ const dateOnly = (value: unknown) => {
 };
 const hash = (value: string) => crypto.createHash('sha256').update(value).digest('hex');
 const token = () => crypto.randomBytes(24).toString('base64url');
-
-function validatePublicOrigin(value: string, production: boolean) {
-  let parsed: URL;
-  try { parsed = new URL(value); } catch { throw new Error('password-reset origin must be a valid URL'); }
-  if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.search || parsed.hash || parsed.pathname !== '/') {
-    throw new Error('password-reset origin must be a root HTTP(S) origin');
-  }
-  const local = ['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname);
-  if (production && parsed.protocol !== 'https:' && !local) throw new Error('password-reset origin must use HTTPS in production');
-  return parsed.origin;
-}
-
-export interface PasswordResetDelivery {
-  email: string;
-  resetUrl: string;
-  expiresAt: string;
-}
-
-export interface AppOptions {
-  publicOrigin?: string;
-  deliverPasswordReset?: (delivery: PasswordResetDelivery) => Promise<void>;
-}
-
-async function defaultPasswordResetDelivery(delivery: PasswordResetDelivery) {
-  const apiKey = process.env.RESEND_API_KEY;
-  const from = process.env.TRACEMINI_RESET_FROM;
-  if (Boolean(apiKey) !== Boolean(from)) throw new Error('RESEND_API_KEY and TRACEMINI_RESET_FROM must be configured together');
-  if (apiKey && from) {
-    const response = await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      signal: AbortSignal.timeout(10_000),
-      headers: {authorization: ['Bearer', apiKey].join(' '), 'content-type': 'application/json'},
-      body: JSON.stringify({
-        from,
-        to: [delivery.email],
-        subject: 'Reset your TraceMini password',
-        text: `Reset your TraceMini password using this link:\n\n${delivery.resetUrl}\n\nThis link expires at ${delivery.expiresAt}. If you did not request it, you can ignore this message.`,
-      }),
-    });
-    if (!response.ok) throw new Error(`email provider returned ${response.status}`);
-    return;
-  }
-  if (process.env.VERCEL) throw new Error('Resend password-reset delivery is not configured');
-  const outbox = path.resolve(process.env.TRACEMINI_RESET_OUTBOX || 'data/password-reset-outbox');
-  fs.mkdirSync(outbox, {recursive: true, mode: 0o700});
-  fs.chmodSync(outbox, 0o700);
-  const filename = `${Date.now()}-${crypto.randomBytes(8).toString('hex')}.json`;
-  fs.writeFileSync(path.join(outbox, filename), JSON.stringify(delivery, null, 2), {mode: 0o600});
-}
+const uniqueViolationText = (error: any) => `${error?.constraint || ''} ${error?.detail || ''} ${error?.message || ''}`;
+const inviteCodeCollision = (error: any) => error?.code === '23505' && /invite_code|workspaces_invite_code_key/i.test(uniqueViolationText(error));
+const emailCollision = (error: any) => error?.code === '23505' && /users_email_key|users.*email|email.*users/i.test(uniqueViolationText(error));
 
 export function normalizeRemote(value: string) {
   let normalized = value.trim().replace(/\\/g, '/').replace(/\.git\/?$/i, '').replace(/\/$/, '');
@@ -100,32 +54,9 @@ const required = (keys: string[]) => (req: Request, res: Response, next: NextFun
 const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
 const defaultCliDir = path.resolve(moduleDirectory, '../../../packages/cli/dist');
 
-export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, options: AppOptions = {}) {
-  const rawPublicOrigin = options.publicOrigin || process.env.TRACEMINI_PUBLIC_ORIGIN;
-  if (process.env.NODE_ENV === 'production' && !rawPublicOrigin) {
-    throw new Error('TRACEMINI_PUBLIC_ORIGIN is required in production');
-  }
-  const configuredPublicOrigin = rawPublicOrigin ? validatePublicOrigin(rawPublicOrigin, process.env.NODE_ENV === 'production') : undefined;
-  if (process.env.VERCEL && !options.deliverPasswordReset && (!process.env.RESEND_API_KEY || !process.env.TRACEMINI_RESET_FROM)) {
-    throw new Error('RESEND_API_KEY and TRACEMINI_RESET_FROM are required on Vercel');
-  }
+export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
   const app = express();
   app.use(express.json({limit: '512kb'}));
-  const authAttempts = new Map<string, {count: number; resetsAt: number}>();
-  const permitAuthAttempt = (key: string, maximum: number, windowMs = 15 * 60_000) => {
-    const time = Date.now();
-    if (!authAttempts.has(key) && authAttempts.size >= 10_000) {
-      for (const [attemptKey, attempt] of authAttempts) if (attempt.resetsAt <= time) authAttempts.delete(attemptKey);
-      while (authAttempts.size >= 10_000) authAttempts.delete(authAttempts.keys().next().value!);
-    }
-    const existing = authAttempts.get(key);
-    if (!existing || existing.resetsAt <= time) {
-      authAttempts.set(key, {count: 1, resetsAt: time + windowMs});
-      return true;
-    }
-    existing.count++;
-    return existing.count <= maximum;
-  };
 
   const userAuth = async (req: Authed, res: Response, next: NextFunction) => {
     const raw = req.headers.authorization?.replace(/^Bearer\s+/i, '');
@@ -137,7 +68,7 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, optio
   const agentAuth = async (req: Authed, res: Response, next: NextFunction) => {
     const raw = req.headers.authorization?.replace(/^Bearer\s+/i, '');
     const row: any = raw && await db.prepare("SELECT a.*,u.name user_name FROM agents a JOIN users u ON u.id=a.user_id LEFT JOIN workspace_members wm ON wm.workspace_id=a.workspace_id AND wm.user_id=a.user_id WHERE a.token_hash=? AND a.revoked_at IS NULL AND (a.workspace_id IS NULL OR wm.user_id IS NOT NULL)").get(hash(raw));
-    if (!row) return res.status(401).json({error: 'unauthorized agent'});
+    if (!row) return res.status(401).json({error: 'unauthorized device'});
     req.agent = row;
     await db.prepare('UPDATE agents SET last_seen=? WHERE id=?').run(now(), row.id);
     next();
@@ -155,23 +86,52 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, optio
   };
   const managerCount = async (workspaceId: number) => (await db.prepare("SELECT COUNT(*)::INTEGER count FROM workspace_members WHERE workspace_id=? AND role='Manager'").get(workspaceId) as any).count as number;
   const hasLockedManagerAuthority = async (workspaceId: number, userId: number) => Boolean(await db.prepare("SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=? AND role='Manager'").get(workspaceId, userId));
+  const freshInviteCode = async () => {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const code = crypto.randomBytes(5).toString('hex').toUpperCase();
+      if (!(await db.prepare('SELECT 1 FROM workspaces WHERE invite_code=?').get(code))) return code;
+    }
+    throw new Error('could not allocate workspace invite code');
+  };
 
-  app.get('/api/health', async (_req, res) => res.json({ok: true}));
+  app.get('/api/health', async (_req, res, next) => {
+    try {
+      await db.query('SELECT 1');
+      res.json({ok: true, database: 'ready'});
+    } catch (error) {
+      next(error);
+    }
+  });
   app.post('/api/auth/register', required(['name', 'email', 'password']), async (req, res, next) => {
     try {
       const email = req.body.email.trim().toLowerCase();
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({error: 'valid email required'});
       if (req.body.password.length < 8) return res.status(400).json({error: 'password must be at least 8 characters'});
       const raw = token();
+      const name = req.body.name.trim();
+      if (!name) return res.status(400).json({error: 'name required'});
       const passwordHash = await bcrypt.hash(req.body.password, 10);
-      const userId = await db.transaction(async () => {
-        const result = await db.prepare('INSERT INTO users(name,email,password_hash,created_at) VALUES(?,?,?,?) RETURNING id').run(req.body.name.trim(), email, passwordHash, now());
-        await db.prepare('INSERT INTO sessions(token_hash,user_id,created_at,auth_version) VALUES(?,?,?,0)').run(hash(raw), result.lastInsertRowid, now());
-        return Number(result.lastInsertRowid);
-      });
-      res.status(201).json({token: raw, user: {id: userId, name: req.body.name, email}});
+      let created: {userId: number; workspaceId: number} | undefined;
+      for (let attempt = 0; attempt < 3 && !created; attempt++) {
+        const personalInviteCode = await freshInviteCode();
+        try {
+          created = await db.transaction(async () => {
+            const result = await db.prepare('INSERT INTO users(name,email,password_hash,created_at) VALUES(?,?,?,?) RETURNING id').run(name, email, passwordHash, now());
+            const userId = Number(result.lastInsertRowid);
+            await db.prepare('INSERT INTO sessions(token_hash,user_id,created_at,auth_version) VALUES(?,?,?,0)').run(hash(raw), userId, now());
+            const workspace = await db.prepare('INSERT INTO workspaces(name,owner_id,invite_code,created_at) VALUES(?,?,?,?) RETURNING id').run(`${name}'s workspace`, userId, personalInviteCode, now());
+            const workspaceId = Number(workspace.lastInsertRowid);
+            await db.prepare("INSERT INTO workspace_members VALUES(?,?,'Manager')").run(workspaceId, userId);
+            return {userId, workspaceId};
+          });
+        } catch (error: any) {
+          if (!inviteCodeCollision(error) || attempt === 2) throw error;
+        }
+      }
+      if (!created) throw new Error('could not allocate workspace invite code');
+      res.status(201).json({token: raw, user: {id: created.userId, name, email}, workspaceId: created.workspaceId});
     } catch (error: any) {
-      if (error?.code === '23505') return res.status(409).json({error: 'email already registered'});
+      if (emailCollision(error)) return res.status(409).json({error: 'email already registered'});
       next(error);
     }
   });
@@ -188,51 +148,6 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, optio
   });
   app.get('/api/auth/me', userAuth, async (req: Authed, res) => res.json({id: req.user.id, name: req.user.name, email: req.user.email}));
 
-  app.post('/api/auth/password-reset/request', required(['email']), async (req, res) => {
-    const message = 'Check your inbox for password reset instructions.';
-    const email = req.body.email.trim().toLowerCase();
-    const requestAllowed = permitAuthAttempt(`reset-request-ip:${req.ip}`, 30)
-      && permitAuthAttempt(`reset-request-email:${hash(email)}`, 5);
-    if (!requestAllowed) return res.status(202).json({message});
-    const user: any = await db.prepare('SELECT id,email FROM users WHERE email=?').get(email);
-    if (!user) return res.status(202).json({message});
-    const raw = crypto.randomBytes(32).toString('base64url');
-    const expiresAt = new Date(Date.now() + 30 * 60_000).toISOString();
-    await db.transaction(async () => {
-      await db.prepare('DELETE FROM password_reset_tokens WHERE expires_at<=?').run(now());
-      await db.prepare('INSERT INTO password_reset_tokens(token_hash,user_id,expires_at,created_at) VALUES(?,?,?,?)').run(hash(raw), user.id, expiresAt, now());
-    });
-    try {
-      const origin = (configuredPublicOrigin || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
-      const deliver = options.deliverPasswordReset || defaultPasswordResetDelivery;
-      await deliver({email: user.email, resetUrl: `${origin}/reset-password?token=${encodeURIComponent(raw)}`, expiresAt});
-    } catch {
-      await db.prepare('DELETE FROM password_reset_tokens WHERE token_hash=?').run(hash(raw));
-      console.error('TraceMini password reset delivery failed; check email or outbox configuration.');
-    }
-    res.status(202).json({message});
-  });
-
-  app.post('/api/auth/password-reset/complete', required(['token', 'password']), async (req, res) => {
-    if (req.body.password.length < 8) return res.status(400).json({error: 'password must be at least 8 characters'});
-    const tokenHash = hash(req.body.token);
-    if (!permitAuthAttempt(`reset-complete-ip:${req.ip}`, 30) || !permitAuthAttempt(`reset-complete-token:${tokenHash}`, 5)) {
-      return res.status(429).json({error: 'too many reset attempts; try again later'});
-    }
-    const candidate: any = await db.prepare('SELECT user_id FROM password_reset_tokens WHERE token_hash=? AND used_at IS NULL AND expires_at>?').get(tokenHash, now());
-    if (!candidate) return res.status(400).json({error: 'reset link is invalid or expired'});
-    const passwordHash = await bcrypt.hash(req.body.password, 10);
-    const changed = await db.transaction(async () => {
-      const reset: any = await db.prepare('SELECT * FROM password_reset_tokens WHERE token_hash=? AND used_at IS NULL AND expires_at>? FOR UPDATE').get(tokenHash, now());
-      if (!reset) return false;
-      await db.prepare('UPDATE users SET password_hash=?,auth_version=auth_version+1 WHERE id=?').run(passwordHash, reset.user_id);
-      await db.prepare('DELETE FROM sessions WHERE user_id=?').run(reset.user_id);
-      await db.prepare('DELETE FROM password_reset_tokens WHERE user_id=?').run(reset.user_id);
-      return true;
-    });
-    if (!changed) return res.status(400).json({error: 'reset link is invalid or expired'});
-    res.json({ok: true});
-  });
 
   app.post('/api/workspaces', userAuth, required(['name']), async (req: Authed, res) => {
     const inviteCode = crypto.randomBytes(5).toString('hex').toUpperCase();
@@ -294,15 +209,26 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, optio
     res.status(204).end();
   });
   app.post('/api/workspaces/:id/invite/regenerate', userAuth, requireManager, async (req: Authed, res) => {
-    const inviteCode = crypto.randomBytes(5).toString('hex').toUpperCase();
-    const updated = await db.transaction(async () => {
-      const workspace = await db.prepare('SELECT id FROM workspaces WHERE id=? FOR UPDATE').get(req.params.id);
-      if (!workspace || !(await hasLockedManagerAuthority(+req.params.id, req.user.id))) return false;
-      await db.prepare('UPDATE workspaces SET invite_code=?,invite_enabled=TRUE WHERE id=?').run(inviteCode, req.params.id);
-      return true;
-    });
-    if (!updated) return res.status(403).json({error: 'Manager required'});
-    res.json({inviteCode});
+    const refreshedAt = now();
+    const cooldownCutoff = new Date(Date.now() - 60_000).toISOString();
+    let inviteCode = '';
+    let updated: {changes: number} | undefined;
+    for (let attempt = 0; attempt < 3 && !updated; attempt++) {
+      inviteCode = await freshInviteCode();
+      try {
+        updated = await db.prepare("UPDATE workspaces SET invite_code=?,invite_enabled=TRUE,invite_refreshed_at=? WHERE id=? AND (invite_refreshed_at IS NULL OR invite_refreshed_at<=?) AND id IN (SELECT workspace_id FROM workspace_members WHERE workspace_id=? AND user_id=? AND role='Manager')").run(inviteCode, refreshedAt, req.params.id, cooldownCutoff, req.params.id, req.user.id);
+      } catch (error: any) {
+        if (!inviteCodeCollision(error) || attempt === 2) throw error;
+      }
+    }
+    if (!updated) throw new Error('could not allocate workspace invite code');
+    if (!updated.changes) {
+      if (!(await hasLockedManagerAuthority(+req.params.id, req.user.id))) return res.status(403).json({error: 'Manager required'});
+      const workspace: any = await db.prepare('SELECT invite_refreshed_at FROM workspaces WHERE id=?').get(req.params.id);
+      const retryAfter = Math.max(1, Math.ceil((new Date(workspace.invite_refreshed_at).getTime() + 60_000 - Date.now()) / 1000));
+      return res.status(429).set('retry-after', String(retryAfter)).json({error: 'Invite code can only be refreshed once per minute.', retryAfter});
+    }
+    res.json({inviteCode, refreshedAt});
   });
   app.post('/api/workspaces/:id/invite/disable', userAuth, requireManager, async (req: Authed, res) => {
     const updated = await db.transaction(async () => {
@@ -377,9 +303,9 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, optio
     if (!(await membership(req.agent.user_id, workspaceId))) return res.status(403).json({error: 'forbidden'});
     await db.transaction(async () => {
       if (req.agent.workspace_id && req.agent.workspace_id !== workspaceId) {
-        await db.prepare("UPDATE refresh_requests SET status='error',error='agent changed workspace',completed_at=? WHERE agent_id=? AND status IN ('queued','running')").run(now(), req.agent.id);
+        await db.prepare("UPDATE refresh_requests SET status='error',error='device changed workspace',completed_at=? WHERE agent_id=? AND status IN ('queued','running')").run(now(), req.agent.id);
         await db.prepare("UPDATE pending_pushes SET status='unconfirmed',completed_at=? WHERE agent_id=? AND status='pending'").run(now(), req.agent.id);
-        await db.prepare("UPDATE report_jobs SET status='failed',error='agent changed workspace',completed_at=? WHERE agent_id=? AND status='running'").run(now(), req.agent.id);
+        await db.prepare("UPDATE report_jobs SET status='failed',error='device changed workspace',completed_at=? WHERE agent_id=? AND status='running'").run(now(), req.agent.id);
       }
       await db.prepare('UPDATE agents SET workspace_id=? WHERE id=?').run(workspaceId, req.agent.id);
     });
@@ -389,7 +315,7 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, optio
   app.post('/api/agents/heartbeat', agentAuth, async (_req, res) => res.json({ok: true, at: now()}));
   app.get('/api/workspaces/:id/agents', userAuth, requireMember, async (req, res) => {
     const cutoff = new Date(Date.now() - 60_000).toISOString();
-    const rows = await db.prepare("SELECT a.id,a.machine_name,a.last_seen,a.revoked_at,u.name user_name,CASE WHEN a.revoked_at IS NOT NULL THEN 'revoked' WHEN a.last_seen>=? THEN 'online' ELSE 'offline' END status FROM agents a JOIN users u ON u.id=a.user_id WHERE a.workspace_id=? ORDER BY a.id").all(cutoff, req.params.id);
+    const rows = await db.prepare("SELECT a.id,a.user_id,a.machine_name,a.last_seen,a.revoked_at,u.name user_name,CASE WHEN a.revoked_at IS NOT NULL THEN 'revoked' WHEN a.last_seen>=? THEN 'online' ELSE 'offline' END status FROM agents a JOIN users u ON u.id=a.user_id WHERE a.workspace_id=? ORDER BY a.id").all(cutoff, req.params.id);
     res.json(rows);
   });
   app.post('/api/workspaces/:id/agents/:agentId/revoke', userAuth, requireManager, async (req: Authed, res) => {
@@ -399,19 +325,19 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, optio
       const agent: any = await db.prepare('SELECT id FROM agents WHERE id=? AND workspace_id=? FOR UPDATE').get(req.params.agentId, req.params.id);
       if (!agent) return 'missing';
       await db.prepare('UPDATE agents SET revoked_at=? WHERE id=? AND revoked_at IS NULL').run(now(), agent.id);
-      await db.prepare("UPDATE refresh_requests SET status='error',error='agent revoked',completed_at=? WHERE agent_id=? AND status IN ('queued','running')").run(now(), agent.id);
+      await db.prepare("UPDATE refresh_requests SET status='error',error='device revoked',completed_at=? WHERE agent_id=? AND status IN ('queued','running')").run(now(), agent.id);
       await db.prepare("UPDATE pending_pushes SET status='unconfirmed',completed_at=? WHERE agent_id=? AND status='pending'").run(now(), agent.id);
-      await db.prepare("UPDATE report_jobs SET status='failed',error='agent revoked',completed_at=? WHERE agent_id=? AND status='running'").run(now(), agent.id);
+      await db.prepare("UPDATE report_jobs SET status='failed',error='device revoked',completed_at=? WHERE agent_id=? AND status='running'").run(now(), agent.id);
       return 'revoked';
     });
     if (outcome === 'forbidden') return res.status(403).json({error: 'Manager required'});
-    if (outcome === 'missing') return res.status(404).json({error: 'agent not found'});
+    if (outcome === 'missing') return res.status(404).json({error: 'device not found'});
     res.json({ok: true});
   });
 
   app.post('/api/repositories/register', agentAuth, required(['workspaceId', 'name', 'remoteUrl', 'localKey']), async (req: Authed, res) => {
     const workspaceId = Number(req.body.workspaceId);
-    if (req.agent.workspace_id !== workspaceId) return res.status(403).json({error: 'agent belongs to another workspace'});
+    if (req.agent.workspace_id !== workspaceId) return res.status(403).json({error: 'device belongs to another workspace'});
     const normalized = normalizeRemote(req.body.remoteUrl);
     if (!normalized) return res.status(400).json({error: 'remote URL required'});
     await db.prepare('INSERT INTO repositories(workspace_id,name,remote_url,normalized_remote,created_at) VALUES(?,?,?,?,?) ON CONFLICT DO NOTHING').run(workspaceId, req.body.name, req.body.remoteUrl, normalized, now());
@@ -592,6 +518,8 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, optio
   }
   app.use((error: any, _req: Request, res: Response, _next: NextFunction) => {
     console.error(error);
+    const databaseBusy = error?.code === 'EMAXCONNSESSION' || /max clients reached in session mode/i.test(error?.message || '');
+    if (databaseBusy) return res.status(503).set('retry-after', '5').json({error: 'TraceMini database is temporarily busy. Please retry in a few seconds.'});
     res.status(500).json({error: 'internal error'});
   });
   return app;

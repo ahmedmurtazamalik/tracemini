@@ -9,13 +9,15 @@ describe('workspace route guards', () => {
     expect(workspacePath(0, 'install')).toBe('/install');
   });
 
-  it('opens selected workspace settings and CLI installation from canonical and workspace URLs', () => {
+  it('opens selected workspace settings, reports, and CLI installation from canonical workspace URLs', () => {
     expect(getRouteView('/settings', 4)).toBe('settings');
     expect(getRouteView('/workspaces/4/settings', 4)).toBe('settings');
     expect(getRouteView('/install', 4)).toBe('install');
     expect(getRouteView('/workspaces/4/install', 4)).toBe('install');
+    expect(getRouteView('/workspaces/4/reports', 4)).toBe('reports');
     expect(workspacePath(4, 'settings')).toBe('/workspaces/4/settings');
     expect(workspacePath(4, 'install')).toBe('/workspaces/4/install');
+    expect(workspacePath(4, 'reports')).toBe('/workspaces/4/reports');
   });
 
   it('restores workspace and report identity from browser history routes', () => {

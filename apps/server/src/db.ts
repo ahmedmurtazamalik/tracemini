@@ -84,6 +84,14 @@ CREATE TABLE IF NOT EXISTS password_reset_tokens (
 CREATE INDEX IF NOT EXISTS idx_password_reset_user ON password_reset_tokens(user_id,expires_at);
 `;
 
+const inviteRefreshMigrationSql = `
+ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS invite_refreshed_at TIMESTAMPTZ;
+`;
+
+const removePasswordRecoveryMigrationSql = `
+DROP TABLE IF EXISTS password_reset_tokens;
+`;
+
 export function normalizePostgresConnectionString(connectionString: string) {
   const url = new URL(connectionString);
   url.searchParams.delete('sslmode');
@@ -103,7 +111,7 @@ export function postgresPoolConfig(connectionString: string): PoolConfig {
   return {
     connectionString: normalizePostgresConnectionString(connectionString),
     ssl,
-    max: 10,
+    max: 3,
     connectionTimeoutMillis: 10_000,
     idleTimeoutMillis: 30_000,
     options: '-c timezone=UTC',
@@ -186,6 +194,8 @@ export class DB {
         {version: 1, name: 'initial PostgreSQL schema', sql: schemaSql},
         ...(compatibilityMigrations ? [{version: 2, name: 'PostgreSQL native temporal and JSON types', sql: nativeTypesMigrationSql}] : []),
         {version: 3, name: 'password recovery tokens', sql: passwordResetMigrationSql},
+        {version: 4, name: 'workspace invite refresh cooldown', sql: inviteRefreshMigrationSql},
+        {version: 5, name: 'remove password recovery', sql: removePasswordRecoveryMigrationSql},
       ];
       for (const migration of migrations) {
         const checksum = crypto.createHash('sha256').update(migration.sql).digest('hex');

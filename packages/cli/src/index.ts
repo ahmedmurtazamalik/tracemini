@@ -31,7 +31,7 @@ async function main() {
   if (command === 'install') {
     const response = await exchangeInstallToken();
     const startup = installStartup();
-    console.log(`Agent ${response.agentId} installed and started via ${startup}`);
+    console.log(`Device ${response.agentId} installed and started via ${startup}`);
     return;
   }
   if (command === 'login') {
@@ -44,7 +44,7 @@ async function main() {
     config.agentToken = agent.token;
     config.agentId = agent.agentId;
     saveConfig(config);
-    console.log(`Agent ${agent.agentId} registered`);
+    console.log(`Device ${agent.agentId} registered`);
     return;
   }
   if (command === 'join') {
