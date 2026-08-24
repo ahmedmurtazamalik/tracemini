@@ -1177,7 +1177,7 @@ function ReportDetail({ report, workspaceId, currentUserId, reload }: any) {
 }
 
 function Reports({ workspaceId, dates, setDates, reports, reload, error }: any) {
-  const [reporter, setReporter] = useState("codex");
+  const [reporter, setReporter] = useState("hermes");
   const [name, setName] = useState("");
   const [pending, setPending] = useState(false);
   const [job, setJob] = useState<ReportJob>();
