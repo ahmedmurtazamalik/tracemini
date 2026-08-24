@@ -8,7 +8,7 @@ describe('Vercel deployment configuration', () => {
     const entrypoint = fs.readFileSync(path.join(root, 'api/index.ts'), 'utf8');
     const config = JSON.parse(fs.readFileSync(path.join(root, 'vercel.json'), 'utf8'));
 
-    expect(entrypoint).toContain("apps/server/src/vercel.js");
+    expect(entrypoint).toContain("import('../apps/server/src/vercel.js')");
     expect(config.buildCommand).toBe('npm run build');
     expect(config.outputDirectory).toBe('apps/web/dist');
     expect(config.rewrites).toContainEqual({source: '/(.*)', destination: '/api/index'});
