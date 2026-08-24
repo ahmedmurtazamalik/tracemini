@@ -6,7 +6,8 @@ import {api} from './api.js';
 import {loadConfig, saveConfig, loadQueue, saveQueue, eventKey} from './config.js';
 import {commitData, git, parsePrePush, stagedData} from './git.js';
 import {flush, runAgent, scanWatchedRoots} from './agent.js';
-import {installStartup} from './install.js';
+import {installStartup, restartStartup, stopStartup} from './install.js';
+import {rebindDeviceConfig} from './pairing.js';
 
 const args = process.argv.slice(2);
 const command = args.shift();
@@ -18,20 +19,28 @@ async function exchangeInstallToken() {
   const installToken = flag('--install-token');
   if (!server || !installToken) throw new Error('install requires its generated --server and --install-token arguments');
   config.serverUrl = server;
-  const response = await api<any>(config, '/api/agents/install/exchange', {method: 'POST', body: JSON.stringify({installToken, machineName: flag('--machine') || os.hostname()})}, false);
-  config.agentToken = response.agentToken;
-  config.agentId = response.agentId;
-  config.workspaceId = response.workspaceId;
+  const response = await api<any>(config, '/api/agents/install/exchange', {method: 'POST', body: JSON.stringify({installToken, machineName: flag('--machine') || os.hostname()})});
+  const rebound = rebindDeviceConfig(config, server, response);
+  Object.assign(config, rebound);
   delete config.userToken;
-  saveConfig(config);
+  saveConfig(rebound, {replaceCollections: true});
+  saveQueue([]);
   return response;
 }
 
 async function main() {
   if (command === 'install') {
+    stopStartup();
     const response = await exchangeInstallToken();
     const startup = installStartup();
     console.log(`Device ${response.agentId} installed and started via ${startup}`);
+    return;
+  }
+  if (command === 'sync') {
+    stopStartup();
+    const response = await exchangeInstallToken();
+    restartStartup();
+    console.log(`Device ${response.agentId} synced to workspace ${response.workspaceId}`);
     return;
   }
   if (command === 'login') {
@@ -106,7 +115,7 @@ async function main() {
     return;
   }
   if (command === 'start' || command === 'once') { await runAgent(config, command === 'once'); return; }
-  console.log('Usage: tracemini watch PATH | repositories | status | event --repo PATH --type TYPE | start | once');
+  console.log('Usage: tracemini sync --server URL --install-token TOKEN | watch PATH | repositories | status | event --repo PATH --type TYPE | start | once');
 }
 
 main().catch(error => {

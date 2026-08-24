@@ -18,6 +18,7 @@ import {
 } from "./routes.js";
 import { downloadReport } from "./report-download.js";
 import { checkCliConnection } from "./device-connection.js";
+import { reportJobProgress, type ReportJob } from "./report-progress.js";
 import "./style.css";
 
 const request = async (path: string, init: RequestInit = {}) => {
@@ -195,7 +196,7 @@ function Auth({
         </label>
         <button className="button primary" disabled={pending}>
           {pending
-            ? "Working…"
+            ? <BusyIndicator label={mode === "login" ? "Signing in…" : "Creating account…"} />
             : mode === "login"
               ? "Sign in"
               : "Create account"}
@@ -211,6 +212,15 @@ function Auth({
         )}
       </div>
     </AuthShell>
+  );
+}
+
+function BusyIndicator({ label }: { label: string }) {
+  return (
+    <span className="busy-indicator" role="status">
+      <i className="spinner" aria-hidden="true" />
+      <span>{label}</span>
+    </span>
   );
 }
 
@@ -296,7 +306,7 @@ function Install({ workspaceId, agents, userId, onAgentsChecked }: { workspaceId
           }
         }}
       >
-        {copyPending === label ? "Copying…" : copied === label ? "Copied" : "Copy"}
+        {copyPending === label ? <BusyIndicator label="Copying…" /> : copied === label ? "Copied" : "Copy"}
       </button>
     </div>
   );
@@ -325,11 +335,9 @@ function Install({ workspaceId, agents, userId, onAgentsChecked }: { workspaceId
       <section className="card install-card">
         <div className="step-number">01</div>
         <div>
-          <h2>Generate a secure install command</h2>
+          <h2>Connect or sync this computer</h2>
           <p>
-            The command expires after 10 minutes and works once. It installs
-            into your user account and starts a systemd user service—no sudo or
-            npm registry required.
+            The command expires after 10 minutes and works once. If TraceMini is already installed, it updates and securely reconnects that installation to this account. Otherwise, it performs the first installation—no sudo or npm registry required.
           </p>
           {error && (
             <div className="alert error" role="alert">
@@ -342,13 +350,19 @@ function Install({ workspaceId, agents, userId, onAgentsChecked }: { workspaceId
               onClick={mint}
               disabled={pending}
             >
-              {pending ? "Generating…" : personalDevices.length ? "Install another device" : "Generate install command"}
+              {pending
+                ? <BusyIndicator label="Preparing connection…" />
+                : personalDevices.length
+                  ? "Connect another device"
+                  : "Connect or sync this computer"}
             </button>
           ) : (
-            <Copy
-              label="Install command"
-              command={installation.installCommand}
-            />
+            <>
+              <div className="alert progress" role="status">
+                Run this command on the computer. It installs or updates the CLI, safely connects it to this account, and keeps your watched folders.
+              </div>
+              <Copy label="Connect or sync command" command={installation.syncCommand || installation.installCommand} />
+            </>
           )}
         </div>
       </section>
@@ -358,7 +372,7 @@ function Install({ workspaceId, agents, userId, onAgentsChecked }: { workspaceId
           <div>
             <h2>Verify the device</h2>
             <p>
-              Open a new terminal after installation, then run these checks.
+              The page checks for a heartbeat every five seconds. Open a new terminal after connecting, then run these checks.
             </p>
             <Copy
               label="Add TraceMini to PATH"
@@ -568,7 +582,7 @@ function Settings({ workspace, members, repositories, agents, reload }: any) {
       )}
       {pending && (
         <div className="alert progress" role="status">
-          Updating workspace…
+          <BusyIndicator label="Updating workspace…" />
         </div>
       )}
       {message && (
@@ -874,7 +888,7 @@ function WorkspaceDialog({
             </button>
             <button className="button primary" disabled={pending}>
               {pending
-                ? "Working…"
+                ? <BusyIndicator label={mode === "create" ? "Creating workspace…" : "Joining workspace…"} />
                 : mode === "create"
                   ? "Create workspace"
                   : "Join workspace"}
@@ -1166,8 +1180,30 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error }: any) 
   const [reporter, setReporter] = useState("codex");
   const [name, setName] = useState("");
   const [pending, setPending] = useState(false);
+  const [job, setJob] = useState<ReportJob>();
   const [actionError, setActionError] = useState("");
-  const [message, setMessage] = useState("");
+  const progress = job ? reportJobProgress(job) : undefined;
+  useEffect(() => {
+    if (!job?.id || !progress?.active) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const latest = await request(`/reports/jobs/${job.id}`);
+        if (cancelled) return;
+        setJob(latest);
+        if (latest.status === "completed") {
+          await reload();
+        }
+      } catch (caught: any) {
+        if (!cancelled) setActionError(caught.message || "Could not check report progress.");
+      }
+    };
+    const timer = setInterval(() => void poll(), 2000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [job?.id, job?.status]);
   return (
     <div className="page-stack">
       <PageHeading
@@ -1212,13 +1248,12 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error }: any) 
           </label>
           <button
             className="button primary"
-            disabled={pending}
+            disabled={pending || Boolean(progress?.active)}
             onClick={async () => {
               setPending(true);
               setActionError("");
-              setMessage("");
               try {
-                await request("/reports/jobs", {
+                const created = await request("/reports/jobs", {
                   method: "POST",
                   body: JSON.stringify({
                     workspaceId: String(workspaceId),
@@ -1229,8 +1264,7 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error }: any) 
                   }),
                 });
                 setName("");
-                setMessage("Report queued. A connected device will generate it shortly.");
-                await reload();
+                setJob(created);
               } catch (caught: any) {
                 setActionError(caught.message);
               } finally {
@@ -1238,10 +1272,15 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error }: any) 
               }
             }}
           >
-            {pending ? "Queueing report…" : "Generate report"}
+            {pending ? <BusyIndicator label="Queueing report…" /> : progress?.active ? "Report in progress" : "Generate report"}
           </button>
         </div>
-        {message && <div className="alert success" role="status">{message}</div>}
+        {progress && (
+          <div className={`alert ${progress.tone}`} role={progress.tone === "error" ? "alert" : "status"} aria-live="polite">
+            {progress.active ? <BusyIndicator label={progress.label} /> : progress.label}
+          </div>
+        )}
+
         {actionError && <div className="alert error" role="alert">{actionError}</div>}
       </section>
       <section className="card reports-list-card">
@@ -1525,7 +1564,7 @@ function App() {
                 }
               }}
             >
-              {logoutPending ? "Logging out…" : "Log out"}
+              {logoutPending ? <BusyIndicator label="Logging out…" /> : "Log out"}
             </button>
           </div>
         </header>
@@ -1547,6 +1586,7 @@ function App() {
             />
           ) : view === "reports" ? (
             <Reports
+              key={workspaceId}
               workspaceId={workspaceId}
               dates={dates}
               setDates={setDates}

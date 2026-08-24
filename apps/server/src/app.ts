@@ -5,7 +5,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import type {DB} from './db.js';
-import {linuxInstallCommand, linuxInstaller} from './linux-installer.js';
+import {linuxInstallCommand, linuxInstaller, linuxSyncCommand} from './linux-installer.js';
 
 const now = () => new Date().toISOString();
 const expired = (value: string | Date) => new Date(value).getTime() <= Date.now();
@@ -266,7 +266,7 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
     const expiresAt = new Date(Date.now() + 10 * 60_000).toISOString();
     await db.prepare('INSERT INTO setup_codes(code_hash,user_id,workspace_id,expires_at,created_at) VALUES(?,?,?,?,?)').run(hash(raw), req.user.id, workspaceId, expiresAt, now());
     const origin = `${req.protocol}://${req.get('host')}`;
-    res.status(201).json({installCommand: linuxInstallCommand(origin, raw), expiresAt});
+    res.status(201).json({installCommand: linuxInstallCommand(origin, raw), syncCommand: linuxSyncCommand(origin, raw), expiresAt});
   });
   app.get('/api/installers/linux/:installToken', async (req, res) => {
     const setup: any = await db.prepare('SELECT * FROM setup_codes WHERE code_hash=?').get(hash(req.params.installToken));
@@ -279,6 +279,7 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
   });
   app.post('/api/agents/install/exchange', required(['installToken', 'machineName']), async (req, res) => {
     const agentToken = token();
+    const previousAgentToken = req.headers.authorization?.replace(/^Bearer\s+/i, '');
     const candidate: any = await db.prepare('SELECT workspace_id FROM setup_codes WHERE code_hash=?').get(hash(req.body.installToken));
     if (!candidate) return res.status(409).json({error: 'install token invalid, expired, or already used'});
     const exchanged = await db.transaction(async () => {
@@ -289,6 +290,7 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
       const member = await db.prepare('SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=?').get(setup.workspace_id, setup.user_id);
       if (!member) return undefined;
       await db.prepare('UPDATE setup_codes SET used_at=? WHERE code_hash=?').run(now(), setup.code_hash);
+      if (previousAgentToken) await db.prepare('UPDATE agents SET revoked_at=? WHERE token_hash=? AND revoked_at IS NULL').run(now(), hash(previousAgentToken));
       const result = await db.prepare('INSERT INTO agents(user_id,workspace_id,machine_name,token_hash,last_seen,created_at) VALUES(?,?,?,?,?,?) RETURNING id').run(setup.user_id, setup.workspace_id, req.body.machineName.trim(), hash(agentToken), now(), now());
       return {agentId: Number(result.lastInsertRowid), workspaceId: setup.workspace_id};
     });
