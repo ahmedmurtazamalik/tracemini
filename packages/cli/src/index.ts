@@ -7,7 +7,7 @@ import {loadConfig, saveConfig, loadQueue, saveQueue, eventKey} from './config.j
 import {commitData, git, parsePrePush, stagedData} from './git.js';
 import {flush, runAgent, scanWatchedRoots} from './agent.js';
 import {installStartup, restartStartup, stopStartup} from './install.js';
-import {rebindDeviceConfig} from './pairing.js';
+import {normalizeServerUrl, previousDeviceTokenForServer, rebindDeviceConfig} from './pairing.js';
 
 const args = process.argv.slice(2);
 const command = args.shift();
@@ -15,11 +15,13 @@ const flag = (name: string) => { const index = args.indexOf(name); return index 
 const config = loadConfig();
 
 async function exchangeInstallToken() {
-  const server = flag('--server');
+  const requestedServer = flag('--server');
   const installToken = flag('--install-token');
-  if (!server || !installToken) throw new Error('install requires its generated --server and --install-token arguments');
-  config.serverUrl = server;
-  const response = await api<any>(config, '/api/agents/install/exchange', {method: 'POST', body: JSON.stringify({installToken, machineName: flag('--machine') || os.hostname()})});
+  if (!requestedServer || !installToken) throw new Error('install requires its generated --server and --install-token arguments');
+  const server = normalizeServerUrl(requestedServer);
+  const previousAgentToken = previousDeviceTokenForServer(config, server);
+  const exchangeConfig = {...config, serverUrl: server, agentToken: previousAgentToken, userToken: undefined};
+  const response = await api<any>(exchangeConfig, '/api/agents/install/exchange', {method: 'POST', body: JSON.stringify({installToken, machineName: flag('--machine') || os.hostname()})});
   const rebound = rebindDeviceConfig(config, server, response);
   Object.assign(config, rebound);
   delete config.userToken;

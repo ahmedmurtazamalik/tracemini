@@ -315,7 +315,7 @@ function Install({ workspaceId, agents, userId, onAgentsChecked }: { workspaceId
       <PageHeading
         eyebrow="Local device"
         title="Install TraceMini CLI"
-        description="Connect this Linux computer to the selected workspace without uploading source code."
+        description="Connect this Linux device to the selected workspace without uploading source code."
       />
       <section className="card device-detection" aria-live="polite">
         <span>Automatic CLI detection</span>
@@ -335,7 +335,7 @@ function Install({ workspaceId, agents, userId, onAgentsChecked }: { workspaceId
       <section className="card install-card">
         <div className="step-number">01</div>
         <div>
-          <h2>Connect or sync this computer</h2>
+          <h2>Connect or sync this device</h2>
           <p>
             The command expires after 10 minutes and works once. If TraceMini is already installed, it updates and securely reconnects that installation to this account. Otherwise, it performs the first installation—no sudo or npm registry required.
           </p>
@@ -354,12 +354,12 @@ function Install({ workspaceId, agents, userId, onAgentsChecked }: { workspaceId
                 ? <BusyIndicator label="Preparing connection…" />
                 : personalDevices.length
                   ? "Connect another device"
-                  : "Connect or sync this computer"}
+                  : "Connect or sync this device"}
             </button>
           ) : (
             <>
               <div className="alert progress" role="status">
-                Run this command on the computer. It installs or updates the CLI, safely connects it to this account, and keeps your watched folders.
+                Run this command on the device. It installs or updates the CLI, safely connects it to this account, and keeps your watched folders.
               </div>
               <Copy label="Connect or sync command" command={installation.syncCommand || installation.installCommand} />
             </>
@@ -1184,24 +1184,36 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error }: any) 
   const [actionError, setActionError] = useState("");
   const progress = job ? reportJobProgress(job) : undefined;
   useEffect(() => {
+    let cancelled = false;
+    setJob(undefined);
+    request(`/workspaces/${workspaceId}/report-jobs/active`)
+      .then((active) => { if (!cancelled) setJob(active || undefined); })
+      .catch((caught: any) => { if (!cancelled) setActionError(caught.message || "Could not restore report progress."); });
+    return () => { cancelled = true; };
+  }, [workspaceId]);
+  useEffect(() => {
     if (!job?.id || !progress?.active) return;
     let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
     const poll = async () => {
       try {
         const latest = await request(`/reports/jobs/${job.id}`);
         if (cancelled) return;
+        setActionError("");
         setJob(latest);
-        if (latest.status === "completed") {
-          await reload();
-        }
+        if (latest.status === "completed") await reload();
+        if (["pending", "running"].includes(latest.status)) timer = setTimeout(() => void poll(), 2000);
       } catch (caught: any) {
-        if (!cancelled) setActionError(caught.message || "Could not check report progress.");
+        if (!cancelled) {
+          setActionError(caught.message || "Could not check report progress.");
+          timer = setTimeout(() => void poll(), 2000);
+        }
       }
     };
-    const timer = setInterval(() => void poll(), 2000);
+    timer = setTimeout(() => void poll(), 2000);
     return () => {
       cancelled = true;
-      clearInterval(timer);
+      clearTimeout(timer);
     };
   }, [job?.id, job?.status]);
   return (

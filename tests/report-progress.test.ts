@@ -9,6 +9,6 @@ describe('report generation progress', () => {
 
   it('shows a durable terminal outcome when generation completes or fails', () => {
     expect(reportJobProgress({status: 'completed'})).toEqual({active: false, tone: 'success', label: 'Report completed.'});
-    expect(reportJobProgress({status: 'failed', error: 'Generator stopped'})).toEqual({active: false, tone: 'error', label: 'Report failed: Generator stopped'});
+    expect(reportJobProgress({status: 'failed', error: '/private/work/project failed'})).toEqual({active: false, tone: 'error', label: 'Report generation failed. Try again or check the device status.'});
   });
 });

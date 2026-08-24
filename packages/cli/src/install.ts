@@ -13,7 +13,12 @@ export function stopStartup(platform = process.platform, execute: typeof execFil
   try {
     execute('systemctl', ['--user', 'stop', 'tracemini.service'], {stdio: 'ignore'});
   } catch {
-    // A first installation has no service to stop.
+    try {
+      execute('systemctl', ['--user', 'is-active', '--quiet', 'tracemini.service'], {stdio: 'ignore'});
+    } catch {
+      return; // A first installation or an already-inactive service has nothing to stop.
+    }
+    throw new Error('TraceMini could not stop the existing device service; syncing was cancelled safely.');
   }
 }
 

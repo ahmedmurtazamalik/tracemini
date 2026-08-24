@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {execFile, execFileSync} from 'node:child_process';
 import {promisify} from 'node:util';
-import {createApp} from '../apps/server/src/app.js';
+import {createApp, requestOrigin} from '../apps/server/src/app.js';
 import {openTestDb} from '../apps/server/src/test-db.js';
 import type {DB} from '../apps/server/src/db.js';
 
@@ -20,6 +20,11 @@ afterEach(async () => {
 });
 
 describe('existing CLI device sync', () => {
+  it('generates HTTPS installer origins when hosted behind Vercel', () => {
+    const request = {protocol: 'http', get: () => 'tracemini.vercel.app'} as any;
+    expect(requestOrigin(request, true)).toBe('https://tracemini.vercel.app');
+    expect(requestOrigin(request, false)).toBe('http://tracemini.vercel.app');
+  });
   it('generates a sync command and securely replaces the old device credential', async () => {
     db = await openTestDb();
     const app = createApp(db);

@@ -1,7 +1,7 @@
 import {describe, expect, it, vi} from 'vitest';
 import type {Config} from '../packages/cli/src/config.js';
-import {rebindDeviceConfig} from '../packages/cli/src/pairing.js';
-import {restartStartup} from '../packages/cli/src/install.js';
+import {normalizeServerUrl, previousDeviceTokenForServer, rebindDeviceConfig} from '../packages/cli/src/pairing.js';
+import {restartStartup, stopStartup} from '../packages/cli/src/install.js';
 
 const existing = (): Config => ({
   serverUrl: 'https://old.example.test',
@@ -39,5 +39,23 @@ describe('CLI device re-pairing', () => {
     restartStartup('linux', execute as any);
     expect(execute).toHaveBeenCalledWith('systemctl', ['--user', 'restart', 'tracemini.service'], {stdio: 'ignore'});
     expect(() => restartStartup('win32', execute as any)).toThrow(/Linux only/);
+  });
+
+  it('upgrades hosted HTTP URLs to HTTPS without changing local development URLs', () => {
+    expect(normalizeServerUrl('http://tracemini.vercel.app')).toBe('https://tracemini.vercel.app');
+    expect(normalizeServerUrl('http://127.0.0.1:3001')).toBe('http://127.0.0.1:3001');
+    expect(previousDeviceTokenForServer(existing(), 'https://old.example.test')).toBe('old-device');
+    expect(previousDeviceTokenForServer(existing(), 'https://new.example.test')).toBeUndefined();
+  });
+
+  it('cancels syncing when an active service cannot be stopped', () => {
+    const active = vi.fn((_command: string, args: string[]) => {
+      if (args.includes('stop')) throw new Error('stop failed');
+      return undefined;
+    });
+    expect(() => stopStartup('linux', active as any)).toThrow(/cancelled safely/);
+
+    const inactive = vi.fn(() => { throw new Error('not active'); });
+    expect(() => stopStartup('linux', inactive as any)).not.toThrow();
   });
 });
