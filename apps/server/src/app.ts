@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import type {DB} from './db.js';
 import {linuxInstallCommand, linuxInstaller, linuxSyncCommand} from './linux-installer.js';
+import {dateKeyInTimezone, dateRangeUtc, normalizeTimezone} from './timezone.js';
 
 const now = () => new Date().toISOString();
 const expired = (value: string | Date) => new Date(value).getTime() <= Date.now();
@@ -461,8 +462,9 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
     if (!workspaceId || !(await membership(req.user.id, workspaceId))) return res.status(403).json({error: 'forbidden'});
     let sql = 'SELECT e.*,u.name user_name,r.name repository_name FROM activity_events e JOIN users u ON u.id=e.user_id JOIN repositories r ON r.id=e.repository_id WHERE r.workspace_id=?' + extra;
     const values: any[] = [workspaceId, ...args];
-    if (req.query.from) { sql += ' AND e.occurred_at>=?'; values.push(String(req.query.from)); }
-    if (req.query.to) { sql += ' AND e.occurred_at<=?'; values.push(`${String(req.query.to)}T23:59:59.999Z`); }
+    const timezone = normalizeTimezone(req.query.timezone);
+    if (req.query.from) { sql += ' AND e.occurred_at>=?'; values.push(dateRangeUtc(String(req.query.from), String(req.query.from), timezone).from); }
+    if (req.query.to) { sql += ' AND e.occurred_at<=?'; values.push(dateRangeUtc(String(req.query.to), String(req.query.to), timezone).to); }
     sql += ' ORDER BY e.occurred_at DESC LIMIT 500';
     res.json((await db.prepare(sql).all(...values)).map((row: any) => ({...row, data: eventData(row.data)})));
   };
@@ -470,18 +472,19 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
   app.get('/api/repositories/:id/activity', userAuth, async (req: Authed, res) => await queryActivity(req, res, ' AND e.repository_id=?', [+req.params.id]));
   app.get('/api/users/:id/activity', userAuth, async (req: Authed, res) => await queryActivity(req, res, ' AND e.user_id=?', [+req.params.id]));
   app.get('/api/workspaces/:id/stats', userAuth, requireMember, async (req, res) => {
+    const timezone = normalizeTimezone(req.query.timezone);
     const filters: string[] = ["r.workspace_id=?", "e.type='commit'"];
     const values: any[] = [req.params.id];
     if (req.query.userId) { filters.push('e.user_id=?'); values.push(req.query.userId); }
     if (req.query.repositoryId) { filters.push('e.repository_id=?'); values.push(req.query.repositoryId); }
-    if (req.query.from) { filters.push('e.occurred_at>=?'); values.push(req.query.from); }
-    if (req.query.to) { filters.push('e.occurred_at<=?'); values.push(`${req.query.to}T23:59:59.999Z`); }
+    if (req.query.from) { filters.push('e.occurred_at>=?'); values.push(dateRangeUtc(String(req.query.from), String(req.query.from), timezone).from); }
+    if (req.query.to) { filters.push('e.occurred_at<=?'); values.push(dateRangeUtc(String(req.query.to), String(req.query.to), timezone).to); }
     const where = filters.join(' AND ');
     const totals: any = await db.prepare(`SELECT COUNT(*)::INTEGER commits,COALESCE(SUM(CAST(e.data::JSONB->>'filesChanged' AS INTEGER)),0)::INTEGER "filesChanged",COALESCE(SUM(CAST(e.data::JSONB->>'insertions' AS INTEGER)),0)::INTEGER insertions,COALESCE(SUM(CAST(e.data::JSONB->>'deletions' AS INTEGER)),0)::INTEGER deletions FROM activity_events e JOIN repositories r ON r.id=e.repository_id WHERE ${where}`).get(...values);
     const dailyEvents = await db.prepare(`SELECT e.occurred_at,e.data FROM activity_events e JOIN repositories r ON r.id=e.repository_id WHERE ${where} ORDER BY e.occurred_at`).all(...values);
     const dailyByDate = new Map<string, any>();
     for (const event of dailyEvents) {
-      const date = new Date(event.occurred_at).toISOString().slice(0, 10);
+      const date = dateKeyInTimezone(event.occurred_at, timezone);
       const data: any = eventData(event.data) || {};
       const current = dailyByDate.get(date) || {date, commits: 0, filesChanged: 0, insertions: 0, deletions: 0};
       current.commits += 1;
@@ -506,7 +509,9 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
       if (!workspace || !(await db.prepare('SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=?').get(workspaceId, req.user.id))) return undefined;
       const active: any = await db.prepare("SELECT * FROM report_jobs WHERE workspace_id=? AND user_id=? AND status IN ('pending','running') ORDER BY id DESC LIMIT 1 FOR UPDATE").get(workspaceId, req.user.id);
       if (active) return {job: active, created: false};
-      const result = await db.prepare("INSERT INTO report_jobs(workspace_id,user_id,reporter,start_date,end_date,status,report_name,created_at) VALUES(?,?,?,?,?,'pending',?,?) RETURNING id").run(workspaceId, req.user.id, req.body.reporter, req.body.startDate, req.body.endDate, reportName, now());
+      const timezone = normalizeTimezone(req.body.timezone);
+      const includeDiff = req.body.includeDiff === true;
+      const result = await db.prepare("INSERT INTO report_jobs(workspace_id,user_id,reporter,start_date,end_date,timezone,include_diff,status,report_name,created_at) VALUES(?,?,?,?,?,?,?,'pending',?,?) RETURNING id").run(workspaceId, req.user.id, req.body.reporter, req.body.startDate, req.body.endDate, timezone, includeDiff, reportName, now());
       return {job: {id: Number(result.lastInsertRowid), status: 'pending'}, created: true};
     });
     if (!outcome) return res.status(403).json({error: 'forbidden'});
@@ -531,7 +536,7 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
       if (!member) return {status: 'forbidden'};
       const active = await db.prepare("SELECT id FROM report_jobs WHERE target_report_id=? AND status IN ('pending','running')").get(report.id);
       if (active) return {status: 'conflict'};
-      const inserted = await db.prepare("INSERT INTO report_jobs(workspace_id,user_id,reporter,start_date,end_date,status,custom_prompt,target_report_id,created_at) VALUES(?,?,?,?,?,'pending',?,?,?) RETURNING id").run(report.workspace_id, report.user_id, req.body.reporter, report.start_date, report.end_date, prompt, report.id, now());
+      const inserted = await db.prepare("INSERT INTO report_jobs(workspace_id,user_id,reporter,start_date,end_date,timezone,include_diff,status,custom_prompt,target_report_id,created_at) VALUES(?,?,?,?,?,?,?,'pending',?,?,?) RETURNING id").run(report.workspace_id, report.user_id, req.body.reporter, report.start_date, report.end_date, normalizeTimezone(report.timezone), Boolean(report.include_diff), prompt, report.id, now());
       return {status: 'created', id: Number(inserted.lastInsertRowid)};
     });
     if (result.status === 'not_found') return res.status(404).json({error: 'not found'});
@@ -563,7 +568,8 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
   app.get('/api/agents/jobs/:id/context', agentAuth, async (req: Authed, res) => {
     const job: any = await db.prepare('SELECT * FROM report_jobs WHERE id=? AND user_id=? AND workspace_id=? AND agent_id=?').get(req.params.id, req.agent.user_id, req.agent.workspace_id, req.agent.id);
     if (!job) return res.status(404).json({error: 'not found'});
-    const events = (await db.prepare('SELECT e.*,r.name repository_name,r.normalized_remote FROM activity_events e JOIN repositories r ON r.id=e.repository_id WHERE e.user_id=? AND r.workspace_id=? AND e.occurred_at>=? AND e.occurred_at<=? ORDER BY e.occurred_at').all(job.user_id, job.workspace_id, `${isoDate(job.start_date)}T00:00:00.000Z`, `${isoDate(job.end_date)}T23:59:59.999Z`)).map((row: any) => ({...row, data: eventData(row.data)}));
+    const bounds = dateRangeUtc(isoDate(job.start_date), isoDate(job.end_date), normalizeTimezone(job.timezone));
+    const events = (await db.prepare('SELECT e.*,r.name repository_name,r.normalized_remote FROM activity_events e JOIN repositories r ON r.id=e.repository_id WHERE e.user_id=? AND r.workspace_id=? AND e.occurred_at>=? AND e.occurred_at<=? ORDER BY e.occurred_at').all(job.user_id, job.workspace_id, bounds.from, bounds.to)).map((row: any) => ({...row, data: eventData(row.data)}));
     res.json({job, events});
   });
   app.post('/api/agents/jobs/:id/complete', agentAuth, required(['markdown']), async (req: Authed, res) => {
@@ -574,7 +580,7 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
         const updated = await db.prepare('UPDATE reports SET job_id=?,markdown=?,created_at=? WHERE id=? AND workspace_id=? AND user_id=?').run(job.id, req.body.markdown, now(), job.target_report_id, job.workspace_id, job.user_id);
         if (updated.changes !== 1) return false;
       } else {
-        await db.prepare('INSERT INTO reports(job_id,workspace_id,user_id,start_date,end_date,name,markdown,created_at) VALUES(?,?,?,?,?,?,?,?)').run(job.id, job.workspace_id, job.user_id, job.start_date, job.end_date, job.report_name || defaultReportName(job.start_date, job.end_date), req.body.markdown, now());
+        await db.prepare('INSERT INTO reports(job_id,workspace_id,user_id,start_date,end_date,timezone,include_diff,name,markdown,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)').run(job.id, job.workspace_id, job.user_id, job.start_date, job.end_date, job.timezone, job.include_diff, job.report_name || defaultReportName(job.start_date, job.end_date), req.body.markdown, now());
       }
       await db.prepare("UPDATE report_jobs SET status='completed',completed_at=? WHERE id=?").run(now(), job.id);
       return true;

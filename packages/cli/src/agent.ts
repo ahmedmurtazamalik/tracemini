@@ -76,23 +76,84 @@ async function processPushes(config: Config) {
   }
 }
 
+const sensitiveLabel = /(?:pass(?:word|wd|phrase)?|pwd|token|secret|credential|api[_-]?key|access[_-]?key(?:[_-]?id)?|consumer[_-]?key|client[_-]?(?:secret|key)|private[_-]?key|authorization|database[_-]?url|connection[_-]?string)/i;
+
+function redactSensitiveDiff(text: string) {
+  let privateKey = false;
+  let redactNextValue = false;
+  const credentialUrl = /\b[a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:[^\s/@]+@/i;
+  const recognizableToken = /\b(?:gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{20,}|AIza[0-9A-Za-z_-]{20,}|eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,})\b/;
+  return text.split('\n').map(line => {
+    const prefix = /^[+\- ]/.test(line) ? line[0] : '';
+    if (/BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY/.test(line)) privateKey = true;
+    if (privateKey) {
+      if (/END (?:RSA |EC |OPENSSH )?PRIVATE KEY/.test(line)) privateKey = false;
+      return `${prefix}[REDACTED PRIVATE KEY]`;
+    }
+    if (redactNextValue) {
+      if (!line.trim()) return line;
+      redactNextValue = false;
+      return `${prefix}[REDACTED SENSITIVE VALUE]`;
+    }
+    const sensitive = sensitiveLabel.test(line);
+    if (sensitive && /:\s*$/.test(line)) {
+      redactNextValue = true;
+      return `${prefix}[REDACTED SENSITIVE VALUE]`;
+    }
+    if (
+      credentialUrl.test(line)
+      || recognizableToken.test(line)
+      || (sensitive && /(?:[:=]|\bBearer\s+)/i.test(line))
+    ) return `${prefix}[REDACTED SENSITIVE VALUE]`;
+    return line;
+  }).join('\n');
+}
+
+function redactEvidence(value: unknown, key = ''): unknown {
+  if (sensitiveLabel.test(key)) return '[REDACTED SENSITIVE VALUE]';
+  if (typeof value === 'string') {
+    const redacted = redactSensitiveDiff(value);
+    return redacted.includes('[REDACTED ') ? '[REDACTED SENSITIVE VALUE]' : value;
+  }
+  if (Array.isArray(value)) return value.map(item => redactEvidence(item));
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([field, item]) => [field, redactEvidence(item, field)]));
+  return value;
+}
+
 export function contextPrompt(context: any, clones: Config['clones']) {
   const grouped = new Map<string, any[]>();
   for (const event of context.events) grouped.set(event.normalized_remote, [...(grouped.get(event.normalized_remote) || []), event]);
-  let text = `Generate a factual Markdown report about engineering contributions for ${context.job.start_date} through ${context.job.end_date}. Use only the supplied Git evidence. Do not modify files.\n\n`;
-  text += `Synthesize related work into meaningful contributions: delivered capabilities and outcomes, technical decisions, architecture or implementation work, problems solved, testing and reliability improvements, and demonstrated ownership. Explain the engineering significance where the evidence supports it. Do not structure the report as a commit-by-commit chronology, do not use commit hashes as the main narrative, and do not invent impact, collaboration, intent, or business outcomes not supported by the evidence.\n\n`;
-  if (context.job.custom_prompt) text += `User-requested report structure or emphasis:\n${context.job.custom_prompt}\nFollow this preference unless it conflicts with factual accuracy, supplied evidence, or read-only operation.\n\n`;
+  const timezone = context.job.timezone || 'Asia/Karachi';
+  const includeDiff = Boolean(context.job.include_diff);
+  let text = `Generate a factual Markdown report about engineering contributions for ${context.job.start_date} through ${context.job.end_date} (${timezone}). Use only the supplied Git evidence. Do not modify files.\n\n`;
+  text += `Synthesize related work into meaningful contributions: delivered capabilities and outcomes, technical decisions, architecture or implementation work, problems solved, testing and reliability improvements, and demonstrated ownership. Explain engineering significance only where the evidence supports it. Do not structure the report as a commit-by-commit chronology, do not use hashes or line counts as the main narrative, and do not invent impact, collaboration, intent, or test results not supported by evidence. Keep provider and internal pipeline jargon out of the user-facing report.\n\n`;
+  text += includeDiff
+    ? `Detailed diff excerpts were explicitly enabled. Use the bounded, redacted excerpts to explain implementation behavior while preserving factual grounding.\n\n`
+    : `Diff excerpts were not enabled. Do not invent implementation details beyond commit metadata and file statistics.\n\n`;
+  if (context.job.custom_prompt) text += `User-requested report structure or emphasis:\n${context.job.custom_prompt}\nFollow this preference unless it conflicts with factual accuracy, supplied evidence, redaction, or read-only operation.\n\n`;
+  let diffBudget = 80_000;
   for (const [remote, events] of grouped) {
     const clone = clones.find(item => item.normalizedRemote === remote);
-    text += `Repository: ${events[0].repository_name} (${remote})\nLocal clone: ${clone?.path || 'unavailable'}\n`;
+    text += `\n## Evidence: ${events[0].repository_name}\nRepository: ${remote}\nLocal clone: ${clone?.path || 'unavailable'}\n`;
     for (const event of events) {
-      text += `- ${event.occurred_at} ${event.type}: ${JSON.stringify(event.data)}\n`;
-      if (clone && event.type === 'commit' && event.data.commitSha) {
-        try { text += `${git(clone.path, ['show', '--stat', '--format=fuller', '--no-ext-diff', event.data.commitSha]).slice(0, 30_000)}\n`; } catch {}
+      const data = event.data || {};
+      text += `\n### ${event.type}${data.commitSha ? ` ${String(data.commitSha).slice(0, 12)}` : ''}\n`;
+      text += `Timestamp: ${event.occurred_at}\nEvidence:\n${JSON.stringify(redactEvidence(data), null, 2)}\n`;
+      if (clone && event.type === 'commit' && data.commitSha) {
+        try {
+          const args = includeDiff
+            ? ['show', '--format=fuller', '--stat', '--patch', '--no-ext-diff', '--unified=3', data.commitSha]
+            : ['show', '--stat', '--format=fuller', '--no-ext-diff', data.commitSha];
+          let evidence = redactSensitiveDiff(git(clone.path, args));
+          const limit = includeDiff ? Math.min(20_000, diffBudget) : 8_000;
+          evidence = evidence.slice(0, limit);
+          if (includeDiff) diffBudget -= evidence.length;
+          text += `\nGit evidence:\n\`\`\`diff\n${evidence}\n\`\`\`\n`;
+        } catch { text += '\nGit evidence unavailable for this commit.\n'; }
       }
     }
   }
-  return text;
+  return redactSensitiveDiff(text);
 }
 
 export async function processJob(config: Config, job: any) {
