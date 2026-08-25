@@ -57,6 +57,7 @@ const defaultCliDir = path.resolve(moduleDirectory, '../../../packages/cli/dist'
 
 export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
   const app = express();
+  app.set('trust proxy', 1);
   app.use(express.json({limit: '512kb'}));
 
   const userAuth = async (req: Authed, res: Response, next: NextFunction) => {

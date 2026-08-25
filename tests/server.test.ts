@@ -225,8 +225,9 @@ describe('approved server workflows', () => {
     expect(visibleMembers.map((member: any) => member.name)).toEqual(expect.arrayContaining(['manager', 'member']));
     await request(app).get(`/api/workspaces/${workspace.id}/repositories`).set(auth(memberUser.token)).expect(200);
 
-    const installation = (await request(app).post('/api/agents/installations').set(auth(memberUser.token)).send({workspaceId: workspace.id}).expect(201)).body;
+    const installation = (await request(app).post('/api/agents/installations').set(auth(memberUser.token)).set('x-forwarded-proto', 'https').set('host', 'tracemini-eight.vercel.app').send({workspaceId: workspace.id}).expect(201)).body;
     expect(installation).not.toHaveProperty('code');
+    expect(installation.installCommand).toContain('https://tracemini-eight.vercel.app');
     const token = installToken(installation);
     const exchange = (await request(app).post('/api/agents/install/exchange').send({installToken: token, machineName: 'member-box'}).expect(201)).body;
     expect(exchange).toMatchObject({workspaceId: workspace.id, agentId: expect.any(Number), agentToken: expect.any(String)});
