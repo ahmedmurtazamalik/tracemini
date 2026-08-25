@@ -275,12 +275,12 @@ export class DB {
   async close() { await this.pool.end(); }
 }
 
-export async function openPostgresDb(connectionString: string) {
+export async function openPostgresDb(connectionString: string, {migrate = true}: {migrate?: boolean} = {}) {
   const pool = new Pool(postgresPoolConfig(connectionString));
   pool.on('error', (error) => console.error('PostgreSQL idle client error:', error.message));
   const db = new DB(pool);
   try {
-    await db.migrate();
+    if (migrate) await db.migrate();
     return db;
   } catch (error) {
     await db.close();

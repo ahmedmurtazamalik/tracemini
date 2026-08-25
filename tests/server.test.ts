@@ -404,10 +404,11 @@ else if(command==='status'){console.log(JSON.stringify(JSON.parse(fs.readFileSyn
     await request(app).post(`/api/agents/jobs/${job.id}/claim`).set(auth(agent.agentToken)).expect(200);
     await request(app).post(`/api/agents/jobs/${job.id}/complete`).set(auth(agent.agentToken)).send({markdown: '# Legacy report'}).expect(201);
 
-    expect((await request(app).get(`/api/workspaces/${workspace.id}/reports`).set(auth(user.token)).expect(200)).body[0]).toMatchObject({
-      name: 'Engineering contributions · 2026-08-01 — 2026-08-07',
-      markdown: '# Legacy report',
-    });
+    const summary = (await request(app).get(`/api/workspaces/${workspace.id}/reports`).set(auth(user.token)).expect(200)).body[0];
+    expect(summary).toMatchObject({name: 'Engineering contributions · 2026-08-01 — 2026-08-07'});
+    expect(summary).not.toHaveProperty('markdown');
+    expect((await request(app).get(`/api/reports/${summary.id}`).set(auth(user.token)).expect(200)).body)
+      .toMatchObject({name: 'Engineering contributions · 2026-08-01 — 2026-08-07', markdown: '# Legacy report'});
   });
 
   it('allows only one concurrent push finalizer to publish the winning outcome', async () => {

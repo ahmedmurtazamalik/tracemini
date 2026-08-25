@@ -11,7 +11,9 @@ export function createVercelHandler(options: {openDb?: OpenDb; webDir?: string} 
   const webDir = options.webDir ?? path.resolve(here, '../../web/dist');
   const openDb = options.openDb ?? (() => {
     if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required');
-    return openPostgresDb(process.env.DATABASE_URL);
+    // Production migrations are applied as an explicit release step. Request
+    // initialization must not serialize behind schema locks on every cold start.
+    return openPostgresDb(process.env.DATABASE_URL, {migrate: false});
   });
   let appPromise: ReturnType<typeof initialize> | undefined;
 

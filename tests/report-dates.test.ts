@@ -22,7 +22,9 @@ describe('report date API contract', () => {
 
     const history = (await request(app).get(`/api/workspaces/${workspace.id}/reports`).set(authorization(user.token)).expect(200)).body;
     expect(history[0]).toMatchObject({start_date: '2026-08-18', end_date: '2026-08-24'});
+    expect(history[0]).not.toHaveProperty('markdown');
     const detail = (await request(app).get(`/api/reports/${history[0].id}`).set(authorization(user.token)).expect(200)).body;
     expect(detail).toMatchObject({start_date: '2026-08-18', end_date: '2026-08-24'});
+    expect(detail.markdown).toBe('# Weekly report');
   });
 });

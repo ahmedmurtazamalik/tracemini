@@ -692,7 +692,7 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
   });
   app.post('/api/agents/jobs/:id/fail', agentAuth, required(['error']), async (req: Authed, res) => { const result = await db.prepare("UPDATE report_jobs SET status='failed',error=?,completed_at=? WHERE id=? AND user_id=? AND workspace_id=? AND agent_id=? AND status='running'").run(req.body.error, now(), req.params.id, req.agent.user_id, req.agent.workspace_id, req.agent.id); res.status(result.changes ? 200 : 409).json({ok: Boolean(result.changes)}); });
   app.get('/api/workspaces/:id/reports', userAuth, requireMember, async (req, res) => {
-    const rows = await db.prepare('SELECT r.*,u.name user_name FROM reports r JOIN users u ON u.id=r.user_id WHERE r.workspace_id=? ORDER BY r.created_at DESC').all(req.params.id);
+    const rows = await db.prepare('SELECT r.id,r.job_id,r.workspace_id,r.user_id,r.start_date,r.end_date,r.timezone,r.include_diff,r.name,r.created_at,u.name user_name FROM reports r JOIN users u ON u.id=r.user_id WHERE r.workspace_id=? ORDER BY r.created_at DESC').all(req.params.id);
     res.json(rows.map(reportOutput));
   });
   app.get('/api/reports/:id', userAuth, async (req: Authed, res) => {
