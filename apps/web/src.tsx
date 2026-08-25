@@ -20,6 +20,7 @@ import { downloadReport } from "./report-download.js";
 import { checkCliConnection, deviceManagementAction } from "./device-connection.js";
 import { reportJobProgress, type ReportJob } from "./report-progress.js";
 import { TIMEZONE_OPTIONS, formatInTimezone, normalizeTimezone, todayInTimezone } from "./timezone.js";
+import { applyTheme, nextTheme, normalizeTheme, THEME_STORAGE_KEY, themeToggleLabel, type Theme } from "./theme.js";
 import { waitForReportJob } from "./report-jobs.js";
 import { workspaceLoadPlan, type WorkspaceLoadKey } from "./workspace-loading.js";
 import { repositorySelectionState, type RepositoryCandidate } from "./repository-selection.js";
@@ -225,6 +226,23 @@ function BusyIndicator({ label }: { label: string }) {
       <i className="spinner" aria-hidden="true" />
       <span>{label}</span>
     </span>
+  );
+}
+
+function ThemeToggle({theme, onToggle, floating = false}: {theme: Theme; onToggle: () => void; floating?: boolean}) {
+  const night = theme === "night";
+  return (
+    <button
+      className={`theme-toggle${floating ? " floating" : ""}`}
+      type="button"
+      aria-label={themeToggleLabel(theme)}
+      aria-pressed={night}
+      title={themeToggleLabel(theme)}
+      onClick={onToggle}
+    >
+      <span aria-hidden="true">{night ? "☀" : "☾"}</span>
+      <strong>{night ? "Day" : "Night"}</strong>
+    </button>
   );
 }
 
@@ -1395,6 +1413,7 @@ function App() {
   const [report, setReport] = useState<any>();
   const [error, setError] = useState("");
   const [timezone, setTimezone] = useState(initialTimezone);
+  const [theme, setTheme] = useState<Theme>(() => normalizeTheme(localStorage.getItem(THEME_STORAGE_KEY)));
   const [dates, setDates] = useState(() => {
     const date = todayInTimezone(initialTimezone());
     return {from: date, to: date};
@@ -1404,6 +1423,10 @@ function App() {
   const [logoutError, setLogoutError] = useState("");
   const loadGeneration = useRef(0);
   const dataWorkspaceId = useRef(workspaceId);
+  useLayoutEffect(() => {
+    applyTheme(theme);
+    try { localStorage.setItem(THEME_STORAGE_KEY, theme); } catch {}
+  }, [theme]);
   useLayoutEffect(() => {
     if (dataWorkspaceId.current === workspaceId) return;
     dataWorkspaceId.current = workspaceId;
@@ -1509,7 +1532,12 @@ function App() {
   useEffect(() => {
     void loadWorkspace();
   }, [workspaceId, route, dates.from, dates.to, timezone]);
-  if (!token) return <Auth onLogin={setToken} route={route} />;
+  if (!token) return (
+    <>
+      <ThemeToggle theme={theme} onToggle={() => setTheme(nextTheme(theme))} floating />
+      <Auth onLogin={setToken} route={route} />
+    </>
+  );
   const view = getRouteView(route, workspaceId);
   const openWorkspace = async (preferredId?: number) => {
     const selected = await loadIdentity(preferredId);
@@ -1601,6 +1629,7 @@ function App() {
           </div>
           <div className="topbar-actions">
             {logoutError && <span className="topbar-error" role="alert">{logoutError}</span>}
+            <ThemeToggle theme={theme} onToggle={() => setTheme(nextTheme(theme))} />
             <button
               className="button secondary"
               onClick={() => setDialog("join")}
