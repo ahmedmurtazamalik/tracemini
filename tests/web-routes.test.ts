@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {getRouteContext, getRouteView, reportMatchesRoute, workspacePath} from '../apps/web/routes.js';
+import {getRouteContext, getRouteView, reportDuringLoad, reportMatchesRoute, workspacePath} from '../apps/web/routes.js';
 
 describe('workspace route guards', () => {
   it('sends workspace-free users to a useful setup state instead of broken settings or install screens', () => {
@@ -18,6 +18,13 @@ describe('workspace route guards', () => {
     expect(workspacePath(4, 'settings')).toBe('/workspaces/4/settings');
     expect(workspacePath(4, 'install')).toBe('/workspaces/4/install');
     expect(workspacePath(4, 'reports')).toBe('/workspaces/4/reports');
+  });
+
+  it('keeps the displayed report mounted during background refreshes of the same route', () => {
+    const report = {id: 12, workspace_id: 4};
+    expect(reportDuringLoad(report, '/workspaces/4/reports/12')).toBe(report);
+    expect(reportDuringLoad(report, '/workspaces/4/reports/13')).toBeUndefined();
+    expect(reportDuringLoad(report, '/workspaces/4/reports')).toBeUndefined();
   });
 
   it('restores workspace and report identity from browser history routes', () => {

@@ -12,6 +12,7 @@ import remarkGfm from "remark-gfm";
 import {
   getRouteContext,
   getRouteView,
+  reportDuringLoad,
   reportMatchesRoute,
   workspacePath,
 } from "./routes.js";
@@ -1302,7 +1303,7 @@ function App() {
     const generation = ++loadGeneration.current;
     const selectedWorkspace = workspaceId;
     const selectedRoute = route;
-    setReport(undefined);
+    setReport((current: any) => reportDuringLoad(current, selectedRoute));
     if (!selectedWorkspace) {
       setEvents([]);
       setRepositories([]);

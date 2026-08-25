@@ -13,6 +13,10 @@ export function reportMatchesRoute(report: {id: number; workspace_id: number} | 
   return Boolean(report && context.reportId && report.id === context.reportId && report.workspace_id === context.workspaceId);
 }
 
+export function reportDuringLoad<T extends {id: number; workspace_id: number}>(report: T | undefined, pathname: string) {
+  return reportMatchesRoute(report, pathname) ? report : undefined;
+}
+
 export function workspacePath(workspaceId: number, section = '') {
   if (!workspaceId) return section ? `/${section}` : '/';
   return `/workspaces/${workspaceId}${section ? `/${section}` : ''}`;
