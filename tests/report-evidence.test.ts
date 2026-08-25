@@ -39,7 +39,8 @@ describe('evidence-rich reports', () => {
     execFileSync('git', ['config', 'user.name', 'Report Test'], {cwd: temporary});
     fs.writeFileSync(path.join(temporary, 'config.ts'), [
       'const password = "context-password-value";',
-      'const endpoint = "postgres://db-user:db-password@example.test/app";',
+      'const endpoint = "postgres://db-user:***@example.test/app";',
+      'const passwd = "context-passwd-value";',
       'export const featureFlag = false;',
       '',
     ].join('\n'));
@@ -50,6 +51,7 @@ describe('evidence-rich reports', () => {
       'const endpoint = "postgres://db-user:db-password@example.test/app";',
       'const headers = {"Authorization": "Bearer bearer-secret-value"};',
       'const config = {"apiKey": "quoted-api-secret-value"};',
+      'const pwd = "added-pwd-value";',
       'export const featureFlag = true;',
       '',
     ].join('\n'));
@@ -59,7 +61,7 @@ describe('evidence-rich reports', () => {
     const event = {repository_name: 'sample', normalized_remote: 'example/sample', occurred_at: '2026-08-24T10:00:00Z', type: 'commit', data: {commitSha: sha, message: 'feat: update configuration behavior', password: 'event-password-value', token: 'generic-token-value', authToken: 'auth-token-value', nested: {token: 'nested-token-value'}, endpoint: 'postgres://event-user:event-password@example.test/app'}};
 
     const prompt = contextPrompt({job: {start_date: '2026-08-24', end_date: '2026-08-24', timezone: 'UTC', include_diff: true}, events: [event]}, [{path: temporary, normalizedRemote: 'example/sample'}] as any);
-    for (const secret of ['context-password-value', 'db-password', 'bearer-secret-value', 'quoted-api-secret-value', 'event-password-value', 'event-password', 'generic-token-value', 'auth-token-value', 'nested-token-value']) expect(prompt).not.toContain(secret);
+    for (const secret of ['context-password-value', 'db-password', 'context-passwd-value', 'added-pwd-value', 'bearer-secret-value', 'quoted-api-secret-value', 'event-password-value', 'event-password', 'generic-token-value', 'auth-token-value', 'nested-token-value']) expect(prompt).not.toContain(secret);
     expect(prompt).toContain('[REDACTED SENSITIVE VALUE]');
   });
 
@@ -70,18 +72,18 @@ describe('evidence-rich reports', () => {
         end_date: '2026-08-24',
         timezone: 'UTC',
         include_diff: false,
-        custom_prompt: 'password=CUSTOM_PROMPT_SECRET',
+        custom_prompt: 'password:\nCUSTOM_PROMPT_SECRET\namqp://user:AMQP_SECRET@example.test/vhost\nssh://user:SSH_SECRET@example.test/repo',
       },
       events: [{
-        repository_name: 'authToken=REPOSITORY_NAME_SECRET',
+        repository_name: 'accessKeyId=REPOSITORY_NAME_SECRET',
         normalized_remote: 'example/safe',
         occurred_at: '2026-08-24T10:00:00Z',
-        type: 'token=EVENT_TYPE_SECRET',
-        data: {message: 'safe contribution metadata'},
+        type: 'consumerKey=EVENT_TYPE_SECRET',
+        data: {message: 'safe contribution metadata', authToken: 'AUTH_TOKEN_SECRET', nested: {safe: 'SAFE_NESTED', accessKey: 'ACCESS_KEY_SECRET'}, safe: 'SAFE_SIBLING'},
       }],
     }, [{path: '/tmp/password=LOCAL_PATH_SECRET', normalizedRemote: 'example/safe'}] as any);
 
-    for (const secret of ['CUSTOM_PROMPT_SECRET', 'REPOSITORY_NAME_SECRET', 'LOCAL_PATH_SECRET', 'EVENT_TYPE_SECRET']) expect(prompt).not.toContain(secret);
-    expect(prompt).toContain('safe contribution metadata');
+    for (const secret of ['CUSTOM_PROMPT_SECRET', 'AMQP_SECRET', 'SSH_SECRET', 'REPOSITORY_NAME_SECRET', 'LOCAL_PATH_SECRET', 'EVENT_TYPE_SECRET', 'AUTH_TOKEN_SECRET', 'ACCESS_KEY_SECRET']) expect(prompt).not.toContain(secret);
+    for (const safe of ['safe contribution metadata', 'SAFE_NESTED', 'SAFE_SIBLING']) expect(prompt).toContain(safe);
   });
 });

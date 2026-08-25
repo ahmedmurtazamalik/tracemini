@@ -76,10 +76,12 @@ async function processPushes(config: Config) {
   }
 }
 
+const sensitiveLabel = /(?:pass(?:word|wd|phrase)?|pwd|token|secret|credential|api[_-]?key|access[_-]?key(?:[_-]?id)?|consumer[_-]?key|client[_-]?(?:secret|key)|private[_-]?key|authorization|database[_-]?url|connection[_-]?string)/i;
+
 function redactSensitiveDiff(text: string) {
   let privateKey = false;
-  const sensitiveLabel = /(?:api[_-]?key|token|client[_-]?secret|private[_-]?key|password|passphrase|authorization|database[_-]?url|connection[_-]?string|secret|credential)/i;
-  const credentialUrl = /(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|https?):\/\/[^\s/:@]+:[^\s/@]+@/i;
+  let redactNextValue = false;
+  const credentialUrl = /\b[a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:[^\s/@]+@/i;
   const recognizableToken = /\b(?:gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{20,}|AIza[0-9A-Za-z_-]{20,}|eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,})\b/;
   return text.split('\n').map(line => {
     const prefix = /^[+\- ]/.test(line) ? line[0] : '';
@@ -88,17 +90,27 @@ function redactSensitiveDiff(text: string) {
       if (/END (?:RSA |EC |OPENSSH )?PRIVATE KEY/.test(line)) privateKey = false;
       return `${prefix}[REDACTED PRIVATE KEY]`;
     }
+    if (redactNextValue) {
+      if (!line.trim()) return line;
+      redactNextValue = false;
+      return `${prefix}[REDACTED SENSITIVE VALUE]`;
+    }
+    const sensitive = sensitiveLabel.test(line);
+    if (sensitive && /:\s*$/.test(line)) {
+      redactNextValue = true;
+      return `${prefix}[REDACTED SENSITIVE VALUE]`;
+    }
     if (
       credentialUrl.test(line)
       || recognizableToken.test(line)
-      || (sensitiveLabel.test(line) && /(?:[:=]|\bBearer\s+)/i.test(line))
+      || (sensitive && /(?:[:=]|\bBearer\s+)/i.test(line))
     ) return `${prefix}[REDACTED SENSITIVE VALUE]`;
     return line;
   }).join('\n');
 }
 
 function redactEvidence(value: unknown, key = ''): unknown {
-  if (/(?:api[_-]?key|token|client[_-]?secret|private[_-]?key|password|passphrase|authorization|database[_-]?url|connection[_-]?string|secret|credential)/i.test(key)) return '[REDACTED SENSITIVE VALUE]';
+  if (sensitiveLabel.test(key)) return '[REDACTED SENSITIVE VALUE]';
   if (typeof value === 'string') {
     const redacted = redactSensitiveDiff(value);
     return redacted.includes('[REDACTED ') ? '[REDACTED SENSITIVE VALUE]' : value;
@@ -126,7 +138,7 @@ export function contextPrompt(context: any, clones: Config['clones']) {
     for (const event of events) {
       const data = event.data || {};
       text += `\n### ${event.type}${data.commitSha ? ` ${String(data.commitSha).slice(0, 12)}` : ''}\n`;
-      text += `Timestamp: ${event.occurred_at}\nEvidence: ${JSON.stringify(redactEvidence(data))}\n`;
+      text += `Timestamp: ${event.occurred_at}\nEvidence:\n${JSON.stringify(redactEvidence(data), null, 2)}\n`;
       if (clone && event.type === 'commit' && data.commitSha) {
         try {
           const args = includeDiff
