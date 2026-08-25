@@ -1372,12 +1372,21 @@ function App() {
     if (token) void loadIdentity();
   }, [token]);
   useEffect(() => {
-    void loadWorkspace();
-  }, [workspaceId, route, dates.from, dates.to]);
-  useEffect(() => {
-    if (!workspaceId) return;
-    const timer = setInterval(() => void loadWorkspace(), 5000);
-    return () => clearInterval(timer);
+    if (!workspaceId) {
+      void loadWorkspace();
+      return;
+    }
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const poll = async () => {
+      await loadWorkspace();
+      if (!cancelled) timer = setTimeout(() => void poll(), 5000);
+    };
+    void poll();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
   }, [workspaceId, route, dates.from, dates.to]);
   if (!token) return <Auth onLogin={setToken} route={route} />;
   const view = getRouteView(route, workspaceId);
