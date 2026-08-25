@@ -62,4 +62,26 @@ describe('evidence-rich reports', () => {
     for (const secret of ['context-password-value', 'db-password', 'bearer-secret-value', 'quoted-api-secret-value', 'event-password-value', 'event-password', 'generic-token-value', 'auth-token-value', 'nested-token-value']) expect(prompt).not.toContain(secret);
     expect(prompt).toContain('[REDACTED SENSITIVE VALUE]');
   });
+
+  it('applies redaction at the final prompt boundary for every interpolated field', () => {
+    const prompt = contextPrompt({
+      job: {
+        start_date: '2026-08-24',
+        end_date: '2026-08-24',
+        timezone: 'UTC',
+        include_diff: false,
+        custom_prompt: 'password=CUSTOM_PROMPT_SECRET',
+      },
+      events: [{
+        repository_name: 'authToken=REPOSITORY_NAME_SECRET',
+        normalized_remote: 'example/safe',
+        occurred_at: '2026-08-24T10:00:00Z',
+        type: 'token=EVENT_TYPE_SECRET',
+        data: {message: 'safe contribution metadata'},
+      }],
+    }, [{path: '/tmp/password=LOCAL_PATH_SECRET', normalizedRemote: 'example/safe'}] as any);
+
+    for (const secret of ['CUSTOM_PROMPT_SECRET', 'REPOSITORY_NAME_SECRET', 'LOCAL_PATH_SECRET', 'EVENT_TYPE_SECRET']) expect(prompt).not.toContain(secret);
+    expect(prompt).toContain('safe contribution metadata');
+  });
 });

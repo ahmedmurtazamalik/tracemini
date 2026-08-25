@@ -141,7 +141,7 @@ export function contextPrompt(context: any, clones: Config['clones']) {
       }
     }
   }
-  return text;
+  return redactSensitiveDiff(text);
 }
 
 export async function processJob(config: Config, job: any) {
