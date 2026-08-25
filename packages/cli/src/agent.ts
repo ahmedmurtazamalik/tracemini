@@ -78,7 +78,7 @@ async function processPushes(config: Config) {
 
 function redactSensitiveDiff(text: string) {
   let privateKey = false;
-  const sensitiveLabel = /(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key|password|passphrase|authorization|database[_-]?url|connection[_-]?string|secret|credential)/i;
+  const sensitiveLabel = /(?:api[_-]?key|token|client[_-]?secret|private[_-]?key|password|passphrase|authorization|database[_-]?url|connection[_-]?string|secret|credential)/i;
   const credentialUrl = /(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|https?):\/\/[^\s/:@]+:[^\s/@]+@/i;
   const recognizableToken = /\b(?:gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{20,}|AIza[0-9A-Za-z_-]{20,}|eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,})\b/;
   return text.split('\n').map(line => {
@@ -98,7 +98,7 @@ function redactSensitiveDiff(text: string) {
 }
 
 function redactEvidence(value: unknown, key = ''): unknown {
-  if (/(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key|password|passphrase|authorization|database[_-]?url|connection[_-]?string|secret|credential)/i.test(key)) return '[REDACTED SENSITIVE VALUE]';
+  if (/(?:api[_-]?key|token|client[_-]?secret|private[_-]?key|password|passphrase|authorization|database[_-]?url|connection[_-]?string|secret|credential)/i.test(key)) return '[REDACTED SENSITIVE VALUE]';
   if (typeof value === 'string') {
     const redacted = redactSensitiveDiff(value);
     return redacted.includes('[REDACTED ') ? '[REDACTED SENSITIVE VALUE]' : value;
