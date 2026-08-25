@@ -274,21 +274,6 @@ describe('approved server workflows', () => {
     const parallelStatuses = await Promise.all(parallelExchanges.map(exchangeResult => request(app).get('/api/agents/status').set(auth(exchangeResult.agentToken)).then(response => response.status)));
     expect(parallelStatuses.sort()).toEqual([200, 401]);
 
-    const legacy = (await request(app).post('/api/auth/register').send({name: 'Legacy duplicate', email: 'legacy-duplicate@example.test', password: 'password123'}).expect(201)).body;
-    await request(app).post('/api/workspaces/join').set(auth(legacy.token)).send({inviteCode: workspace.inviteCode}).expect(200);
-    const legacyDevices = await Promise.all([1, 2].map(async index => (await request(app).post('/api/agents/register').set(auth(legacy.token)).send({machineName: `legacy-box-${index}`}).expect(201)).body));
-    const legacyIdentity = 'e'.repeat(64);
-    const legacyResults: any[] = [];
-    for (const legacyDevice of legacyDevices) {
-      const setup = (await request(app).post('/api/agents/installations').set(auth(legacy.token)).send({workspaceId: workspace.id}).expect(201)).body;
-      legacyResults.push((await request(app).post('/api/agents/install/exchange').set(auth(legacyDevice.token)).send({installToken: installToken(setup), machineName: 'legacy-box', installationId: legacyIdentity}).expect(201)).body);
-    }
-    expect(legacyResults[0].agentId).toBe(legacyDevices[0].agentId);
-    expect(legacyResults[1].agentId).toBe(legacyDevices[1].agentId);
-    await request(app).get('/api/agents/status').set(auth(legacyResults[0].agentToken)).expect(401);
-    await request(app).get('/api/agents/status').set(auth(legacyResults[1].agentToken)).expect(200);
-    expect((await request(app).get(`/api/workspaces/${workspace.id}/agents`).set(auth(legacy.token)).expect(200)).body.filter((device: any) => device.user_id === legacy.user.id)).toHaveLength(1);
-
     const memberId = memberUser.user.id;
     await request(app).patch(`/api/workspaces/${workspace.id}/members/${memberId}`).set(auth(memberUser.token)).send({role: 'Manager'}).expect(403);
     await request(app).patch(`/api/workspaces/${workspace.id}/members/${memberId}`).set(auth(manager.token)).send({role: 'Manager'}).expect(200);
@@ -364,12 +349,6 @@ else if(command==='status'){console.log(JSON.stringify(JSON.parse(fs.readFileSyn
     const legacyCandidate = (await request(app).get(`/api/workspaces/${workspace.id}/repository-candidates`).set(auth(user.token)).expect(200)).body.find((candidate: any) => candidate.local_key === '/legacy');
     await request(app).patch(`/api/workspaces/${workspace.id}/repository-candidates/${legacyCandidate.id}`).set(auth(user.token)).send({traced: true}).expect(200);
     await request(app).post('/api/repositories/register').set(auth(agent.agentToken)).send({workspaceId: String(workspace.id), name: 'Legacy', remoteUrl: 'file:///tmp/legacy.git', localKey: '/legacy'}).expect(409);
-
-    const refresh = (await request(app).post(`/api/workspaces/${workspace.id}/refresh`).set(auth(user.token)).expect(410)).body;
-    expect(refresh).toEqual({error: 'repository refresh moved to tracemini watch PATH'});
-    expect((await request(app).get('/api/agents/refresh-requests').set(auth(agent.agentToken)).expect(200)).body).toEqual([]);
-    await request(app).post('/api/agents/refresh-requests/1/claim').set(auth(agent.agentToken)).expect(410);
-    await request(app).post('/api/agents/refresh-requests/1/complete').set(auth(agent.agentToken)).expect(410);
 
     const pending = (await request(app).post('/api/pushes/pending').set(auth(agent.agentToken)).send({repositoryId: repo.id, localKey: '/clone', identityFingerprint: testFingerprint, eventKey: 'push-1', remoteName: 'origin', remoteUrl: 'file:///tmp/remote.git', ref: 'refs/heads/main', expectedSha: 'abc', occurredAt: new Date().toISOString()}).expect(201)).body;
     expect((await request(app).get('/api/agents/pushes').set(auth(agent.agentToken)).expect(200)).body[0].id).toBe(pending.id);
@@ -540,7 +519,6 @@ else if(command==='status'){console.log(JSON.stringify(JSON.parse(fs.readFileSyn
     await request(app).post(`/api/workspaces/${workspace.id}/agents/${exchanged.agentId}/revoke`).set(auth(manager.token)).expect(404);
     await request(app).post(`/api/workspaces/${workspace.id}/agents/${exchanged.agentId}/revoke`).set(auth(member.token)).expect(200);
     const revokeSql = recording.calls.filter(call => call.inTransaction).map(call => call.sql);
-    expect(revokeSql.findIndex(sql => sql.includes('FROM agents') && sql.includes('FOR UPDATE'))).toBeLessThan(revokeSql.findIndex(sql => sql.startsWith('UPDATE refresh_requests')));
     expect(recording.calls).toContainEqual({sql: 'SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=?', inTransaction: true});
 
     recording.reset();

@@ -97,7 +97,6 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
   const hasLockedManagerAuthority = async (workspaceId: number, userId: number) => Boolean(await db.prepare("SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=? AND role='Manager'").get(workspaceId, userId));
   const revokeDeviceWork = async (agentId: number, reason = 'device revoked') => {
     await db.prepare('UPDATE agents SET revoked_at=?,installation_id=NULL WHERE id=? AND revoked_at IS NULL').run(now(), agentId);
-    await db.prepare("UPDATE refresh_requests SET status='error',error=?,completed_at=? WHERE agent_id=? AND status IN ('queued','running')").run(reason, now(), agentId);
     await db.prepare("UPDATE pending_pushes SET status='unconfirmed',completed_at=? WHERE agent_id=? AND status='pending'").run(now(), agentId);
     await db.prepare("UPDATE report_jobs SET status='failed',error=?,completed_at=? WHERE agent_id=? AND status='running'").run(reason, now(), agentId);
   };
@@ -210,7 +209,6 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
       if (current.role === 'Manager' && await managerCount(+req.params.id) === 1) return 'last-manager';
       const agentIds = (await db.prepare('SELECT id FROM agents WHERE user_id=?').all(req.params.userId)).map((row: any) => row.id);
       for (const agentId of agentIds) {
-        await db.prepare("UPDATE refresh_requests SET status='error',error='workspace membership removed',completed_at=? WHERE workspace_id=? AND agent_id=? AND status IN ('queued','running')").run(now(), req.params.id, agentId);
         await db.prepare("UPDATE pending_pushes SET status='unconfirmed',completed_at=? WHERE agent_id=? AND repository_id IN (SELECT id FROM repositories WHERE workspace_id=?) AND status='pending'").run(now(), agentId, req.params.id);
         await db.prepare('DELETE FROM local_clones WHERE agent_id=? AND repository_id IN (SELECT id FROM repositories WHERE workspace_id=?)').run(agentId, req.params.id);
         await db.prepare('DELETE FROM repository_candidates WHERE agent_id=? AND workspace_id=?').run(agentId, req.params.id);
@@ -519,14 +517,6 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
     if (!result.changes) return res.status(404).json({error: 'repository not found'});
     res.json({ok: true});
   });
-
-  app.post('/api/workspaces/:id/refresh', userAuth, requireMember, async (_req: Authed, res) => {
-    res.status(410).json({error: 'repository refresh moved to tracemini watch PATH'});
-  });
-  app.get('/api/workspaces/:id/refresh', userAuth, requireMember, async (req, res) => res.json(await db.prepare('SELECT * FROM refresh_requests WHERE workspace_id=? ORDER BY id DESC LIMIT 20').all(req.params.id)));
-  app.get('/api/agents/refresh-requests', agentAuth, async (_req: Authed, res) => res.json([]));
-  app.post('/api/agents/refresh-requests/:requestId/claim', agentAuth, async (_req: Authed, res) => res.status(410).json({error: 'repository refresh moved to tracemini watch PATH'}));
-  app.post('/api/agents/refresh-requests/:requestId/complete', agentAuth, async (_req: Authed, res) => res.status(410).json({error: 'repository refresh moved to tracemini watch PATH'}));
 
   app.post('/api/pushes/pending', agentAuth, required(['eventKey', 'localKey', 'remoteName', 'remoteUrl', 'ref', 'expectedSha', 'occurredAt']), async (req: Authed, res) => {
     const occurredAt = instant(req.body.occurredAt);

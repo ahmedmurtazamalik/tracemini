@@ -46,7 +46,7 @@ The dashboard shows agent online/offline state. “Online” means a heartbeat w
 
 ## Discovery and refresh
 
-`watch` recursively discovers repositories only below an explicit root, requires an `origin`, publishes workspace-scoped candidates, and installs hooks after repository selection. Discovery is explicit: the agent does not broadly poll arbitrary filesystem roots. The former refresh-request creation, claim, and completion endpoints are retired compatibility routes that return `410`; the agent does not consume refresh requests.
+`watch` recursively discovers repositories only below an explicit root, requires an `origin`, publishes workspace-scoped candidates, and installs hooks after repository selection. Discovery is explicit: the agent does not broadly poll arbitrary filesystem roots. The former refresh-request API is retired; the agent does not consume refresh requests.
 
 ## Git activity and push confirmation
 
