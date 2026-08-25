@@ -94,6 +94,8 @@ DROP TABLE IF EXISTS password_reset_tokens;
 
 export function normalizePostgresConnectionString(connectionString: string) {
   const url = new URL(connectionString);
+  const isSupabasePooler = url.hostname === 'pooler.supabase.com' || url.hostname.endsWith('.pooler.supabase.com');
+  if (process.env.VERCEL && isSupabasePooler && url.port === '5432') url.port = '6543';
   url.searchParams.delete('sslmode');
   url.searchParams.delete('uselibpqcompat');
   return url.toString();
@@ -111,10 +113,11 @@ export function postgresPoolConfig(connectionString: string): PoolConfig {
   return {
     connectionString: normalizePostgresConnectionString(connectionString),
     ssl,
-    max: 3,
+    max: process.env.VERCEL ? 1 : 3,
     connectionTimeoutMillis: 10_000,
-    idleTimeoutMillis: 30_000,
-    options: '-c timezone=UTC',
+    idleTimeoutMillis: process.env.VERCEL ? 1_000 : 30_000,
+    allowExitOnIdle: Boolean(process.env.VERCEL),
+    options: process.env.VERCEL ? undefined : '-c timezone=UTC',
   };
 }
 
