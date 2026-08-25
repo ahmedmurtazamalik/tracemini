@@ -31,4 +31,35 @@ describe('evidence-rich reports', () => {
     expect(detailed).toContain('Synthesize related work into meaningful contributions');
     expect(detailed).toContain('Do not structure the report as a commit-by-commit chronology');
   });
+
+  it('redacts sensitive values from added and unchanged diff lines before generation', () => {
+    temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'tracemini-report-redaction-'));
+    execFileSync('git', ['init', '-q'], {cwd: temporary});
+    execFileSync('git', ['config', 'user.email', 'report@example.test'], {cwd: temporary});
+    execFileSync('git', ['config', 'user.name', 'Report Test'], {cwd: temporary});
+    fs.writeFileSync(path.join(temporary, 'config.ts'), [
+      'const password = "context-password-value";',
+      'const endpoint = "postgres://db-user:db-password@example.test/app";',
+      'export const featureFlag = false;',
+      '',
+    ].join('\n'));
+    execFileSync('git', ['add', '.'], {cwd: temporary});
+    execFileSync('git', ['commit', '-qm', 'test: establish nearby sensitive context'], {cwd: temporary});
+    fs.writeFileSync(path.join(temporary, 'config.ts'), [
+      'const password = "context-password-value";',
+      'const endpoint = "postgres://db-user:db-password@example.test/app";',
+      'const headers = {"Authorization": "Bearer bearer-secret-value"};',
+      'const config = {"apiKey": "quoted-api-secret-value"};',
+      'export const featureFlag = true;',
+      '',
+    ].join('\n'));
+    execFileSync('git', ['add', '.'], {cwd: temporary});
+    execFileSync('git', ['commit', '-qm', 'feat: update configuration behavior'], {cwd: temporary});
+    const sha = execFileSync('git', ['rev-parse', 'HEAD'], {cwd: temporary, encoding: 'utf8'}).trim();
+    const event = {repository_name: 'sample', normalized_remote: 'example/sample', occurred_at: '2026-08-24T10:00:00Z', type: 'commit', data: {commitSha: sha, message: 'feat: update configuration behavior'}};
+
+    const prompt = contextPrompt({job: {start_date: '2026-08-24', end_date: '2026-08-24', timezone: 'UTC', include_diff: true}, events: [event]}, [{path: temporary, normalizedRemote: 'example/sample'}] as any);
+    for (const secret of ['context-password-value', 'db-password', 'bearer-secret-value', 'quoted-api-secret-value']) expect(prompt).not.toContain(secret);
+    expect(prompt).toContain('[REDACTED SENSITIVE VALUE]');
+  });
 });

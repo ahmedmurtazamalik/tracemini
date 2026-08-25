@@ -78,13 +78,21 @@ async function processPushes(config: Config) {
 
 function redactSensitiveDiff(text: string) {
   let privateKey = false;
+  const sensitiveLabel = /(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key|password|passphrase|authorization|database[_-]?url|connection[_-]?string|secret|credential)/i;
+  const credentialUrl = /(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|https?):\/\/[^\s/:@]+:[^\s/@]+@/i;
+  const recognizableToken = /\b(?:gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{20,}|AIza[0-9A-Za-z_-]{20,}|eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,})\b/;
   return text.split('\n').map(line => {
+    const prefix = /^[+\- ]/.test(line) ? line[0] : '';
     if (/BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY/.test(line)) privateKey = true;
     if (privateKey) {
       if (/END (?:RSA |EC |OPENSSH )?PRIVATE KEY/.test(line)) privateKey = false;
-      return '[REDACTED PRIVATE KEY]';
+      return `${prefix}[REDACTED PRIVATE KEY]`;
     }
-    if (/^[-+].*(?:api[_-]?key|access[_-]?token|client[_-]?secret|password|database_url)\s*[:=]/i.test(line)) return `${line.slice(0, 1)}[REDACTED SENSITIVE VALUE]`;
+    if (
+      credentialUrl.test(line)
+      || recognizableToken.test(line)
+      || (sensitiveLabel.test(line) && /(?:[:=]|\bBearer\s+)/i.test(line))
+    ) return `${prefix}[REDACTED SENSITIVE VALUE]`;
     return line;
   }).join('\n');
 }
