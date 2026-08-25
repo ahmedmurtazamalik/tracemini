@@ -114,6 +114,38 @@ const removedDevicesMigrationSql = `
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS removed_at TIMESTAMPTZ;
 `;
 
+const repositorySelectionMigrationSql = `
+CREATE TABLE repository_candidates(
+  id BIGSERIAL PRIMARY KEY,
+  agent_id BIGINT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  local_key TEXT NOT NULL,
+  name TEXT NOT NULL,
+  remote_url TEXT NOT NULL,
+  normalized_remote TEXT NOT NULL,
+  branch TEXT,
+  traced BOOLEAN NOT NULL DEFAULT FALSE,
+  desired_traced BOOLEAN NOT NULL DEFAULT FALSE,
+  last_seen TIMESTAMPTZ NOT NULL,
+  error TEXT,
+  UNIQUE(agent_id,local_key)
+);
+CREATE INDEX repository_candidates_agent_selection_idx ON repository_candidates(agent_id,desired_traced,traced);
+`;
+
+const repositorySelectionEnforcementMigrationSql = `
+ALTER TABLE repository_candidates ADD COLUMN IF NOT EXISTS repository_id BIGINT REFERENCES repositories(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS repository_candidates_agent_repository_idx ON repository_candidates(agent_id,repository_id,desired_traced);
+`;
+
+const repositorySelectionLifecycleMigrationSql = `
+ALTER TABLE pending_pushes ADD COLUMN IF NOT EXISTS local_key TEXT;
+ALTER TABLE pending_pushes ADD COLUMN IF NOT EXISTS repository_fingerprint TEXT;
+ALTER TABLE repository_candidates ADD COLUMN IF NOT EXISTS workspace_id BIGINT REFERENCES workspaces(id) ON DELETE CASCADE;
+ALTER TABLE repository_candidates ADD COLUMN IF NOT EXISTS revision BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE repository_candidates ADD COLUMN IF NOT EXISTS repository_fingerprint TEXT;
+CREATE INDEX IF NOT EXISTS repository_candidates_workspace_owner_idx ON repository_candidates(workspace_id,agent_id);
+`;
+
 export function normalizePostgresConnectionString(connectionString: string) {
   const url = new URL(connectionString);
   const isSupabasePooler = url.hostname === 'pooler.supabase.com' || url.hostname.endsWith('.pooler.supabase.com');
@@ -225,6 +257,9 @@ export class DB {
         {version: 9, name: 'prompted report regeneration', sql: reportRegenerationMigrationSql},
         {version: 11, name: 'report naming', sql: reportNamingMigrationSql},
         {version: 12, name: 'hide removed revoked devices', sql: removedDevicesMigrationSql},
+        {version: 13, name: 'repository selection', sql: repositorySelectionMigrationSql},
+        {version: 14, name: 'enforce repository selection at ingestion', sql: repositorySelectionEnforcementMigrationSql},
+        {version: 15, name: 'repository selection lifecycle fencing', sql: repositorySelectionLifecycleMigrationSql},
       ];
       for (const migration of migrations) {
         const checksum = crypto.createHash('sha256').update(migration.sql).digest('hex');

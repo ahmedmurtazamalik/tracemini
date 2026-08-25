@@ -1,6 +1,6 @@
 import {describe, expect, it, vi} from 'vitest';
 import type {Config} from '../packages/cli/src/config.js';
-import {normalizeServerUrl, previousDeviceTokenForServer, rebindDeviceConfig} from '../packages/cli/src/pairing.js';
+import {normalizeServerUrl, previousDeviceTokenForServer, rebindDeviceConfig, rebindWorkspaceConfig} from '../packages/cli/src/pairing.js';
 import {restartStartup, stopStartup} from '../packages/cli/src/install.js';
 
 const existing = (): Config => ({
@@ -32,6 +32,11 @@ describe('CLI device re-pairing', () => {
       pollMs: 5000,
     });
     expect(rebound).not.toHaveProperty('userToken');
+  });
+
+  it('clears watched roots and clones when the workspace binding changes', () => {
+    expect(rebindWorkspaceConfig(existing(), 8)).toMatchObject({workspaceId: 8, watchedPaths: [], clones: [], agentToken: 'old-device'});
+    expect(rebindWorkspaceConfig(existing(), 3)).toMatchObject({workspaceId: 3, watchedPaths: ['/home/ali', '/work/project']});
   });
 
   it('restarts the existing Linux user service after credentials change', () => {

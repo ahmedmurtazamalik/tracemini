@@ -22,6 +22,7 @@ import { reportJobProgress, type ReportJob } from "./report-progress.js";
 import { TIMEZONE_OPTIONS, formatInTimezone, normalizeTimezone, todayInTimezone } from "./timezone.js";
 import { waitForReportJob } from "./report-jobs.js";
 import { workspaceLoadPlan, type WorkspaceLoadKey } from "./workspace-loading.js";
+import { repositorySelectionState, type RepositoryCandidate } from "./repository-selection.js";
 import "./style.css";
 
 const request = async (path: string, init: RequestInit = {}) => {
@@ -536,7 +537,36 @@ function EmptyState({ title, text }: { title: string; text: string }) {
   );
 }
 
-function Settings({ workspace, members, repositories, agents, reload }: any) {
+function RepositorySelection({workspaceId, candidates, reload}: {workspaceId: number; candidates: RepositoryCandidate[]; reload: () => Promise<void>}) {
+  const [changing, setChanging] = useState<number>();
+  const [error, setError] = useState("");
+  const hasPending = candidates.some(candidate => candidate.desired_traced !== candidate.traced && !candidate.error);
+  useEffect(() => {
+    if (!hasPending) return;
+    const timer = setInterval(() => void reload(), 2_000);
+    return () => clearInterval(timer);
+  }, [hasPending, reload]);
+  return <section className="card settings-card repository-selection-card">
+    <span>Local Git discovery</span><h2>Traceable repositories</h2>
+    <p className="muted">Repositories found on your devices appear here. Turn tracing on to import recent history and record Git activity.</p>
+    {error && <div className="alert error" role="alert">{error}</div>}
+    {candidates.length ? candidates.map(candidate => {
+      const state = repositorySelectionState(candidate);
+      return <label className="repository-choice" key={candidate.id}>
+        <span><strong>{candidate.name}</strong><small>{candidate.machine_name} · {candidate.branch || "detached"}</small><code>{candidate.local_key}</code>{candidate.error && <small className="error-text">{candidate.error}</small>}</span>
+        <span className={`selection-state ${state.tone}`}>{state.label}</span>
+        <input type="checkbox" role="switch" aria-label={`Trace ${candidate.name} on ${candidate.machine_name}`} checked={state.checked} disabled={state.pending || changing === candidate.id} onChange={async event => {
+          setChanging(candidate.id); setError("");
+          try { await request(`/workspaces/${workspaceId}/repository-candidates/${candidate.id}`, {method: "PATCH", body: JSON.stringify({traced: event.target.checked})}); await reload(); }
+          catch (caught: any) { setError(caught.message); }
+          finally { setChanging(undefined); }
+        }} />
+      </label>;
+    }) : <p className="muted">Waiting for an online device to scan this computer for Git repositories.</p>}
+  </section>;
+}
+
+function Settings({ workspace, members, repositories, agents, repositoryCandidates, reload, reloadCandidates }: any) {
   const active = useActiveView();
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
@@ -571,6 +601,7 @@ function Settings({ workspace, members, repositories, agents, reload }: any) {
           You are a Member. This page is read-only.
         </div>
         <div className="settings-grid">
+          <RepositorySelection workspaceId={workspace.id} candidates={repositoryCandidates} reload={reloadCandidates} />
           <section className="card settings-card">
             <span>People</span>
             <h2>Members</h2>
@@ -616,6 +647,7 @@ function Settings({ workspace, members, repositories, agents, reload }: any) {
         </div>
       )}
       <div className="settings-grid" aria-busy={pending}>
+        <RepositorySelection workspaceId={workspace.id} candidates={repositoryCandidates} reload={reloadCandidates} />
         <section className="card settings-card">
           <span>People</span>
           <h2>Members</h2>
@@ -1355,6 +1387,7 @@ function App() {
   const [workspaceId, setWorkspaceId] = useState(0);
   const [events, setEvents] = useState<any[]>([]);
   const [repositories, setRepositories] = useState<any[]>([]);
+  const [repositoryCandidates, setRepositoryCandidates] = useState<RepositoryCandidate[]>([]);
   const [members, setMembers] = useState<any[]>([]);
   const [reports, setReports] = useState<any[]>([]);
   const [agents, setAgents] = useState<any[]>([]);
@@ -1377,6 +1410,7 @@ function App() {
     loadGeneration.current += 1;
     setEvents([]);
     setRepositories([]);
+    setRepositoryCandidates([]);
     setMembers([]);
     setReports([]);
     setAgents([]);
@@ -1431,6 +1465,7 @@ function App() {
     if (!selectedWorkspace) {
       setEvents([]);
       setRepositories([]);
+      setRepositoryCandidates([]);
       setMembers([]);
       setReports([]);
       setAgents([]);
@@ -1448,6 +1483,7 @@ function App() {
       const apply: Record<WorkspaceLoadKey, (value: any) => void> = {
         events: setEvents,
         repositories: setRepositories,
+        repositoryCandidates: setRepositoryCandidates,
         members: setMembers,
         reports: setReports,
         agents: setAgents,
@@ -1612,7 +1648,9 @@ function App() {
               workspace={workspace}
               members={members}
               repositories={repositories}
+              repositoryCandidates={repositoryCandidates}
               agents={agents}
+              reloadCandidates={loadWorkspace}
               reload={async () => {
                 const expectedWorkspace = workspaceId;
                 const selected = await loadIdentity(expectedWorkspace, () => dataWorkspaceId.current === expectedWorkspace);

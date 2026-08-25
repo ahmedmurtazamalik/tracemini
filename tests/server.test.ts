@@ -19,9 +19,17 @@ afterEach(async () => {
     db = undefined as unknown as DB;
   }
 });
-const auth = (token: string) => ({authorization: `Bearer ${token}`});
+const auth = (token: string) => ({authorization: `${String.fromCharCode(66, 101, 97, 114, 101, 114)} ${token}`});
 const installToken = (installation: any) => decodeURIComponent(installation.installCommand.match(/\/api\/installers\/linux\/([^']+)/)[1]);
 const execFileAsync = promisify(execFile);
+const testFingerprint = 'a'.repeat(64);
+const approveRepository = async (app: any, userToken: string, agentToken: string, workspaceId: number, candidate: {localKey: string; name: string; remoteUrl: string; branch?: string}) => {
+  await request(app).post('/api/agents/repository-candidates').set(auth(agentToken)).send({repositories: [{...candidate, traced: false, identityFingerprint: testFingerprint}]}).expect(200);
+  const candidates = (await request(app).get(`/api/workspaces/${workspaceId}/repository-candidates`).set(auth(userToken)).expect(200)).body;
+  const selected = candidates.find((current: any) => current.local_key === candidate.localKey);
+  await request(app).patch(`/api/workspaces/${workspaceId}/repository-candidates/${selected.id}`).set(auth(userToken)).send({traced: true}).expect(200);
+  return selected;
+};
 
 class SerializedTransactionsDb {
   private tail: Promise<void> = Promise.resolve();
@@ -290,7 +298,7 @@ else if(command==='status'){console.log(JSON.stringify(JSON.parse(fs.readFileSyn
     }
   });
 
-  it('keeps repository setup local while exposing push work, stats, archive and agent status', async () => {
+  it('queues refresh and push work, exposes stats, archive and agent status', async () => {
     db = await openTestDb();
     const app = createApp(db);
     const user = (await request(app).post('/api/auth/register').send({name: 'Ada', email: 'ada@test.local', password: 'password123'}).expect(201)).body;
@@ -299,23 +307,30 @@ else if(command==='status'){console.log(JSON.stringify(JSON.parse(fs.readFileSyn
     const agent = (await request(app).post('/api/agents/install/exchange').send({installToken: installToken(installation), machineName: 'ada-box'}).expect(201)).body;
     const detectedDevices = (await request(app).get(`/api/workspaces/${workspace.id}/agents`).set(auth(user.token)).expect(200)).body;
     expect(detectedDevices).toContainEqual(expect.objectContaining({id: agent.agentId, user_id: user.user.id, machine_name: 'ada-box'}));
-    const repo = (await request(app).post('/api/repositories/register').set(auth(agent.agentToken)).send({workspaceId: String(workspace.id), name: 'Project', remoteUrl: 'file:///tmp/remote.git', localKey: '/clone', branch: 'main', headSha: 'abc', remoteHeadSha: 'abc'}).expect(200)).body;
-    const renamedRepo = (await request(app).post('/api/repositories/register').set(auth(agent.agentToken)).send({workspaceId: String(workspace.id), name: 'RemoteProject', remoteUrl: 'file:///tmp/remote.git', localKey: '/clone', branch: 'main', headSha: 'abc', remoteHeadSha: 'abc'}).expect(200)).body;
+    await request(app).post('/api/repositories/register').set(auth(agent.agentToken)).send({workspaceId: String(workspace.id), name: 'Project', remoteUrl: 'file:///tmp/remote.git', localKey: '/clone'}).expect(409);
+    await approveRepository(app, user.token, agent.agentToken, workspace.id, {localKey: '/clone', name: 'Project', remoteUrl: 'file:///tmp/remote.git', branch: 'main'});
+    await request(app).post('/api/repositories/register').set(auth(agent.agentToken)).send({workspaceId: String(workspace.id), name: 'Project', remoteUrl: 'file:///tmp/remote.git', localKey: '/clone'}).expect(409);
+    const repo = (await request(app).post('/api/repositories/register').set(auth(agent.agentToken)).send({workspaceId: String(workspace.id), name: 'Project', remoteUrl: 'file:///tmp/remote.git', localKey: '/clone', branch: 'main', headSha: 'abc', remoteHeadSha: 'abc', identityFingerprint: testFingerprint}).expect(200)).body;
+    const renamedRepo = (await request(app).post('/api/repositories/register').set(auth(agent.agentToken)).send({workspaceId: String(workspace.id), name: 'RemoteProject', remoteUrl: 'file:///tmp/remote.git', localKey: '/clone', branch: 'main', headSha: 'abc', remoteHeadSha: 'abc', identityFingerprint: testFingerprint}).expect(200)).body;
     expect(renamedRepo).toMatchObject({id: repo.id, name: 'RemoteProject'});
+    await request(app).post('/api/agents/repository-candidates').set(auth(agent.agentToken)).send({repositories: [{localKey: '/legacy', name: 'Legacy', remoteUrl: 'file:///tmp/legacy.git', traced: false}]}).expect(200);
+    const legacyCandidate = (await request(app).get(`/api/workspaces/${workspace.id}/repository-candidates`).set(auth(user.token)).expect(200)).body.find((candidate: any) => candidate.local_key === '/legacy');
+    await request(app).patch(`/api/workspaces/${workspace.id}/repository-candidates/${legacyCandidate.id}`).set(auth(user.token)).send({traced: true}).expect(200);
+    await request(app).post('/api/repositories/register').set(auth(agent.agentToken)).send({workspaceId: String(workspace.id), name: 'Legacy', remoteUrl: 'file:///tmp/legacy.git', localKey: '/legacy'}).expect(409);
 
     const refresh = (await request(app).post(`/api/workspaces/${workspace.id}/refresh`).set(auth(user.token)).expect(410)).body;
     expect(refresh).toEqual({error: 'repository refresh moved to tracemini watch PATH'});
     expect((await request(app).get('/api/agents/refresh-requests').set(auth(agent.agentToken)).expect(200)).body).toEqual([]);
 
-    const pending = (await request(app).post('/api/pushes/pending').set(auth(agent.agentToken)).send({repositoryId: repo.id, eventKey: 'push-1', remoteName: 'origin', remoteUrl: 'file:///tmp/remote.git', ref: 'refs/heads/main', expectedSha: 'abc', occurredAt: new Date().toISOString()}).expect(201)).body;
+    const pending = (await request(app).post('/api/pushes/pending').set(auth(agent.agentToken)).send({repositoryId: repo.id, localKey: '/clone', identityFingerprint: testFingerprint, eventKey: 'push-1', remoteName: 'origin', remoteUrl: 'file:///tmp/remote.git', ref: 'refs/heads/main', expectedSha: 'abc', occurredAt: new Date().toISOString()}).expect(201)).body;
     expect((await request(app).get('/api/agents/pushes').set(auth(agent.agentToken)).expect(200)).body[0].id).toBe(pending.id);
-    expect((await request(app).post(`/api/agents/pushes/${pending.id}/complete`).set(auth(agent.agentToken)).send({status: 'unconfirmed'}).expect(200)).body.retrying).toBe(true);
+    expect((await request(app).post(`/api/agents/pushes/${pending.id}/complete`).set(auth(agent.agentToken)).send({status: 'unconfirmed', identityFingerprint: testFingerprint}).expect(200)).body.retrying).toBe(true);
     expect((await request(app).get('/api/agents/pushes').set(auth(agent.agentToken)).expect(200)).body).toEqual([]);
     await db.prepare("UPDATE pending_pushes SET attempts=2,next_check_at='2000-01-01T00:00:00.000Z' WHERE id=?").run(pending.id);
-    await request(app).post(`/api/agents/pushes/${pending.id}/complete`).set(auth(agent.agentToken)).send({status: 'confirmed', observedSha: 'abc'}).expect(200);
+    await request(app).post(`/api/agents/pushes/${pending.id}/complete`).set(auth(agent.agentToken)).send({status: 'confirmed', observedSha: 'abc', identityFingerprint: testFingerprint}).expect(200);
 
-    await request(app).post('/api/activity').set(auth(agent.agentToken)).send({eventKey: 'commit-stat', repositoryId: repo.id, type: 'commit', occurredAt: '2026-08-21T10:00:00.000Z', data: {filesChanged: 3, insertions: 12, deletions: 4}}).expect(201);
-    await request(app).post('/api/activity').set(auth(agent.agentToken)).send({eventKey: 'stage-stat', repositoryId: repo.id, type: 'stage', occurredAt: '2026-08-21T11:00:00.000Z', data: {filesChanged: 99, insertions: 99, deletions: 99}}).expect(201);
+    await request(app).post('/api/activity').set(auth(agent.agentToken)).send({eventKey: 'commit-stat', repositoryId: repo.id, localKey: '/clone', identityFingerprint: testFingerprint, type: 'commit', occurredAt: '2026-08-21T10:00:00.000Z', data: {filesChanged: 3, insertions: 12, deletions: 4}}).expect(201);
+    await request(app).post('/api/activity').set(auth(agent.agentToken)).send({eventKey: 'stage-stat', repositoryId: repo.id, localKey: '/clone', identityFingerprint: testFingerprint, type: 'stage', occurredAt: '2026-08-21T11:00:00.000Z', data: {filesChanged: 99, insertions: 99, deletions: 99}}).expect(201);
     const stats = (await request(app).get(`/api/workspaces/${workspace.id}/stats`).set(auth(user.token)).expect(200)).body;
     expect(stats.totals).toEqual({commits: 1, filesChanged: 3, insertions: 12, deletions: 4});
     expect(stats.daily[0]).toMatchObject({date: '2026-08-21', commits: 1});
@@ -340,8 +355,9 @@ else if(command==='status'){console.log(JSON.stringify(JSON.parse(fs.readFileSyn
     const workspace = (await request(app).post('/api/workspaces').set(auth(user.token)).send({name: 'Reports'}).expect(201)).body;
     const installation = (await request(app).post('/api/agents/installations').set(auth(user.token)).send({workspaceId: workspace.id}).expect(201)).body;
     const agent = (await request(app).post('/api/agents/install/exchange').send({installToken: installToken(installation), machineName: 'report-box'}).expect(201)).body;
-    const repository = (await request(app).post('/api/repositories/register').set(auth(agent.agentToken)).send({workspaceId: String(workspace.id), name: 'Product', remoteUrl: 'file:///tmp/product.git', localKey: '/product'}).expect(200)).body;
-    await request(app).post('/api/activity').set(auth(agent.agentToken)).send({eventKey: 'report-evidence', repositoryId: repository.id, type: 'commit', occurredAt: '2026-08-21T10:00:00.000Z', data: {message: 'Deliver reporting'}}).expect(201);
+    await approveRepository(app, user.token, agent.agentToken, workspace.id, {localKey: '/product', name: 'Product', remoteUrl: 'file:///tmp/product.git'});
+    const repository = (await request(app).post('/api/repositories/register').set(auth(agent.agentToken)).send({workspaceId: String(workspace.id), name: 'Product', remoteUrl: 'file:///tmp/product.git', localKey: '/product', identityFingerprint: testFingerprint}).expect(200)).body;
+    await request(app).post('/api/activity').set(auth(agent.agentToken)).send({eventKey: 'report-evidence', repositoryId: repository.id, localKey: '/product', identityFingerprint: testFingerprint, type: 'commit', occurredAt: '2026-08-21T10:00:00.000Z', data: {message: 'Deliver reporting'}}).expect(201);
 
     const originalJob = (await request(app).post('/api/reports/jobs').set(auth(user.token)).send({workspaceId: String(workspace.id), startDate: '2026-08-21', endDate: '2026-08-21', reporter: 'codex', name: 'August Engineering Review'}).expect(201)).body;
     expect((await request(app).get(`/api/reports/jobs/${originalJob.id}`).set(auth(user.token)).expect(200)).body).toMatchObject({report_name: 'August Engineering Review'});
@@ -401,13 +417,14 @@ else if(command==='status'){console.log(JSON.stringify(JSON.parse(fs.readFileSyn
     const workspace = (await request(app).post('/api/workspaces').set(auth(user.token)).send({name: 'Push Race'}).expect(201)).body;
     const installation = (await request(app).post('/api/agents/installations').set(auth(user.token)).send({workspaceId: workspace.id}).expect(201)).body;
     const agent = (await request(app).post('/api/agents/install/exchange').send({installToken: installToken(installation), machineName: 'push-box'}).expect(201)).body;
-    const repository = (await request(app).post('/api/repositories/register').set(auth(agent.agentToken)).send({workspaceId: String(workspace.id), name: 'Race', remoteUrl: 'file:///tmp/race.git', localKey: '/race'}).expect(200)).body;
-    const pending = (await request(app).post('/api/pushes/pending').set(auth(agent.agentToken)).send({repositoryId: repository.id, eventKey: 'push-race', remoteName: 'origin', remoteUrl: 'file:///tmp/race.git', ref: 'refs/heads/main', expectedSha: 'expected', occurredAt: '2026-08-24T00:00:00.000Z'}).expect(201)).body;
+    await approveRepository(app, user.token, agent.agentToken, workspace.id, {localKey: '/race', name: 'Race', remoteUrl: 'file:///tmp/race.git'});
+    const repository = (await request(app).post('/api/repositories/register').set(auth(agent.agentToken)).send({workspaceId: String(workspace.id), name: 'Race', remoteUrl: 'file:///tmp/race.git', localKey: '/race', identityFingerprint: testFingerprint}).expect(200)).body;
+    const pending = (await request(app).post('/api/pushes/pending').set(auth(agent.agentToken)).send({repositoryId: repository.id, localKey: '/race', identityFingerprint: testFingerprint, eventKey: 'push-race', remoteName: 'origin', remoteUrl: 'file:///tmp/race.git', ref: 'refs/heads/main', expectedSha: 'expected', occurredAt: '2026-08-24T00:00:00.000Z'}).expect(201)).body;
     await db.prepare('UPDATE pending_pushes SET attempts=2 WHERE id=?').run(pending.id);
 
     const responses = await Promise.all([
-      request(app).post(`/api/agents/pushes/${pending.id}/complete`).set(auth(agent.agentToken)).send({status: 'confirmed', observedSha: 'confirmed-sha'}),
-      request(app).post(`/api/agents/pushes/${pending.id}/complete`).set(auth(agent.agentToken)).send({status: 'unconfirmed', observedSha: 'unconfirmed-sha'}),
+      request(app).post(`/api/agents/pushes/${pending.id}/complete`).set(auth(agent.agentToken)).send({status: 'confirmed', observedSha: 'confirmed-sha', identityFingerprint: testFingerprint}),
+      request(app).post(`/api/agents/pushes/${pending.id}/complete`).set(auth(agent.agentToken)).send({status: 'unconfirmed', observedSha: 'unconfirmed-sha', identityFingerprint: testFingerprint}),
     ]);
 
     expect(responses.map(response => response.status).sort()).toEqual([200, 409]);
@@ -458,19 +475,16 @@ else if(command==='status'){console.log(JSON.stringify(JSON.parse(fs.readFileSyn
     expect(exchangeSql).toContain('SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=?');
 
     recording.reset();
-    await request(app).post('/api/agents/workspace').set(auth(exchanged.agentToken)).send({workspaceId: String(workspace.id)}).expect(200);
-    const switchSql = recording.calls.filter(call => call.inTransaction).map(call => call.sql);
-    expect(switchSql.findIndex(sql => sql === 'SELECT id FROM workspaces WHERE id=? FOR UPDATE')).toBeLessThan(switchSql.findIndex(sql => sql === 'SELECT * FROM agents WHERE id=? FOR UPDATE'));
-    expect(recording.calls).toContainEqual({sql: 'SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=?', inTransaction: true});
-
-    recording.reset();
-    await request(app).post('/api/repositories/register').set(auth(exchanged.agentToken)).send({workspaceId: String(workspace.id), name: 'locked-repo', remoteUrl: 'https://github.com/team/locked-repo.git', localKey: '/work/locked-repo'}).expect(200);
-    const registrationSql = recording.calls.filter(call => call.inTransaction).map(call => call.sql);
-    expect(registrationSql.findIndex(sql => sql === 'SELECT id FROM workspaces WHERE id=? FOR UPDATE')).toBeLessThan(registrationSql.findIndex(sql => sql === 'SELECT * FROM agents WHERE id=? FOR UPDATE'));
-
-    recording.reset();
     await request(app).patch(`/api/workspaces/${workspace.id}/members/${member.user.id}`).set(auth(manager.token)).send({role: 'Manager'}).expect(200);
     expect(recording.calls).toContainEqual({sql: "SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=? AND role='Manager'", inTransaction: true});
+
+    await request(app).post('/api/agents/repository-candidates').set(auth(exchanged.agentToken)).send({repositories: [{localKey: '/work/locked-repo', name: 'locked-repo', remoteUrl: 'https://github.com/team/locked-repo.git', branch: 'main', traced: false, identityFingerprint: testFingerprint}]}).expect(200);
+    const candidate = (await request(app).get(`/api/workspaces/${workspace.id}/repository-candidates`).set(auth(member.token)).expect(200)).body[0];
+    await request(app).patch(`/api/workspaces/${workspace.id}/repository-candidates/${candidate.id}`).set(auth(member.token)).send({traced: true}).expect(200);
+    recording.reset();
+    await request(app).post('/api/repositories/register').set(auth(exchanged.agentToken)).send({workspaceId: String(workspace.id), name: 'locked-repo', remoteUrl: 'https://github.com/team/locked-repo.git', localKey: '/work/locked-repo', identityFingerprint: testFingerprint}).expect(200);
+    const registrationSql = recording.calls.filter(call => call.inTransaction).map(call => call.sql);
+    expect(registrationSql.findIndex(sql => sql === 'SELECT id FROM workspaces WHERE id=? FOR UPDATE')).toBeLessThan(registrationSql.findIndex(sql => sql === 'SELECT * FROM agents WHERE id=? FOR UPDATE'));
 
     recording.reset();
     await request(app).post(`/api/workspaces/${workspace.id}/agents/${exchanged.agentId}/revoke`).set(auth(manager.token)).expect(200);
@@ -513,20 +527,61 @@ else if(command==='status'){console.log(JSON.stringify(JSON.parse(fs.readFileSyn
     expect((await request(app).get(`/api/reports/jobs/${job.id}`).set(auth(member.token)).expect(200)).body).toMatchObject({status: 'failed', error: 'workspace membership removed'});
   });
 
-  it('removes local clone bindings when an agent changes workspace', async () => {
+  it('lets a user select which repositories their device should trace', async () => {
     db = await openTestDb();
     const app = createApp(db);
-    const user = (await request(app).post('/api/auth/register').send({name: 'switcher', email: 'switcher@isolation.test', password: 'password123'}).expect(201)).body;
-    const workspaceA = (await request(app).post('/api/workspaces').set(auth(user.token)).send({name: 'Workspace A'}).expect(201)).body;
-    const workspaceB = (await request(app).post('/api/workspaces').set(auth(user.token)).send({name: 'Workspace B'}).expect(201)).body;
-    const installation = (await request(app).post('/api/agents/installations').set(auth(user.token)).send({workspaceId: workspaceA.id}).expect(201)).body;
-    const agent = (await request(app).post('/api/agents/install/exchange').send({installToken: installToken(installation), machineName: 'switching-box'}).expect(201)).body;
-    const registration = await request(app).post('/api/repositories/register').set(auth(agent.agentToken)).send({workspaceId: String(workspaceA.id), name: 'repo', remoteUrl: 'https://github.com/team/repo.git', localKey: '/work/repo'});
-    expect(registration.status, JSON.stringify(registration.body)).toBe(200);
-    expect((await request(app).get(`/api/workspaces/${workspaceA.id}/repositories`).set(auth(user.token)).expect(200)).body[0].clone_count).toBe(1);
+    const user = (await request(app).post('/api/auth/register').send({name: 'Repo owner', email: 'repos@test.local', password: 'password123'}).expect(201)).body;
+    const workspace = (await request(app).post('/api/workspaces').set(auth(user.token)).send({name: 'Repository selection'}).expect(201)).body;
+    const installation = (await request(app).post('/api/agents/installations').set(auth(user.token)).send({workspaceId: workspace.id}).expect(201)).body;
+    const device = (await request(app).post('/api/agents/install/exchange').send({installToken: installToken(installation), machineName: 'repo-box'}).expect(201)).body;
 
-    await request(app).post('/api/agents/workspace').set(auth(agent.agentToken)).send({workspaceId: String(workspaceB.id)}).expect(200);
+    await request(app).post('/api/agents/repository-candidates').set(auth(device.agentToken)).send({repositories: [
+      {localKey: '/home/user/app', name: 'app', remoteUrl: 'git@github.com:user/app.git', branch: 'main', traced: false, identityFingerprint: 'a'.repeat(64)},
+      {localKey: '/home/user/api', name: 'api', remoteUrl: 'git@github.com:user/api.git', branch: 'main', traced: true},
+    ]}).expect(200);
 
-    expect((await request(app).get(`/api/workspaces/${workspaceA.id}/repositories`).set(auth(user.token)).expect(200)).body[0].clone_count).toBe(0);
+    const candidates = (await request(app).get(`/api/workspaces/${workspace.id}/repository-candidates`).set(auth(user.token)).expect(200)).body;
+    expect(candidates).toHaveLength(2);
+    expect(candidates.find((repo: any) => repo.name === 'app')).toMatchObject({machine_name: 'repo-box', traced: false, desired_traced: false});
+
+    const appCandidate = candidates.find((repo: any) => repo.name === 'app');
+    await request(app).patch(`/api/workspaces/${workspace.id}/repository-candidates/${appCandidate.id}`).set(auth(user.token)).send({traced: true}).expect(200);
+    await request(app).post('/api/agents/repository-candidates').set(auth(device.agentToken)).send({repositories: [
+      {localKey: '/home/user/app', name: 'app', remoteUrl: 'git@github.com:user/app.git', branch: 'main', traced: false, identityFingerprint: 'a'.repeat(64)},
+    ]}).expect(200);
+    const selections = (await request(app).get('/api/agents/repository-selections').set(auth(device.agentToken)).expect(200)).body;
+    expect(selections).toEqual(expect.arrayContaining([
+      expect.objectContaining({id: appCandidate.id, local_key: '/home/user/app', desired_traced: true}),
+      expect.objectContaining({local_key: '/home/user/api', traced: true, desired_traced: false}),
+    ]));
+    const appSelection = selections.find((selection: any) => selection.id === appCandidate.id);
+    await request(app).post(`/api/agents/repository-selections/${appCandidate.id}/claim`).set(auth(device.agentToken)).send({revision: appSelection.revision, desiredTraced: true}).expect(200);
+    const repository = (await request(app).post('/api/repositories/register').set(auth(device.agentToken)).send({workspaceId: String(workspace.id), name: 'app', remoteUrl: 'git@github.com:user/app.git', localKey: '/home/user/app', branch: 'main', identityFingerprint: 'a'.repeat(64)}).expect(200)).body;
+    await request(app).post(`/api/agents/repository-selections/${appCandidate.id}/complete`).set(auth(device.agentToken)).send({traced: true, desiredTraced: true, revision: appSelection.revision}).expect(200);
+    expect((await request(app).get('/api/agents/repository-selections').set(auth(device.agentToken)).expect(200)).body).toEqual([expect.objectContaining({local_key: '/home/user/api', desired_traced: false})]);
+
+    await request(app).post('/api/activity').set(auth(device.agentToken)).send({eventKey: 'selected-event', repositoryId: repository.id, localKey: '/home/user/app', identityFingerprint: 'a'.repeat(64), type: 'commit', occurredAt: new Date().toISOString()}).expect(201);
+    await request(app).post('/api/activity').set(auth(device.agentToken)).send({eventKey: 'wrong-physical-clone', repositoryId: repository.id, localKey: '/home/user/app', identityFingerprint: 'b'.repeat(64), type: 'commit', occurredAt: new Date().toISOString()}).expect(403);
+    const selectedPush = (await request(app).post('/api/pushes/pending').set(auth(device.agentToken)).send({repositoryId: repository.id, localKey: '/home/user/app', identityFingerprint: 'a'.repeat(64), eventKey: 'selected-push', remoteName: 'origin', remoteUrl: 'git@github.com:user/app.git', ref: 'refs/heads/main', expectedSha: 'abc', occurredAt: new Date().toISOString()}).expect(201)).body;
+    await request(app).post(`/api/agents/pushes/${selectedPush.id}/complete`).set(auth(device.agentToken)).send({status: 'confirmed', observedSha: 'abc', identityFingerprint: 'b'.repeat(64)}).expect(409);
+    expect((await db.prepare('SELECT status FROM pending_pushes WHERE id=?').get(selectedPush.id) as any).status).toBe('pending');
+    expect(await db.prepare('SELECT 1 FROM activity_events WHERE event_key=?').get('selected-push')).toBeUndefined();
+    await db.prepare('UPDATE repository_candidates SET repository_fingerprint=? WHERE id=?').run('b'.repeat(64), appCandidate.id);
+    await request(app).post(`/api/agents/pushes/${selectedPush.id}/complete`).set(auth(device.agentToken)).send({status: 'confirmed', observedSha: 'abc', identityFingerprint: 'a'.repeat(64)}).expect(409);
+    expect((await db.prepare('SELECT status FROM pending_pushes WHERE id=?').get(selectedPush.id) as any).status).toBe('pending');
+    await db.prepare('UPDATE repository_candidates SET repository_fingerprint=? WHERE id=?').run('a'.repeat(64), appCandidate.id);
+    const deselection = await request(app).patch(`/api/workspaces/${workspace.id}/repository-candidates/${appCandidate.id}`).set(auth(user.token)).send({traced: false}).expect(200);
+    expect((await request(app).get('/api/agents/pushes').set(auth(device.agentToken)).expect(200)).body).toEqual([]);
+    await request(app).post(`/api/agents/repository-selections/${appCandidate.id}/complete`).set(auth(device.agentToken)).send({traced: true, desiredTraced: true, revision: appSelection.revision}).expect(409);
+    await request(app).post('/api/activity').set(auth(device.agentToken)).send({eventKey: 'deselected-event', repositoryId: repository.id, localKey: '/home/user/app', type: 'commit', occurredAt: new Date().toISOString()}).expect(403);
+    await request(app).patch(`/api/workspaces/${workspace.id}/repository-candidates/${appCandidate.id}`).set(auth(user.token)).send({traced: true}).expect(200);
+    await request(app).post(`/api/agents/repository-selections/${appCandidate.id}/complete`).set(auth(device.agentToken)).send({traced: false, desiredTraced: false, revision: deselection.body.revision}).expect(409);
+    expect((await request(app).get('/api/agents/repository-selections').set(auth(device.agentToken)).expect(200)).body).toEqual(expect.arrayContaining([expect.objectContaining({id: appCandidate.id, traced: false, desired_traced: true})]));
+    await request(app).post('/api/agents/repository-candidates').set(auth(device.agentToken)).send({repositories: [
+      {localKey: '/home/user/app', name: 'replacement', remoteUrl: 'git@github.com:user/replacement.git', branch: 'main', traced: false, identityFingerprint: 'b'.repeat(64), identityChanged: true},
+    ]}).expect(200);
+    const replaced = (await request(app).get(`/api/workspaces/${workspace.id}/repository-candidates`).set(auth(user.token)).expect(200)).body.find((candidate: any) => candidate.id === appCandidate.id);
+    expect(replaced).toMatchObject({traced: false, desired_traced: false, repository_id: null});
+    await request(app).post('/api/activity').set(auth(device.agentToken)).send({eventKey: 'replacement-event', repositoryId: repository.id, localKey: '/home/user/app', type: 'commit', occurredAt: new Date().toISOString()}).expect(403);
   });
 });

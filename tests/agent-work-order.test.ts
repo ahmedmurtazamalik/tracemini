@@ -19,7 +19,7 @@ describe('agent service work ordering', () => {
       const pathname = new URL(String(input)).pathname;
       paths.push(pathname);
       if (pathname === '/api/agents/heartbeat') return Response.json({ok: true});
-      if (pathname === '/api/agents/jobs' || pathname === '/api/agents/pushes') return Response.json([]);
+      if (pathname === '/api/agents/jobs' || pathname === '/api/agents/pushes' || pathname === '/api/agents/repository-selections') return Response.json([]);
       return Response.json({error: `unexpected ${pathname}`}, {status: 404});
     }));
     const config: Config = {
@@ -37,6 +37,7 @@ describe('agent service work ordering', () => {
     expect(paths).toEqual([
       '/api/agents/heartbeat',
       '/api/agents/jobs',
+      '/api/agents/repository-selections',
       '/api/agents/pushes',
     ]);
     expect(paths).not.toContain('/api/agents/refresh-requests');
