@@ -56,10 +56,10 @@ describe('evidence-rich reports', () => {
     execFileSync('git', ['add', '.'], {cwd: temporary});
     execFileSync('git', ['commit', '-qm', 'feat: update configuration behavior'], {cwd: temporary});
     const sha = execFileSync('git', ['rev-parse', 'HEAD'], {cwd: temporary, encoding: 'utf8'}).trim();
-    const event = {repository_name: 'sample', normalized_remote: 'example/sample', occurred_at: '2026-08-24T10:00:00Z', type: 'commit', data: {commitSha: sha, message: 'feat: update configuration behavior'}};
+    const event = {repository_name: 'sample', normalized_remote: 'example/sample', occurred_at: '2026-08-24T10:00:00Z', type: 'commit', data: {commitSha: sha, message: 'feat: update configuration behavior', password: 'event-password-value', endpoint: 'postgres://event-user:event-password@example.test/app'}};
 
     const prompt = contextPrompt({job: {start_date: '2026-08-24', end_date: '2026-08-24', timezone: 'UTC', include_diff: true}, events: [event]}, [{path: temporary, normalizedRemote: 'example/sample'}] as any);
-    for (const secret of ['context-password-value', 'db-password', 'bearer-secret-value', 'quoted-api-secret-value']) expect(prompt).not.toContain(secret);
+    for (const secret of ['context-password-value', 'db-password', 'bearer-secret-value', 'quoted-api-secret-value', 'event-password-value', 'event-password']) expect(prompt).not.toContain(secret);
     expect(prompt).toContain('[REDACTED SENSITIVE VALUE]');
   });
 });

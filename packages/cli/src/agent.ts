@@ -97,6 +97,17 @@ function redactSensitiveDiff(text: string) {
   }).join('\n');
 }
 
+function redactEvidence(value: unknown, key = ''): unknown {
+  if (/(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key|password|passphrase|authorization|database[_-]?url|connection[_-]?string|secret|credential)/i.test(key)) return '[REDACTED SENSITIVE VALUE]';
+  if (typeof value === 'string') {
+    const redacted = redactSensitiveDiff(value);
+    return redacted.includes('[REDACTED ') ? '[REDACTED SENSITIVE VALUE]' : value;
+  }
+  if (Array.isArray(value)) return value.map(item => redactEvidence(item));
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([field, item]) => [field, redactEvidence(item, field)]));
+  return value;
+}
+
 export function contextPrompt(context: any, clones: Config['clones']) {
   const grouped = new Map<string, any[]>();
   for (const event of context.events) grouped.set(event.normalized_remote, [...(grouped.get(event.normalized_remote) || []), event]);
@@ -115,7 +126,7 @@ export function contextPrompt(context: any, clones: Config['clones']) {
     for (const event of events) {
       const data = event.data || {};
       text += `\n### ${event.type}${data.commitSha ? ` ${String(data.commitSha).slice(0, 12)}` : ''}\n`;
-      text += `Timestamp: ${event.occurred_at}\nEvidence: ${JSON.stringify(data)}\n`;
+      text += `Timestamp: ${event.occurred_at}\nEvidence: ${JSON.stringify(redactEvidence(data))}\n`;
       if (clone && event.type === 'commit' && data.commitSha) {
         try {
           const args = includeDiff
