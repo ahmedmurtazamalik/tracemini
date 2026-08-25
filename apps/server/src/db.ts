@@ -98,6 +98,11 @@ ALTER TABLE report_jobs ADD COLUMN IF NOT EXISTS target_report_id INTEGER;
 CREATE INDEX IF NOT EXISTS idx_report_jobs_target_active ON report_jobs(target_report_id,status) WHERE target_report_id IS NOT NULL;
 `;
 
+const reportNamingMigrationSql = `
+ALTER TABLE report_jobs ADD COLUMN IF NOT EXISTS report_name TEXT;
+ALTER TABLE reports ADD COLUMN IF NOT EXISTS name TEXT NOT NULL DEFAULT 'Engineering contribution report';
+`;
+
 export function normalizePostgresConnectionString(connectionString: string) {
   const url = new URL(connectionString);
   const isSupabasePooler = url.hostname === 'pooler.supabase.com' || url.hostname.endsWith('.pooler.supabase.com');
@@ -206,6 +211,7 @@ export class DB {
         {version: 4, name: 'workspace invite refresh cooldown', sql: inviteRefreshMigrationSql},
         {version: 5, name: 'remove password recovery', sql: removePasswordRecoveryMigrationSql},
         {version: 9, name: 'prompted report regeneration', sql: reportRegenerationMigrationSql},
+        {version: 11, name: 'report naming', sql: reportNamingMigrationSql},
       ];
       for (const migration of migrations) {
         const checksum = crypto.createHash('sha256').update(migration.sql).digest('hex');

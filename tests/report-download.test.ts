@@ -14,4 +14,14 @@ describe('report downloads', () => {
       mimeType: 'text/markdown;charset=utf-8',
     });
   });
+
+  it('uses a safe report name in the Markdown filename', () => {
+    expect(buildReportDownload({
+      id: 43,
+      name: 'August Platform Delivery / Review',
+      start_date: '2026-08-01',
+      end_date: '2026-08-07',
+      markdown: '# Named report',
+    }).filename).toBe('tracemini-august-platform-delivery-review.md');
+  });
 });

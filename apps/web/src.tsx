@@ -1013,12 +1013,31 @@ function Dashboard({
 }
 
 function ReportDetail({ report, workspaceId, currentUserId, reload }: any) {
+  const [showRename, setShowRename] = useState(false);
   const [showRegenerate, setShowRegenerate] = useState(false);
+  const [name, setName] = useState(report.name || "");
   const [reporter, setReporter] = useState("codex");
   const [prompt, setPrompt] = useState("");
   const [pending, setPending] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const rename = async (event: FormEvent) => {
+    event.preventDefault();
+    setPending(true);
+    setMessage("");
+    setError("");
+    try {
+      const updated = await request(`/reports/${report.id}`, {method: "PATCH", body: JSON.stringify({name})});
+      setName(updated.name);
+      setMessage("Report renamed successfully.");
+      setShowRename(false);
+      await reload();
+    } catch (caught: any) {
+      setError(caught.message);
+    } finally {
+      setPending(false);
+    }
+  };
   const regenerate = async (event: FormEvent) => {
     event.preventDefault();
     setPending(true);
@@ -1051,19 +1070,40 @@ function ReportDetail({ report, workspaceId, currentUserId, reload }: any) {
   };
   return (
     <section className="card report">
+      <div className="section-heading report-heading">
+        <div><span>Engineering contribution report</span><h1>{report.name || `${report.start_date} — ${report.end_date}`}</h1></div>
+      </div>
       <div className="actions report-actions">
         <button className="button secondary" onClick={() => navigate(workspacePath(workspaceId, "reports"))}>
           ← Report history
         </button>
         {report.user_id === currentUserId && (
-          <button className="button secondary" onClick={() => setShowRegenerate(!showRegenerate)}>
-            Regenerate
-          </button>
+          <>
+            <button className="button secondary" onClick={() => setShowRename(!showRename)}>
+              Rename
+            </button>
+            <button className="button secondary" onClick={() => setShowRegenerate(!showRegenerate)}>
+              Regenerate
+            </button>
+          </>
         )}
         <button className="button primary" onClick={() => downloadReport(report)}>
           Download .md
         </button>
       </div>
+      {showRename && (
+        <form className="reports-create-card" onSubmit={rename}>
+          <div className="reports-controls">
+            <label className="span-two">
+              Report name
+              <input required maxLength={120} value={name} onChange={(event) => setName(event.target.value)} />
+            </label>
+            <button className="button primary" disabled={pending || !name.trim()} type="submit">
+              {pending ? "Saving…" : "Save name"}
+            </button>
+          </div>
+        </form>
+      )}
       {showRegenerate && (
         <form className="reports-create-card" onSubmit={regenerate}>
           <div className="section-heading">
@@ -1096,6 +1136,7 @@ function ReportDetail({ report, workspaceId, currentUserId, reload }: any) {
 
 function Reports({ workspaceId, dates, setDates, reports, reload, error }: any) {
   const [reporter, setReporter] = useState("codex");
+  const [name, setName] = useState("");
   const [pending, setPending] = useState(false);
   const [actionError, setActionError] = useState("");
   const [message, setMessage] = useState("");
@@ -1114,6 +1155,10 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error }: any) 
           </div>
         </div>
         <div className="reports-controls">
+          <label className="span-two">
+            Report name <small>(optional)</small>
+            <input maxLength={120} value={name} onChange={(event) => setName(event.target.value)} placeholder="Example: August platform delivery review" />
+          </label>
           <label>
             From
             <input
@@ -1152,8 +1197,10 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error }: any) 
                     startDate: dates.from,
                     endDate: dates.to,
                     reporter,
+                    name,
                   }),
                 });
+                setName("");
                 setMessage("Report queued. A connected device will generate it shortly.");
                 await reload();
               } catch (caught: any) {
@@ -1183,8 +1230,8 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error }: any) 
             key={item.id}
             onClick={() => navigate(`/workspaces/${workspaceId}/reports/${item.id}`)}
           >
-            <strong>{item.start_date} — {item.end_date}</strong>
-            <small>{item.user_name}</small>
+            <strong>{item.name || `${item.start_date} — ${item.end_date}`}</strong>
+            <small>{item.start_date} — {item.end_date} · {item.user_name}</small>
           </button>
         )) : <EmptyState title="No reports yet" text="Generate the first report for this workspace." />}
       </section>

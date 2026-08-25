@@ -11,6 +11,7 @@ const now = () => new Date().toISOString();
 const expired = (value: string | Date) => new Date(value).getTime() <= Date.now();
 const eventData = (value: unknown) => typeof value === 'string' ? JSON.parse(value) : value;
 const isoDate = (value: string | Date) => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : new Date(value).toISOString().slice(0, 10);
+const defaultReportName = (startDate: string | Date, endDate: string | Date) => `Engineering contributions · ${isoDate(startDate)} — ${isoDate(endDate)}`;
 const reportOutput = (row: any) => ({...row, start_date: isoDate(row.start_date), end_date: isoDate(row.end_date)});
 const instant = (value: unknown) => {
   if (typeof value !== 'string') return undefined;
@@ -468,11 +469,14 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
   app.post('/api/reports/jobs', userAuth, required(['workspaceId', 'startDate', 'endDate', 'reporter']), async (req: Authed, res) => {
     if (!['codex', 'hermes'].includes(req.body.reporter)) return res.status(400).json({error: 'invalid reporter'});
     if (!dateOnly(req.body.startDate) || !dateOnly(req.body.endDate) || req.body.startDate > req.body.endDate) return res.status(400).json({error: 'invalid report date range'});
+    if (req.body.name !== undefined && typeof req.body.name !== 'string') return res.status(400).json({error: 'invalid report name'});
+    const reportName = req.body.name?.trim() || defaultReportName(req.body.startDate, req.body.endDate);
+    if (reportName.length > 120) return res.status(400).json({error: 'report name must be 120 characters or fewer'});
     const jobId = await db.transaction(async () => {
       const workspaceId = +req.body.workspaceId;
       const workspace = await db.prepare('SELECT id FROM workspaces WHERE id=? FOR UPDATE').get(workspaceId);
       if (!workspace || !(await db.prepare('SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=?').get(workspaceId, req.user.id))) return undefined;
-      const result = await db.prepare("INSERT INTO report_jobs(workspace_id,user_id,reporter,start_date,end_date,status,created_at) VALUES(?,?,?,?,?,'pending',?) RETURNING id").run(workspaceId, req.user.id, req.body.reporter, req.body.startDate, req.body.endDate, now());
+      const result = await db.prepare("INSERT INTO report_jobs(workspace_id,user_id,reporter,start_date,end_date,status,report_name,created_at) VALUES(?,?,?,?,?,'pending',?,?) RETURNING id").run(workspaceId, req.user.id, req.body.reporter, req.body.startDate, req.body.endDate, reportName, now());
       return Number(result.lastInsertRowid);
     });
     if (!jobId) return res.status(403).json({error: 'forbidden'});
@@ -501,6 +505,24 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
     if (result.status === 'conflict') return res.status(409).json({error: 'report regeneration already queued'});
     res.status(201).json({id: result.id, status: 'pending'});
   });
+  app.patch('/api/reports/:id', userAuth, required(['name']), async (req: Authed, res) => {
+    const name = req.body.name.trim();
+    if (name.length > 120) return res.status(400).json({error: 'report name must be 120 characters or fewer'});
+    const scope: any = await db.prepare('SELECT workspace_id FROM reports WHERE id=? AND user_id=?').get(req.params.id, req.user.id);
+    if (!scope) return res.status(404).json({error: 'not found'});
+    const result = await db.transaction(async () => {
+      const workspace = await db.prepare('SELECT id FROM workspaces WHERE id=? FOR UPDATE').get(scope.workspace_id);
+      if (!workspace) return {status: 'not_found'};
+      const report: any = await db.prepare('SELECT id,workspace_id FROM reports WHERE id=? AND user_id=? AND workspace_id=? FOR UPDATE').get(req.params.id, req.user.id, scope.workspace_id);
+      if (!report) return {status: 'not_found'};
+      const member = await db.prepare('SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=?').get(report.workspace_id, req.user.id);
+      if (!member) return {status: 'forbidden'};
+      return {status: 'updated', report: await db.prepare('UPDATE reports SET name=? WHERE id=? RETURNING *').get(name, report.id)};
+    });
+    if (result.status === 'not_found') return res.status(404).json({error: 'not found'});
+    if (result.status === 'forbidden') return res.status(403).json({error: 'forbidden'});
+    res.json(reportOutput(result.report));
+  });
   app.get('/api/reports/jobs/:id', userAuth, async (req: Authed, res) => { const row = await db.prepare('SELECT * FROM report_jobs WHERE id=? AND user_id=?').get(req.params.id, req.user.id); row ? res.json(row) : res.status(404).json({error: 'not found'}); });
   app.get('/api/agents/jobs', agentAuth, async (req: Authed, res) => res.json(await db.prepare("SELECT * FROM report_jobs WHERE user_id=? AND workspace_id=? AND status='pending' ORDER BY id LIMIT 1").all(req.agent.user_id, req.agent.workspace_id)));
   app.post('/api/agents/jobs/:id/claim', agentAuth, async (req: Authed, res) => { const result = await db.prepare("UPDATE report_jobs SET status='running',agent_id=?,claimed_at=? WHERE id=? AND user_id=? AND workspace_id=? AND status='pending'").run(req.agent.id, now(), req.params.id, req.agent.user_id, req.agent.workspace_id); result.changes ? res.json(await db.prepare('SELECT * FROM report_jobs WHERE id=?').get(req.params.id)) : res.status(409).json({error: 'job unavailable'}); });
@@ -518,7 +540,7 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
         const updated = await db.prepare('UPDATE reports SET job_id=?,markdown=?,created_at=? WHERE id=? AND workspace_id=? AND user_id=?').run(job.id, req.body.markdown, now(), job.target_report_id, job.workspace_id, job.user_id);
         if (updated.changes !== 1) return false;
       } else {
-        await db.prepare('INSERT INTO reports(job_id,workspace_id,user_id,start_date,end_date,markdown,created_at) VALUES(?,?,?,?,?,?,?)').run(job.id, job.workspace_id, job.user_id, job.start_date, job.end_date, req.body.markdown, now());
+        await db.prepare('INSERT INTO reports(job_id,workspace_id,user_id,start_date,end_date,name,markdown,created_at) VALUES(?,?,?,?,?,?,?,?)').run(job.id, job.workspace_id, job.user_id, job.start_date, job.end_date, job.report_name || defaultReportName(job.start_date, job.end_date), req.body.markdown, now());
       }
       await db.prepare("UPDATE report_jobs SET status='completed',completed_at=? WHERE id=?").run(now(), job.id);
       return true;
