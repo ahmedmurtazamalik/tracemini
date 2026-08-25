@@ -299,6 +299,8 @@ else if(command==='status'){console.log(JSON.stringify(JSON.parse(fs.readFileSyn
     const detectedDevices = (await request(app).get(`/api/workspaces/${workspace.id}/agents`).set(auth(user.token)).expect(200)).body;
     expect(detectedDevices).toContainEqual(expect.objectContaining({id: agent.agentId, user_id: user.user.id, machine_name: 'ada-box'}));
     const repo = (await request(app).post('/api/repositories/register').set(auth(agent.agentToken)).send({workspaceId: String(workspace.id), name: 'Project', remoteUrl: 'file:///tmp/remote.git', localKey: '/clone', branch: 'main', headSha: 'abc', remoteHeadSha: 'abc'}).expect(200)).body;
+    const renamedRepo = (await request(app).post('/api/repositories/register').set(auth(agent.agentToken)).send({workspaceId: String(workspace.id), name: 'RemoteProject', remoteUrl: 'file:///tmp/remote.git', localKey: '/clone', branch: 'main', headSha: 'abc', remoteHeadSha: 'abc'}).expect(200)).body;
+    expect(renamedRepo).toMatchObject({id: repo.id, name: 'RemoteProject'});
 
     const refresh = (await request(app).post(`/api/workspaces/${workspace.id}/refresh`).set(auth(user.token)).expect(201)).body;
     expect((await request(app).get('/api/agents/refresh-requests').set(auth(agent.agentToken)).expect(200)).body[0].id).toBe(refresh.id);

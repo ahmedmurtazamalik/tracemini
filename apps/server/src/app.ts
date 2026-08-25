@@ -340,7 +340,7 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
     if (req.agent.workspace_id !== workspaceId) return res.status(403).json({error: 'device belongs to another workspace'});
     const normalized = normalizeRemote(req.body.remoteUrl);
     if (!normalized) return res.status(400).json({error: 'remote URL required'});
-    await db.prepare('INSERT INTO repositories(workspace_id,name,remote_url,normalized_remote,created_at) VALUES(?,?,?,?,?) ON CONFLICT DO NOTHING').run(workspaceId, req.body.name, req.body.remoteUrl, normalized, now());
+    await db.prepare('INSERT INTO repositories(workspace_id,name,remote_url,normalized_remote,created_at) VALUES(?,?,?,?,?) ON CONFLICT(workspace_id,normalized_remote) DO UPDATE SET name=excluded.name,remote_url=excluded.remote_url').run(workspaceId, req.body.name, req.body.remoteUrl, normalized, now());
     const repository: any = await db.prepare('SELECT * FROM repositories WHERE workspace_id=? AND normalized_remote=?').get(workspaceId, normalized);
     await db.prepare('INSERT INTO local_clones(agent_id,repository_id,local_key,branch,last_seen,head_sha,remote_head_sha) VALUES(?,?,?,?,?,?,?) ON CONFLICT(agent_id,local_key) DO UPDATE SET repository_id=excluded.repository_id,branch=excluded.branch,last_seen=excluded.last_seen,head_sha=excluded.head_sha,remote_head_sha=excluded.remote_head_sha').run(req.agent.id, repository.id, req.body.localKey, req.body.branch || null, now(), req.body.headSha || null, req.body.remoteHeadSha || null);
     res.json(repository);

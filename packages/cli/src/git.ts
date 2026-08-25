@@ -51,11 +51,18 @@ export function readRepositoryState(repo: string): RepositoryState {
   return {branch, headSha, remoteHeadSha, headAction};
 }
 
+export function repositoryNameFromRemote(value: string) {
+  const withoutSuffix = value.trim().replace(/\\/g, '/').replace(/\.git\/?$/i, '').replace(/\/$/, '');
+  return decodeURIComponent(withoutSuffix.split('/').pop()?.split(':').pop() || '');
+}
+
 export function inspectRepo(repo: string) {
   const remoteUrl = git(repo, ['remote', 'get-url', 'origin']);
+  const remoteName = repositoryNameFromRemote(remoteUrl);
+  const matchingLocalName = path.resolve(repo).split(path.sep).reverse().find(segment => segment.toLowerCase() === remoteName.toLowerCase());
   return {
     path: path.resolve(repo),
-    name: path.basename(repo),
+    name: matchingLocalName || remoteName || path.basename(repo),
     remoteUrl,
     normalizedRemote: normalizeRemote(remoteUrl),
     ...readRepositoryState(repo),

@@ -18,7 +18,7 @@ describe('real Git integration', () => {
     expect(stagedData(repo).changedFiles).toEqual(['one.txt']);
     run(repo, 'commit', '-m', 'First real commit');
     expect(discover(tmp)).toEqual([repo]);
-    expect(inspectRepo(repo).normalizedRemote).toBe('example.com/team/project');
+    expect(inspectRepo(repo)).toMatchObject({name: 'Project', normalizedRemote: 'example.com/team/project'});
     expect(commitData(repo)).toMatchObject({ message: 'First real commit', filesChanged: 1 });
     const hook = path.join(repo, '.git', 'hooks', 'post-commit');
     fs.writeFileSync(hook, '#!/bin/sh\necho original\n', { mode: 0o755 });
@@ -26,6 +26,16 @@ describe('real Git integration', () => {
     expect(fs.readFileSync(hook, 'utf8')).toContain('TraceMini managed hook');
     expect(fs.readFileSync(hook + '.tracemini-original', 'utf8')).toContain('original');
     expect(normalizeRemote('https://example.com/team/project.git')).toBe(normalizeRemote('git@example.com:team/project.git'));
+  });
+
+  it('uses matching parent-folder casing for a lowercase remote repository slug', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tracemini-name-'));
+    const repo = path.join(tmp, 'CoachConnect', 'Project');
+    fs.mkdirSync(repo, {recursive: true});
+    run(repo, 'init'); run(repo, 'config', 'user.email', 'ada@example.com'); run(repo, 'config', 'user.name', 'Ada');
+    run(repo, 'remote', 'add', 'origin', 'https://github.com/team/coachconnect.git');
+
+    expect(inspectRepo(repo).name).toBe('CoachConnect');
   });
 
   it('imports only commits inside an initial or incremental history window', () => {
