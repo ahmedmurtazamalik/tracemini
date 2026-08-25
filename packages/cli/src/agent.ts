@@ -76,10 +76,12 @@ async function processPushes(config: Config) {
   }
 }
 
-function contextPrompt(context: any, clones: Config['clones']) {
+export function contextPrompt(context: any, clones: Config['clones']) {
   const grouped = new Map<string, any[]>();
   for (const event of context.events) grouped.set(event.normalized_remote, [...(grouped.get(event.normalized_remote) || []), event]);
-  let text = `Generate a factual Markdown personal development report for ${context.job.start_date} through ${context.job.end_date}. Use only the supplied Git evidence. Do not modify files.\n\n`;
+  let text = `Generate a factual Markdown report about engineering contributions for ${context.job.start_date} through ${context.job.end_date}. Use only the supplied Git evidence. Do not modify files.\n\n`;
+  text += `Synthesize related work into meaningful contributions: delivered capabilities and outcomes, technical decisions, architecture or implementation work, problems solved, testing and reliability improvements, and demonstrated ownership. Explain the engineering significance where the evidence supports it. Do not structure the report as a commit-by-commit chronology, do not use commit hashes as the main narrative, and do not invent impact, collaboration, intent, or business outcomes not supported by the evidence.\n\n`;
+  if (context.job.custom_prompt) text += `User-requested report structure or emphasis:\n${context.job.custom_prompt}\nFollow this preference unless it conflicts with factual accuracy, supplied evidence, or read-only operation.\n\n`;
   for (const [remote, events] of grouped) {
     const clone = clones.find(item => item.normalizedRemote === remote);
     text += `Repository: ${events[0].repository_name} (${remote})\nLocal clone: ${clone?.path || 'unavailable'}\n`;

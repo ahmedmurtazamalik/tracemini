@@ -1012,6 +1012,88 @@ function Dashboard({
   );
 }
 
+function ReportDetail({ report, workspaceId, currentUserId, reload }: any) {
+  const [showRegenerate, setShowRegenerate] = useState(false);
+  const [reporter, setReporter] = useState("codex");
+  const [prompt, setPrompt] = useState("");
+  const [pending, setPending] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  const regenerate = async (event: FormEvent) => {
+    event.preventDefault();
+    setPending(true);
+    setMessage("");
+    setError("");
+    try {
+      const job = await request(`/reports/${report.id}/regenerate`, {
+        method: "POST",
+        body: JSON.stringify({ reporter, prompt }),
+      });
+      setMessage("Regeneration queued. Waiting for the connected device…");
+      for (let attempt = 0; attempt < 120; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        const status = await request(`/reports/jobs/${job.id}`);
+        if (status.status === "completed") {
+          setMessage("Report regenerated successfully.");
+          setShowRegenerate(false);
+          setPrompt("");
+          await reload();
+          return;
+        }
+        if (status.status === "failed") throw new Error(status.error || "Report regeneration failed.");
+      }
+      setMessage("Regeneration is still processing. The updated report will appear after it completes.");
+    } catch (caught: any) {
+      setError(caught.message);
+    } finally {
+      setPending(false);
+    }
+  };
+  return (
+    <section className="card report">
+      <div className="actions report-actions">
+        <button className="button secondary" onClick={() => navigate(workspacePath(workspaceId, "reports"))}>
+          ← Report history
+        </button>
+        {report.user_id === currentUserId && (
+          <button className="button secondary" onClick={() => setShowRegenerate(!showRegenerate)}>
+            Regenerate
+          </button>
+        )}
+        <button className="button primary" onClick={() => downloadReport(report)}>
+          Download .md
+        </button>
+      </div>
+      {showRegenerate && (
+        <form className="reports-create-card" onSubmit={regenerate}>
+          <div className="section-heading">
+            <div><span>Regenerate report</span><h2>Describe the structure or emphasis you want</h2></div>
+          </div>
+          <div className="reports-controls">
+            <label>
+              Generator
+              <select value={reporter} onChange={(event) => setReporter(event.target.value)}>
+                <option value="codex">Codex</option>
+                <option value="hermes">Hermes</option>
+              </select>
+            </label>
+            <label className="span-two">
+              Instructions
+              <textarea required maxLength={4000} rows={4} value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="Example: Lead with an executive summary, then group contributions by project and outcome." />
+            </label>
+            <button className="button primary" disabled={pending || !prompt.trim()} type="submit">
+              {pending ? "Regenerating…" : "Regenerate report"}
+            </button>
+          </div>
+        </form>
+      )}
+      {message && <div className="alert success" role="status">{message}</div>}
+      {error && <div className="alert error" role="alert">{error}</div>}
+      <ReactMarkdown remarkPlugins={[remarkGfm]}>{report.markdown}</ReactMarkdown>
+    </section>
+  );
+}
+
 function Reports({ workspaceId, dates, setDates, reports, reload, error }: any) {
   const [reporter, setReporter] = useState("codex");
   const [pending, setPending] = useState(false);
@@ -1022,7 +1104,7 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error }: any) 
       <PageHeading
         eyebrow="Workspace reports"
         title="Reports"
-        description="Create and review development reports without digging through the repository list."
+        description="Create and review engineering contribution reports without digging through individual commits."
       />
       <section className="card reports-create-card">
         <div className="section-heading">
@@ -1390,27 +1472,7 @@ function App() {
             />
           ) : view === "report" ? (
             reportMatchesRoute(report, route) ? (
-              <section className="card report">
-                <div className="actions report-actions">
-                  <button
-                    className="button secondary"
-                    onClick={() =>
-                      navigate(workspacePath(workspaceId, "reports"))
-                    }
-                  >
-                    ← Report history
-                  </button>
-                  <button
-                    className="button primary"
-                    onClick={() => downloadReport(report)}
-                  >
-                    Download .md
-                  </button>
-                </div>
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                  {report.markdown}
-                </ReactMarkdown>
-              </section>
+              <ReportDetail report={report} workspaceId={workspaceId} currentUserId={user?.id} reload={loadWorkspace} />
             ) : (
               <section className="card">
                 <h2>Loading report…</h2>

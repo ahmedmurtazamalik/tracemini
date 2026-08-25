@@ -330,6 +330,40 @@ else if(command==='status'){console.log(JSON.stringify(JSON.parse(fs.readFileSyn
     expect((await request(app).get('/api/workspaces').set(auth(user.token)).expect(200)).body).toMatchObject([{name: "Ada's workspace", role: 'Manager'}]);
   });
 
+  it('regenerates an owned report with a custom prompt and selected AI', async () => {
+    db = await openTestDb();
+    const app = createApp(db);
+    const user = (await request(app).post('/api/auth/register').send({name: 'Report Owner', email: 'report-owner@test.local', password: 'password123'}).expect(201)).body;
+    const workspace = (await request(app).post('/api/workspaces').set(auth(user.token)).send({name: 'Reports'}).expect(201)).body;
+    const installation = (await request(app).post('/api/agents/installations').set(auth(user.token)).send({workspaceId: workspace.id}).expect(201)).body;
+    const agent = (await request(app).post('/api/agents/install/exchange').send({installToken: installToken(installation), machineName: 'report-box'}).expect(201)).body;
+    const repository = (await request(app).post('/api/repositories/register').set(auth(agent.agentToken)).send({workspaceId: String(workspace.id), name: 'Product', remoteUrl: 'file:///tmp/product.git', localKey: '/product'}).expect(200)).body;
+    await request(app).post('/api/activity').set(auth(agent.agentToken)).send({eventKey: 'report-evidence', repositoryId: repository.id, type: 'commit', occurredAt: '2026-08-21T10:00:00.000Z', data: {message: 'Deliver reporting'}}).expect(201);
+
+    const originalJob = (await request(app).post('/api/reports/jobs').set(auth(user.token)).send({workspaceId: String(workspace.id), startDate: '2026-08-21', endDate: '2026-08-21', reporter: 'codex'}).expect(201)).body;
+    await request(app).post(`/api/agents/jobs/${originalJob.id}/claim`).set(auth(agent.agentToken)).expect(200);
+    await request(app).post(`/api/agents/jobs/${originalJob.id}/complete`).set(auth(agent.agentToken)).send({markdown: '# Original'}).expect(201);
+    const originalReport = (await request(app).get(`/api/workspaces/${workspace.id}/reports`).set(auth(user.token)).expect(200)).body[0];
+
+    await request(app).post(`/api/reports/${originalReport.id}/regenerate`).set(auth(user.token)).send({reporter: 'hermes', prompt: ''}).expect(400);
+    const regeneration = (await request(app).post(`/api/reports/${originalReport.id}/regenerate`).set(auth(user.token)).send({reporter: 'hermes', prompt: 'Lead with outcomes and group work by capability.'}).expect(201)).body;
+    const queued = (await request(app).get('/api/agents/jobs').set(auth(agent.agentToken)).expect(200)).body[0];
+    expect(queued).toMatchObject({id: regeneration.id, reporter: 'hermes', target_report_id: originalReport.id, custom_prompt: 'Lead with outcomes and group work by capability.'});
+    await request(app).post(`/api/agents/jobs/${regeneration.id}/claim`).set(auth(agent.agentToken)).expect(200);
+    const context = (await request(app).get(`/api/agents/jobs/${regeneration.id}/context`).set(auth(agent.agentToken)).expect(200)).body;
+    expect(context.job).toMatchObject({target_report_id: originalReport.id, custom_prompt: 'Lead with outcomes and group work by capability.'});
+    await request(app).post(`/api/agents/jobs/${regeneration.id}/complete`).set(auth(agent.agentToken)).send({markdown: '# Regenerated\n\nEngineering outcomes.'}).expect(201);
+
+    expect((await request(app).get(`/api/reports/${originalReport.id}`).set(auth(user.token)).expect(200)).body).toMatchObject({id: originalReport.id, job_id: regeneration.id, markdown: '# Regenerated\n\nEngineering outcomes.'});
+    expect((await request(app).get(`/api/workspaces/${workspace.id}/reports`).set(auth(user.token)).expect(200)).body).toHaveLength(1);
+
+    const manager = (await request(app).post('/api/auth/register').send({name: 'Report Manager', email: 'report-manager@test.local', password: 'password123'}).expect(201)).body;
+    await request(app).post('/api/workspaces/join').set(auth(manager.token)).send({inviteCode: workspace.inviteCode}).expect(200);
+    await request(app).patch(`/api/workspaces/${workspace.id}/members/${manager.user.id}`).set(auth(user.token)).send({role: 'Manager'}).expect(200);
+    await request(app).delete(`/api/workspaces/${workspace.id}/members/${user.user.id}`).set(auth(manager.token)).expect(204);
+    await request(app).post(`/api/reports/${originalReport.id}/regenerate`).set(auth(user.token)).send({reporter: 'codex', prompt: 'Try again.'}).expect(403);
+  });
+
   it('allows only one concurrent push finalizer to publish the winning outcome', async () => {
     db = await openTestDb();
     const app = createApp(new SerializedTransactionsDb(db) as unknown as DB);

@@ -478,6 +478,29 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
     if (!jobId) return res.status(403).json({error: 'forbidden'});
     res.status(201).json({id: jobId, status: 'pending'});
   });
+  app.post('/api/reports/:id/regenerate', userAuth, required(['reporter', 'prompt']), async (req: Authed, res) => {
+    if (!['codex', 'hermes'].includes(req.body.reporter)) return res.status(400).json({error: 'invalid reporter'});
+    const prompt = typeof req.body.prompt === 'string' ? req.body.prompt.trim() : '';
+    if (!prompt || prompt.length > 4000) return res.status(400).json({error: 'prompt must be between 1 and 4000 characters'});
+    const scope: any = await db.prepare('SELECT workspace_id FROM reports WHERE id=? AND user_id=?').get(req.params.id, req.user.id);
+    if (!scope) return res.status(404).json({error: 'not found'});
+    const result = await db.transaction(async () => {
+      const workspace = await db.prepare('SELECT id FROM workspaces WHERE id=? FOR UPDATE').get(scope.workspace_id);
+      if (!workspace) return {status: 'not_found'};
+      const report: any = await db.prepare('SELECT * FROM reports WHERE id=? AND user_id=? AND workspace_id=? FOR UPDATE').get(req.params.id, req.user.id, scope.workspace_id);
+      if (!report) return {status: 'not_found'};
+      const member = await db.prepare('SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=?').get(report.workspace_id, req.user.id);
+      if (!member) return {status: 'forbidden'};
+      const active = await db.prepare("SELECT id FROM report_jobs WHERE target_report_id=? AND status IN ('pending','running')").get(report.id);
+      if (active) return {status: 'conflict'};
+      const inserted = await db.prepare("INSERT INTO report_jobs(workspace_id,user_id,reporter,start_date,end_date,status,custom_prompt,target_report_id,created_at) VALUES(?,?,?,?,?,'pending',?,?,?) RETURNING id").run(report.workspace_id, report.user_id, req.body.reporter, report.start_date, report.end_date, prompt, report.id, now());
+      return {status: 'created', id: Number(inserted.lastInsertRowid)};
+    });
+    if (result.status === 'not_found') return res.status(404).json({error: 'not found'});
+    if (result.status === 'forbidden') return res.status(403).json({error: 'forbidden'});
+    if (result.status === 'conflict') return res.status(409).json({error: 'report regeneration already queued'});
+    res.status(201).json({id: result.id, status: 'pending'});
+  });
   app.get('/api/reports/jobs/:id', userAuth, async (req: Authed, res) => { const row = await db.prepare('SELECT * FROM report_jobs WHERE id=? AND user_id=?').get(req.params.id, req.user.id); row ? res.json(row) : res.status(404).json({error: 'not found'}); });
   app.get('/api/agents/jobs', agentAuth, async (req: Authed, res) => res.json(await db.prepare("SELECT * FROM report_jobs WHERE user_id=? AND workspace_id=? AND status='pending' ORDER BY id LIMIT 1").all(req.agent.user_id, req.agent.workspace_id)));
   app.post('/api/agents/jobs/:id/claim', agentAuth, async (req: Authed, res) => { const result = await db.prepare("UPDATE report_jobs SET status='running',agent_id=?,claimed_at=? WHERE id=? AND user_id=? AND workspace_id=? AND status='pending'").run(req.agent.id, now(), req.params.id, req.agent.user_id, req.agent.workspace_id); result.changes ? res.json(await db.prepare('SELECT * FROM report_jobs WHERE id=?').get(req.params.id)) : res.status(409).json({error: 'job unavailable'}); });
@@ -491,7 +514,12 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
     const completed = await db.transaction(async () => {
       const job: any = await db.prepare("SELECT * FROM report_jobs WHERE id=? AND user_id=? AND workspace_id=? AND status='running' AND agent_id=? FOR UPDATE").get(req.params.id, req.agent.user_id, req.agent.workspace_id, req.agent.id);
       if (!job) return false;
-      await db.prepare('INSERT INTO reports(job_id,workspace_id,user_id,start_date,end_date,markdown,created_at) VALUES(?,?,?,?,?,?,?)').run(job.id, job.workspace_id, job.user_id, job.start_date, job.end_date, req.body.markdown, now());
+      if (job.target_report_id) {
+        const updated = await db.prepare('UPDATE reports SET job_id=?,markdown=?,created_at=? WHERE id=? AND workspace_id=? AND user_id=?').run(job.id, req.body.markdown, now(), job.target_report_id, job.workspace_id, job.user_id);
+        if (updated.changes !== 1) return false;
+      } else {
+        await db.prepare('INSERT INTO reports(job_id,workspace_id,user_id,start_date,end_date,markdown,created_at) VALUES(?,?,?,?,?,?,?)').run(job.id, job.workspace_id, job.user_id, job.start_date, job.end_date, req.body.markdown, now());
+      }
       await db.prepare("UPDATE report_jobs SET status='completed',completed_at=? WHERE id=?").run(now(), job.id);
       return true;
     });
