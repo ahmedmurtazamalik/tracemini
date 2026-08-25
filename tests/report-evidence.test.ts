@@ -9,7 +9,7 @@ let temporary = '';
 afterEach(() => { if (temporary) fs.rmSync(temporary, {recursive: true, force: true}); });
 
 describe('evidence-rich reports', () => {
-  it('names commits and only includes source patches after explicit consent', () => {
+  it('grounds contribution-focused reports and only includes source patches after explicit consent', () => {
     temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'tracemini-report-evidence-'));
     execFileSync('git', ['init', '-q'], {cwd: temporary});
     execFileSync('git', ['config', 'user.email', 'report@example.test'], {cwd: temporary});
@@ -28,7 +28,7 @@ describe('evidence-rich reports', () => {
 
     const detailed = contextPrompt({job: {start_date: '2026-08-24', end_date: '2026-08-24', timezone: 'UTC', include_diff: true}, events: [event]}, clones);
     expect(detailed).toContain('+export const featureFlag = true;');
-    expect(detailed).toContain('Features and behavior changes');
-    expect(detailed).toContain('Commit-by-commit evidence');
+    expect(detailed).toContain('Synthesize related work into meaningful contributions');
+    expect(detailed).toContain('Do not structure the report as a commit-by-commit chronology');
   });
 });
