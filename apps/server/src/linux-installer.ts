@@ -8,6 +8,10 @@ export function linuxInstallCommand(origin: string, installToken: string) {
   return `mkdir -p "$HOME/.cache/tracemini" && curl --fail --show-error --location ${shellQuote(url)} --output "$HOME/.cache/tracemini/install.sh" && sh "$HOME/.cache/tracemini/install.sh"`;
 }
 
+export function linuxSyncCommand(origin: string, installToken: string) {
+  return linuxInstallCommand(origin, installToken);
+}
+
 export function linuxInstaller(cliDir: string, serverUrl: string, installToken: string) {
   const files = fs.readdirSync(cliDir).filter(name => name.endsWith('.js')).sort();
   if (!files.includes('index.js')) throw new Error(`built TraceMini CLI not found in ${cliDir}`);

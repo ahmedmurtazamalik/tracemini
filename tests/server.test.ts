@@ -325,8 +325,12 @@ else if(command==='status'){console.log(JSON.stringify(JSON.parse(fs.readFileSyn
     await request(app).patch(`/api/workspaces/${workspace.id}/repositories/${repo.id}`).set(auth(user.token)).send({archived: true}).expect(200);
     expect((await request(app).get(`/api/workspaces/${workspace.id}/repositories?includeArchived=true`).set(auth(user.token))).body[0].archived).toBe(1);
     expect((await request(app).get(`/api/workspaces/${workspace.id}/agents`).set(auth(user.token)).expect(200)).body[0]).toMatchObject({machine_name: 'ada-box', status: 'online'});
+    await request(app).delete(`/api/workspaces/${workspace.id}/agents/${agent.agentId}`).set(auth(user.token)).expect(409);
     await request(app).post(`/api/workspaces/${workspace.id}/agents/${agent.agentId}/revoke`).set(auth(user.token)).expect(200);
     await request(app).post('/api/agents/heartbeat').set(auth(agent.agentToken)).expect(401);
+    expect((await request(app).get(`/api/workspaces/${workspace.id}/agents`).set(auth(user.token)).expect(200)).body[0]).toMatchObject({machine_name: 'ada-box', status: 'revoked'});
+    await request(app).delete(`/api/workspaces/${workspace.id}/agents/${agent.agentId}`).set(auth(user.token)).expect(204);
+    expect((await request(app).get(`/api/workspaces/${workspace.id}/agents`).set(auth(user.token)).expect(200)).body).toEqual([]);
     await request(app).delete(`/api/workspaces/${workspace.id}`).set(auth(user.token)).expect(204);
     expect((await request(app).get('/api/workspaces').set(auth(user.token)).expect(200)).body).toMatchObject([{name: "Ada's workspace", role: 'Manager'}]);
   });

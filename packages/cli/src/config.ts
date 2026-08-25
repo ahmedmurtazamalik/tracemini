@@ -40,14 +40,14 @@ function withConfigLock<T>(operation:()=>T):T{
   }
   try{return operation()}finally{fs.rmSync(lock,{recursive:true,force:true})}
 }
-export function saveConfig(c:Config, options:{preserveCurrentScalars?:boolean}={}){
+export function saveConfig(c:Config, options:{preserveCurrentScalars?:boolean;replaceCollections?:boolean}={}){
   fs.mkdirSync(stateDir(),{recursive:true,mode:0o700});
   return withConfigLock(()=>{
   // The systemd agent and interactive commands are separate processes. Preserve
   // roots/clones added by `tracemini watch` if an older in-memory agent snapshot
   // is saved at the same time.
   const current=readStored();
-  const sources=options.preserveCurrentScalars?[c,current]:[current,c];
+  const sources=options.replaceCollections?[c]:options.preserveCurrentScalars?[c,current]:[current,c];
   const clones=new Map<string,Clone>();
   if(options.preserveCurrentScalars){
     for(const clone of c.clones)clones.set(clone.path,clone);

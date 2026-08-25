@@ -8,6 +8,12 @@ export type CliDevice = {
 
 export type CliConnectionState = 'connected' | 'offline' | 'not-detected';
 
+export function deviceManagementAction(device: Pick<CliDevice, 'id' | 'status'>, workspaceId: number) {
+  return device.status === 'revoked'
+    ? {label: 'Remove', method: 'DELETE', path: `/workspaces/${workspaceId}/agents/${device.id}`}
+    : {label: 'Revoke', method: 'POST', path: `/workspaces/${workspaceId}/agents/${device.id}/revoke`};
+}
+
 export async function checkCliConnection(
   workspaceId: number,
   userId: number,

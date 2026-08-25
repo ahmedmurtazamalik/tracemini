@@ -5,7 +5,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import type {DB} from './db.js';
-import {linuxInstallCommand, linuxInstaller} from './linux-installer.js';
+import {linuxInstallCommand, linuxInstaller, linuxSyncCommand} from './linux-installer.js';
 
 const now = () => new Date().toISOString();
 const expired = (value: string | Date) => new Date(value).getTime() <= Date.now();
@@ -55,6 +55,10 @@ const required = (keys: string[]) => (req: Request, res: Response, next: NextFun
 const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
 const defaultCliDir = path.resolve(moduleDirectory, '../../../packages/cli/dist');
 
+export function requestOrigin(req: Request, hosted = Boolean(process.env.VERCEL)) {
+  return `${hosted ? 'https' : req.protocol}://${req.get('host')}`;
+}
+
 export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
   const app = express();
   app.set('trust proxy', 1);
@@ -88,6 +92,12 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
   };
   const managerCount = async (workspaceId: number) => (await db.prepare("SELECT COUNT(*)::INTEGER count FROM workspace_members WHERE workspace_id=? AND role='Manager'").get(workspaceId) as any).count as number;
   const hasLockedManagerAuthority = async (workspaceId: number, userId: number) => Boolean(await db.prepare("SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=? AND role='Manager'").get(workspaceId, userId));
+  const revokeDeviceWork = async (agentId: number, reason = 'device revoked') => {
+    await db.prepare('UPDATE agents SET revoked_at=? WHERE id=? AND revoked_at IS NULL').run(now(), agentId);
+    await db.prepare("UPDATE refresh_requests SET status='error',error=?,completed_at=? WHERE agent_id=? AND status IN ('queued','running')").run(reason, now(), agentId);
+    await db.prepare("UPDATE pending_pushes SET status='unconfirmed',completed_at=? WHERE agent_id=? AND status='pending'").run(now(), agentId);
+    await db.prepare("UPDATE report_jobs SET status='failed',error=?,completed_at=? WHERE agent_id=? AND status='running'").run(reason, now(), agentId);
+  };
   const freshInviteCode = async () => {
     for (let attempt = 0; attempt < 5; attempt++) {
       const code = crypto.randomBytes(5).toString('hex').toUpperCase();
@@ -265,20 +275,21 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
     const raw = token();
     const expiresAt = new Date(Date.now() + 10 * 60_000).toISOString();
     await db.prepare('INSERT INTO setup_codes(code_hash,user_id,workspace_id,expires_at,created_at) VALUES(?,?,?,?,?)').run(hash(raw), req.user.id, workspaceId, expiresAt, now());
-    const origin = `${req.protocol}://${req.get('host')}`;
-    res.status(201).json({installCommand: linuxInstallCommand(origin, raw), expiresAt});
+    const origin = requestOrigin(req);
+    res.status(201).json({installCommand: linuxInstallCommand(origin, raw), syncCommand: linuxSyncCommand(origin, raw), expiresAt});
   });
   app.get('/api/installers/linux/:installToken', async (req, res) => {
     const setup: any = await db.prepare('SELECT * FROM setup_codes WHERE code_hash=?').get(hash(req.params.installToken));
     if (!setup || setup.used_at || expired(setup.expires_at)) return res.status(410).type('text/plain').send('Install token invalid, expired, or already used.\n');
     try {
-      res.type('text/x-shellscript').set('content-disposition', 'attachment; filename="tracemini-install.sh"').send(linuxInstaller(cliDir, `${req.protocol}://${req.get('host')}`, req.params.installToken));
+      res.type('text/x-shellscript').set('content-disposition', 'attachment; filename="tracemini-install.sh"').send(linuxInstaller(cliDir, requestOrigin(req), req.params.installToken));
     } catch (error: any) {
       res.status(503).json({error: error.message});
     }
   });
   app.post('/api/agents/install/exchange', required(['installToken', 'machineName']), async (req, res) => {
     const agentToken = token();
+    const previousAgentToken = req.headers.authorization?.replace(/^Bearer\s+/i, '');
     const candidate: any = await db.prepare('SELECT workspace_id FROM setup_codes WHERE code_hash=?').get(hash(req.body.installToken));
     if (!candidate) return res.status(409).json({error: 'install token invalid, expired, or already used'});
     const exchanged = await db.transaction(async () => {
@@ -289,6 +300,10 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
       const member = await db.prepare('SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=?').get(setup.workspace_id, setup.user_id);
       if (!member) return undefined;
       await db.prepare('UPDATE setup_codes SET used_at=? WHERE code_hash=?').run(now(), setup.code_hash);
+      if (previousAgentToken) {
+        const previous: any = await db.prepare('SELECT id FROM agents WHERE token_hash=? AND revoked_at IS NULL FOR UPDATE').get(hash(previousAgentToken));
+        if (previous) await revokeDeviceWork(previous.id, 'device synced to another account');
+      }
       const result = await db.prepare('INSERT INTO agents(user_id,workspace_id,machine_name,token_hash,last_seen,created_at) VALUES(?,?,?,?,?,?) RETURNING id').run(setup.user_id, setup.workspace_id, req.body.machineName.trim(), hash(agentToken), now(), now());
       return {agentId: Number(result.lastInsertRowid), workspaceId: setup.workspace_id};
     });
@@ -317,7 +332,7 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
   app.post('/api/agents/heartbeat', agentAuth, async (_req, res) => res.json({ok: true, at: now()}));
   app.get('/api/workspaces/:id/agents', userAuth, requireMember, async (req, res) => {
     const cutoff = new Date(Date.now() - 60_000).toISOString();
-    const rows = await db.prepare("SELECT a.id,a.user_id,a.machine_name,a.last_seen,a.revoked_at,u.name user_name,CASE WHEN a.revoked_at IS NOT NULL THEN 'revoked' WHEN a.last_seen>=? THEN 'online' ELSE 'offline' END status FROM agents a JOIN users u ON u.id=a.user_id WHERE a.workspace_id=? ORDER BY a.id").all(cutoff, req.params.id);
+    const rows = await db.prepare("SELECT a.id,a.user_id,a.machine_name,a.last_seen,a.revoked_at,u.name user_name,CASE WHEN a.revoked_at IS NOT NULL THEN 'revoked' WHEN a.last_seen>=? THEN 'online' ELSE 'offline' END status FROM agents a JOIN users u ON u.id=a.user_id WHERE a.workspace_id=? AND a.removed_at IS NULL ORDER BY a.id").all(cutoff, req.params.id);
     res.json(rows);
   });
   app.post('/api/workspaces/:id/agents/:agentId/revoke', userAuth, requireManager, async (req: Authed, res) => {
@@ -326,15 +341,27 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
       if (!workspace || !(await hasLockedManagerAuthority(+req.params.id, req.user.id))) return 'forbidden';
       const agent: any = await db.prepare('SELECT id FROM agents WHERE id=? AND workspace_id=? FOR UPDATE').get(req.params.agentId, req.params.id);
       if (!agent) return 'missing';
-      await db.prepare('UPDATE agents SET revoked_at=? WHERE id=? AND revoked_at IS NULL').run(now(), agent.id);
-      await db.prepare("UPDATE refresh_requests SET status='error',error='device revoked',completed_at=? WHERE agent_id=? AND status IN ('queued','running')").run(now(), agent.id);
-      await db.prepare("UPDATE pending_pushes SET status='unconfirmed',completed_at=? WHERE agent_id=? AND status='pending'").run(now(), agent.id);
-      await db.prepare("UPDATE report_jobs SET status='failed',error='device revoked',completed_at=? WHERE agent_id=? AND status='running'").run(now(), agent.id);
+      await revokeDeviceWork(agent.id);
       return 'revoked';
     });
     if (outcome === 'forbidden') return res.status(403).json({error: 'Manager required'});
     if (outcome === 'missing') return res.status(404).json({error: 'device not found'});
     res.json({ok: true});
+  });
+  app.delete('/api/workspaces/:id/agents/:agentId', userAuth, requireManager, async (req: Authed, res) => {
+    const outcome = await db.transaction(async () => {
+      const workspace = await db.prepare('SELECT id FROM workspaces WHERE id=? FOR UPDATE').get(req.params.id);
+      if (!workspace || !(await hasLockedManagerAuthority(+req.params.id, req.user.id))) return 'forbidden';
+      const agent: any = await db.prepare('SELECT id,revoked_at,removed_at FROM agents WHERE id=? AND workspace_id=? FOR UPDATE').get(req.params.agentId, req.params.id);
+      if (!agent || agent.removed_at) return 'missing';
+      if (!agent.revoked_at) return 'active';
+      await db.prepare('UPDATE agents SET removed_at=? WHERE id=? AND removed_at IS NULL').run(now(), agent.id);
+      return 'removed';
+    });
+    if (outcome === 'forbidden') return res.status(403).json({error: 'Manager required'});
+    if (outcome === 'missing') return res.status(404).json({error: 'device not found'});
+    if (outcome === 'active') return res.status(409).json({error: 'revoke the device before removing it'});
+    res.status(204).end();
   });
 
   app.post('/api/repositories/register', agentAuth, required(['workspaceId', 'name', 'remoteUrl', 'localKey']), async (req: Authed, res) => {
@@ -473,15 +500,21 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
     if (req.body.name !== undefined && typeof req.body.name !== 'string') return res.status(400).json({error: 'invalid report name'});
     const reportName = req.body.name?.trim() || defaultReportName(req.body.startDate, req.body.endDate);
     if (reportName.length > 120) return res.status(400).json({error: 'report name must be 120 characters or fewer'});
-    const jobId = await db.transaction(async () => {
+    const outcome = await db.transaction(async () => {
       const workspaceId = +req.body.workspaceId;
       const workspace = await db.prepare('SELECT id FROM workspaces WHERE id=? FOR UPDATE').get(workspaceId);
       if (!workspace || !(await db.prepare('SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=?').get(workspaceId, req.user.id))) return undefined;
+      const active: any = await db.prepare("SELECT * FROM report_jobs WHERE workspace_id=? AND user_id=? AND status IN ('pending','running') ORDER BY id DESC LIMIT 1 FOR UPDATE").get(workspaceId, req.user.id);
+      if (active) return {job: active, created: false};
       const result = await db.prepare("INSERT INTO report_jobs(workspace_id,user_id,reporter,start_date,end_date,status,report_name,created_at) VALUES(?,?,?,?,?,'pending',?,?) RETURNING id").run(workspaceId, req.user.id, req.body.reporter, req.body.startDate, req.body.endDate, reportName, now());
-      return Number(result.lastInsertRowid);
+      return {job: {id: Number(result.lastInsertRowid), status: 'pending'}, created: true};
     });
-    if (!jobId) return res.status(403).json({error: 'forbidden'});
-    res.status(201).json({id: jobId, status: 'pending'});
+    if (!outcome) return res.status(403).json({error: 'forbidden'});
+    res.status(outcome.created ? 201 : 200).json(outcome.job);
+  });
+  app.get('/api/workspaces/:id/report-jobs/active', userAuth, requireMember, async (req: Authed, res) => {
+    const row = await db.prepare("SELECT * FROM report_jobs WHERE workspace_id=? AND user_id=? AND status IN ('pending','running') ORDER BY id DESC LIMIT 1").get(req.params.id, req.user.id);
+    res.json(row || null);
   });
   app.post('/api/reports/:id/regenerate', userAuth, required(['reporter', 'prompt']), async (req: Authed, res) => {
     if (!['codex', 'hermes'].includes(req.body.reporter)) return res.status(400).json({error: 'invalid reporter'});

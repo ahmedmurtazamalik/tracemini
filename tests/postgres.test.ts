@@ -40,12 +40,14 @@ describe('PostgreSQL database', () => {
     const db = await openTestDb();
     try {
       const migrations = await db.query('SELECT version,name,checksum FROM schema_migrations ORDER BY version');
-      expect(migrations.rows.map((row: any) => row.version)).toEqual([1, 3, 4, 5, 9, 11]);
+      expect(migrations.rows.map((row: any) => row.version)).toEqual([1, 3, 4, 5, 9, 11, 12]);
       for (const migration of migrations.rows) expect(migration.checksum).toMatch(/^[a-f0-9]{64}$/);
       const reportJobColumns = await db.query("SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='report_jobs'");
       expect(reportJobColumns.rows.map((row: any) => row.column_name)).toEqual(expect.arrayContaining(['custom_prompt', 'target_report_id', 'report_name']));
       const reportColumns = await db.query("SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='reports'");
       expect(reportColumns.rows.map((row: any) => row.column_name)).toEqual(expect.arrayContaining(['name']));
+      const agentColumns = await db.query("SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='agents'");
+      expect(agentColumns.rows.map((row: any) => row.column_name)).toEqual(expect.arrayContaining(['removed_at']));
       const tables = await db.query(
         "SELECT table_name FROM information_schema.tables WHERE table_schema='public' ORDER BY table_name",
       );
