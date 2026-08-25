@@ -103,6 +103,10 @@ ALTER TABLE report_jobs ADD COLUMN IF NOT EXISTS report_name TEXT;
 ALTER TABLE reports ADD COLUMN IF NOT EXISTS name TEXT NOT NULL DEFAULT 'Engineering contribution report';
 `;
 
+const removedDevicesMigrationSql = `
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS removed_at TIMESTAMPTZ;
+`;
+
 export function normalizePostgresConnectionString(connectionString: string) {
   const url = new URL(connectionString);
   const isSupabasePooler = url.hostname === 'pooler.supabase.com' || url.hostname.endsWith('.pooler.supabase.com');
@@ -212,6 +216,7 @@ export class DB {
         {version: 5, name: 'remove password recovery', sql: removePasswordRecoveryMigrationSql},
         {version: 9, name: 'prompted report regeneration', sql: reportRegenerationMigrationSql},
         {version: 11, name: 'report naming', sql: reportNamingMigrationSql},
+        {version: 12, name: 'hide removed revoked devices', sql: removedDevicesMigrationSql},
       ];
       for (const migration of migrations) {
         const checksum = crypto.createHash('sha256').update(migration.sql).digest('hex');

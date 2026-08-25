@@ -17,7 +17,7 @@ import {
   workspacePath,
 } from "./routes.js";
 import { downloadReport } from "./report-download.js";
-import { checkCliConnection } from "./device-connection.js";
+import { checkCliConnection, deviceManagementAction } from "./device-connection.js";
 import { reportJobProgress, type ReportJob } from "./report-progress.js";
 import "./style.css";
 
@@ -697,18 +697,18 @@ function Settings({ workspace, members, repositories, agents, reload }: any) {
                     {agent.user_name} · {agent.status}
                   </small>
                 </span>
-                {agent.status !== "revoked" && (
-                  <button
+                {(() => {
+                  const action = deviceManagementAction(agent, workspace.id);
+                  return <button
                     className="button secondary"
                     onClick={() =>
-                      mutate(
-                        `/workspaces/${workspace.id}/agents/${agent.id}/revoke`,
-                      )
+                      (action.label !== "Remove" || confirm(`Remove revoked device ${agent.machine_name} from this website? Its historical activity will be preserved.`)) &&
+                      mutate(action.path, action.method)
                     }
                   >
-                    Revoke
-                  </button>
-                )}
+                    {action.label}
+                  </button>;
+                })()}
               </div>
             ))
           ) : (

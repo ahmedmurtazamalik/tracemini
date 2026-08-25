@@ -332,7 +332,7 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
   app.post('/api/agents/heartbeat', agentAuth, async (_req, res) => res.json({ok: true, at: now()}));
   app.get('/api/workspaces/:id/agents', userAuth, requireMember, async (req, res) => {
     const cutoff = new Date(Date.now() - 60_000).toISOString();
-    const rows = await db.prepare("SELECT a.id,a.user_id,a.machine_name,a.last_seen,a.revoked_at,u.name user_name,CASE WHEN a.revoked_at IS NOT NULL THEN 'revoked' WHEN a.last_seen>=? THEN 'online' ELSE 'offline' END status FROM agents a JOIN users u ON u.id=a.user_id WHERE a.workspace_id=? ORDER BY a.id").all(cutoff, req.params.id);
+    const rows = await db.prepare("SELECT a.id,a.user_id,a.machine_name,a.last_seen,a.revoked_at,u.name user_name,CASE WHEN a.revoked_at IS NOT NULL THEN 'revoked' WHEN a.last_seen>=? THEN 'online' ELSE 'offline' END status FROM agents a JOIN users u ON u.id=a.user_id WHERE a.workspace_id=? AND a.removed_at IS NULL ORDER BY a.id").all(cutoff, req.params.id);
     res.json(rows);
   });
   app.post('/api/workspaces/:id/agents/:agentId/revoke', userAuth, requireManager, async (req: Authed, res) => {
@@ -347,6 +347,21 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
     if (outcome === 'forbidden') return res.status(403).json({error: 'Manager required'});
     if (outcome === 'missing') return res.status(404).json({error: 'device not found'});
     res.json({ok: true});
+  });
+  app.delete('/api/workspaces/:id/agents/:agentId', userAuth, requireManager, async (req: Authed, res) => {
+    const outcome = await db.transaction(async () => {
+      const workspace = await db.prepare('SELECT id FROM workspaces WHERE id=? FOR UPDATE').get(req.params.id);
+      if (!workspace || !(await hasLockedManagerAuthority(+req.params.id, req.user.id))) return 'forbidden';
+      const agent: any = await db.prepare('SELECT id,revoked_at,removed_at FROM agents WHERE id=? AND workspace_id=? FOR UPDATE').get(req.params.agentId, req.params.id);
+      if (!agent || agent.removed_at) return 'missing';
+      if (!agent.revoked_at) return 'active';
+      await db.prepare('UPDATE agents SET removed_at=? WHERE id=? AND removed_at IS NULL').run(now(), agent.id);
+      return 'removed';
+    });
+    if (outcome === 'forbidden') return res.status(403).json({error: 'Manager required'});
+    if (outcome === 'missing') return res.status(404).json({error: 'device not found'});
+    if (outcome === 'active') return res.status(409).json({error: 'revoke the device before removing it'});
+    res.status(204).end();
   });
 
   app.post('/api/repositories/register', agentAuth, required(['workspaceId', 'name', 'remoteUrl', 'localKey']), async (req: Authed, res) => {
