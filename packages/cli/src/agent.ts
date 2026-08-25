@@ -149,14 +149,35 @@ export async function tick(config: Config, indexState: Map<string, {mtime: numbe
   if (jobs[0]) await processJob(config, jobs[0]);
 }
 
+export function startHeartbeatLoop(
+  send: () => Promise<unknown>,
+  intervalMs = 15_000,
+  onError: (error: unknown) => void = error => console.error(new Date().toISOString(), String(error)),
+) {
+  let sending = false;
+  const timer = setInterval(() => {
+    if (sending) return;
+    sending = true;
+    void send().catch(onError).finally(() => { sending = false; });
+  }, intervalMs);
+  return () => clearInterval(timer);
+}
+
 export async function runAgent(config: Config, once = false) {
   const states = new Map<string, {mtime: number; timer?: NodeJS.Timeout}>();
-  do {
-    // Pick up roots/clones written by interactive CLI commands while this
-    // long-running process is alive instead of retaining its startup snapshot.
-    config = loadConfig();
-    try { await tick(config, states); } catch (error) { console.error(new Date().toISOString(), String(error)); }
-    if (once) return;
-    await new Promise(resolve => setTimeout(resolve, config.pollMs));
-  } while (true);
+  const stopHeartbeat = once
+    ? undefined
+    : startHeartbeatLoop(() => api(loadConfig(), '/api/agents/heartbeat', {method: 'POST'}));
+  try {
+    do {
+      // Pick up roots/clones written by interactive CLI commands while this
+      // long-running process is alive instead of retaining its startup snapshot.
+      config = loadConfig();
+      try { await tick(config, states); } catch (error) { console.error(new Date().toISOString(), String(error)); }
+      if (once) return;
+      await new Promise(resolve => setTimeout(resolve, config.pollMs));
+    } while (true);
+  } finally {
+    stopHeartbeat?.();
+  }
 }
