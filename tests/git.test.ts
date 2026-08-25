@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { discover, inspectRepo, commitData, commitHistory, stagedData, installHooks, normalizeRemote, parsePrePush, confirmPush, observeRepositoryState } from '../packages/cli/src/git.js';
+import { discover, inspectRepo, commitData, commitHistory, stagedData, installHooks, removeHooks, normalizeRemote, parsePrePush, confirmPush, observeRepositoryState } from '../packages/cli/src/git.js';
 
 const run = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8' });
 
@@ -25,6 +25,9 @@ describe('real Git integration', () => {
     expect(installHooks(repo)).toContain('post-commit');
     expect(fs.readFileSync(hook, 'utf8')).toContain('TraceMini managed hook');
     expect(fs.readFileSync(hook + '.tracemini-original', 'utf8')).toContain('original');
+    expect(removeHooks(repo)).toContain('post-commit');
+    expect(fs.readFileSync(hook, 'utf8')).toContain('original');
+    expect(fs.existsSync(hook + '.tracemini-original')).toBe(false);
     expect(normalizeRemote('https://example.com/team/project.git')).toBe(normalizeRemote('git@example.com:team/project.git'));
   });
 

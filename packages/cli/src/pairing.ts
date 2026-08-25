@@ -26,6 +26,7 @@ export function rebindDeviceConfig(config: Config, serverUrl: string, pairing: D
     agentToken: pairing.agentToken,
     agentId: pairing.agentId,
     workspaceId: pairing.workspaceId,
+    watchedPaths: [],
     clones: [],
   };
 }

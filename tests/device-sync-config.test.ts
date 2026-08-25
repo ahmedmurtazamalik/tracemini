@@ -16,7 +16,7 @@ const existing = (): Config => ({
 });
 
 describe('CLI device re-pairing', () => {
-  it('keeps local preferences but clears server-bound clone identity and installs the new credential', () => {
+  it('keeps local preferences but clears repository state and installs the new credential', () => {
     const rebound = rebindDeviceConfig(existing(), 'https://new.example.test', {
       agentToken: 'new-device', agentId: 10, workspaceId: 8,
     });
@@ -26,7 +26,7 @@ describe('CLI device re-pairing', () => {
       agentToken: 'new-device',
       agentId: 10,
       workspaceId: 8,
-      watchedPaths: ['/home/ali', '/work/project'],
+      watchedPaths: [],
       clones: [],
       reporter: 'hermes',
       pollMs: 5000,

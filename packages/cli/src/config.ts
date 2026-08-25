@@ -3,9 +3,11 @@ export type Clone={path:string;repositoryId:number;normalizedRemote:string;name:
 export type Config={serverUrl:string;userToken?:string;agentToken?:string;agentId?:number;workspaceId?:number;watchedPaths:string[];clones:Clone[];reporter:'codex'|'hermes';pollMs:number};
 export type Queued={eventKey:string;repositoryId:number;type:string;occurredAt:string;data:Record<string,unknown>;attempts:number;nextAttempt:number};
 export const stateDir=()=>process.env.TRACEMINI_HOME||path.join(os.homedir(),'.tracemini');
-const file=(n:string)=>path.join(stateDir(),n);const defaults=():Config=>({serverUrl:'http://localhost:3000',watchedPaths:[os.homedir()],clones:[],reporter:'codex',pollMs:2000});
+const file=(n:string)=>path.join(stateDir(),n);const defaults=():Config=>({serverUrl:'http://localhost:3000',watchedPaths:[],clones:[],reporter:'codex',pollMs:2000});
 function readStored():Partial<Config>{try{return JSON.parse(fs.readFileSync(file('config.json'),'utf8'))}catch{return {}}}
-export function loadConfig():Config{fs.mkdirSync(stateDir(),{recursive:true,mode:0o700});const stored=readStored();return {...defaults(),...stored,watchedPaths:stored.watchedPaths?.length?stored.watchedPaths:[os.homedir()]}}
+function sameBinding(a:Partial<Config>,b:Partial<Config>){return a.serverUrl===b.serverUrl&&a.agentId===b.agentId&&a.agentToken===b.agentToken&&a.workspaceId===b.workspaceId}
+export function isCurrentBinding(c:Config){const current=readStored();return sameBinding(c,current)}
+export function loadConfig():Config{fs.mkdirSync(stateDir(),{recursive:true,mode:0o700});const stored=readStored();return {...defaults(),...stored,watchedPaths:stored.watchedPaths||[]}}
 const wait=(milliseconds:number)=>Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,milliseconds);
 function withConfigLock<T>(operation:()=>T):T{
   const lock=file('config.lock');
@@ -40,16 +42,39 @@ function withConfigLock<T>(operation:()=>T):T{
   }
   try{return operation()}finally{fs.rmSync(lock,{recursive:true,force:true})}
 }
-export function saveConfig(c:Config, options:{preserveCurrentScalars?:boolean;replaceCollections?:boolean}={}){
+function writeConfig(c:Config){
+  const target=file('config.json');
+  const temporary=`${target}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+  fs.writeFileSync(temporary,JSON.stringify(c,null,2),{mode:0o600});
+  fs.renameSync(temporary,target);
+}
+export function mutateCurrentBinding(c:Config, operation:(current:Config)=>void){
+  fs.mkdirSync(stateDir(),{recursive:true,mode:0o700});
+  return withConfigLock(()=>{
+    const stored=readStored();
+    if(!sameBinding(c,stored))return false;
+    const current={...defaults(),...stored,watchedPaths:stored.watchedPaths||[],clones:stored.clones||[]} as Config;
+    operation(current);
+    writeConfig(current);
+    Object.assign(c,current);
+    return true;
+  });
+}
+export function saveConfig(c:Config, options:{preserveCurrentScalars?:boolean;replaceRepositoryState?:boolean;beforeRepositoryStateReplace?:(current:Config)=>void}={}){
   fs.mkdirSync(stateDir(),{recursive:true,mode:0o700});
   return withConfigLock(()=>{
   // The systemd agent and interactive commands are separate processes. Preserve
   // roots/clones added by `tracemini watch` if an older in-memory agent snapshot
   // is saved at the same time.
   const current=readStored();
-  const sources=options.replaceCollections?[c]:options.preserveCurrentScalars?[c,current]:[current,c];
+  if(options.replaceRepositoryState&&options.beforeRepositoryStateReplace){
+    options.beforeRepositoryStateReplace({...defaults(),...current,watchedPaths:current.watchedPaths||[],clones:current.clones||[]} as Config);
+  }
+  const currentHasBinding=current.workspaceId!==undefined||current.agentId!==undefined||current.agentToken!==undefined;
+  const sameWorkspace=!currentHasBinding||sameBinding(c,current);
+  const sources=options.replaceRepositoryState?[c]:options.preserveCurrentScalars&&!sameWorkspace?[current]:options.preserveCurrentScalars?[c,current]:[current,c];
   const clones=new Map<string,Clone>();
-  if(options.preserveCurrentScalars){
+  if(options.preserveCurrentScalars&&sameWorkspace&&!options.replaceRepositoryState){
     for(const clone of c.clones)clones.set(clone.path,clone);
     for(const clone of current.clones||[]){
       const background=clones.get(clone.path);
@@ -60,12 +85,19 @@ export function saveConfig(c:Config, options:{preserveCurrentScalars?:boolean;re
   }
   const scalarConfig=options.preserveCurrentScalars?{...defaults(),...current}:c;
   const merged={...scalarConfig,watchedPaths:[...new Set(sources.flatMap(source=>source.watchedPaths||[]))],clones:[...clones.values()]};
-  const target=file('config.json');
-  const temporary=`${target}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
-  fs.writeFileSync(temporary,JSON.stringify(merged,null,2),{mode:0o600});
-  fs.renameSync(temporary,target);
+  writeConfig(merged);
   });
 }
 export function loadQueue():Queued[]{try{return JSON.parse(fs.readFileSync(file('queue.json'),'utf8'))}catch{return[]}}
-export function saveQueue(q:Queued[]){fs.mkdirSync(stateDir(),{recursive:true,mode:0o700});fs.writeFileSync(file('queue.json'),JSON.stringify(q,null,2),{mode:0o600})}
+export function saveQueue(q:Queued[], binding?:Config){
+  fs.mkdirSync(stateDir(),{recursive:true,mode:0o700});
+  return withConfigLock(()=>{
+    if(binding&&!sameBinding(binding,readStored()))return false;
+    const target=file('queue.json');
+    const temporary=`${target}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+    fs.writeFileSync(temporary,JSON.stringify(q,null,2),{mode:0o600});
+    fs.renameSync(temporary,target);
+    return true;
+  });
+}
 export const eventKey=(parts:unknown[])=>crypto.createHash('sha256').update(JSON.stringify(parts)).digest('hex');

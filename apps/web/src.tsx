@@ -1,5 +1,6 @@
 import React, {
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -12,7 +13,6 @@ import remarkGfm from "remark-gfm";
 import {
   getRouteContext,
   getRouteView,
-  reportDuringLoad,
   reportMatchesRoute,
   workspacePath,
 } from "./routes.js";
@@ -20,6 +20,8 @@ import { downloadReport } from "./report-download.js";
 import { checkCliConnection, deviceManagementAction } from "./device-connection.js";
 import { reportJobProgress, type ReportJob } from "./report-progress.js";
 import { TIMEZONE_OPTIONS, formatInTimezone, normalizeTimezone, todayInTimezone } from "./timezone.js";
+import { waitForReportJob } from "./report-jobs.js";
+import { workspaceLoadPlan, type WorkspaceLoadKey } from "./workspace-loading.js";
 import "./style.css";
 
 const request = async (path: string, init: RequestInit = {}) => {
@@ -239,7 +241,17 @@ async function copyText(value: string) {
   if (!copied) throw new Error("Copy failed. Select and copy the command manually.");
 }
 
+function useActiveView() {
+  const active = useRef(true);
+  useLayoutEffect(() => {
+    active.current = true;
+    return () => { active.current = false; };
+  }, []);
+  return active;
+}
+
 function Install({ workspaceId, agents, userId, onAgentsChecked }: { workspaceId: number; agents: any[]; userId: number; onAgentsChecked: (agents: any[]) => void }) {
+  const active = useActiveView();
   const [installation, setInstallation] = useState<any>();
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
@@ -255,6 +267,7 @@ function Install({ workspaceId, agents, userId, onAgentsChecked }: { workspaceId
     setCheckPending(true);
     try {
       const result = await checkCliConnection(workspaceId, userId, request);
+      if (!active.current) return;
       onAgentsChecked(result.agents);
       setCheckMessage(
         result.state === "connected"
@@ -264,25 +277,24 @@ function Install({ workspaceId, agents, userId, onAgentsChecked }: { workspaceId
             : "No CLI device was found for your account in this workspace.",
       );
     } catch (caught: any) {
-      setError(caught.message || "Could not check the CLI connection.");
+      if (active.current) setError(caught.message || "Could not check the CLI connection.");
     } finally {
-      setCheckPending(false);
+      if (active.current) setCheckPending(false);
     }
   };
   const mint = async () => {
     setError("");
     setPending(true);
     try {
-      setInstallation(
-        await request("/agents/installations", {
+      const nextInstallation = await request("/agents/installations", {
           method: "POST",
           body: JSON.stringify({ workspaceId }),
-        }),
-      );
+        });
+      if (active.current) setInstallation(nextInstallation);
     } catch (caught: any) {
-      setError(caught.message);
+      if (active.current) setError(caught.message);
     } finally {
-      setPending(false);
+      if (active.current) setPending(false);
     }
   };
   const Copy = ({ command, label }: { command: string; label: string }) => (
@@ -319,7 +331,7 @@ function Install({ workspaceId, agents, userId, onAgentsChecked }: { workspaceId
         description="Connect this Linux device to the selected workspace without uploading source code."
       />
       <section className="card device-detection" aria-live="polite">
-        <span>Automatic CLI detection</span>
+        <span>CLI connection</span>
         <h2>{onlineDevices.length ? "CLI connected" : personalDevices.length ? "CLI installed, device offline" : "CLI not detected"}</h2>
         <p className="muted">
           {onlineDevices.length
@@ -381,6 +393,14 @@ function Install({ workspaceId, agents, userId, onAgentsChecked }: { workspaceId
             />
             <Copy label="Find the command" command="command -v tracemini" />
             <Copy label="Check device status" command="tracemini status" />
+            <Copy
+              label="Register repository folders"
+              command={'tracemini watch "$HOME/path-to-repositories"'}
+            />
+            <Copy
+              label="Import existing Git history when convenient"
+              command="tracemini sync-history --days 90"
+            />
             <Copy
               label="Check system service"
               command="systemctl --user status tracemini.service --no-pager"
@@ -517,6 +537,7 @@ function EmptyState({ title, text }: { title: string; text: string }) {
 }
 
 function Settings({ workspace, members, repositories, agents, reload }: any) {
+  const active = useActiveView();
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [pending, setPending] = useState(false);
@@ -529,12 +550,13 @@ function Settings({ workspace, members, repositories, agents, reload }: any) {
         method,
         body: body === undefined ? undefined : JSON.stringify(body),
       });
+      if (!active.current) return;
       await reload();
-      setMessage("Workspace updated.");
+      if (active.current) setMessage("Workspace updated.");
     } catch (caught: any) {
-      setError(caught.message);
+      if (active.current) setError(caught.message);
     } finally {
-      setPending(false);
+      if (active.current) setPending(false);
     }
   };
   if (workspace.role !== "Manager")
@@ -911,15 +933,12 @@ function Dashboard({
   stats,
   events,
   repositories,
-  refreshes,
-  agents,
   reload,
   error,
   timezone,
 }: any) {
   const [refreshPending, setRefreshPending] = useState(false);
-  const [actionError, setActionError] = useState("");
-  const [actionMessage, setActionMessage] = useState("");
+  const activeView = useActiveView();
   return (
     <div className="page-stack">
       <PageHeading
@@ -1000,53 +1019,11 @@ function Dashboard({
             disabled={refreshPending}
             onClick={async () => {
               setRefreshPending(true);
-              setActionError("");
-              setActionMessage("");
-              try {
-                const queued = await request(`/workspaces/${workspaceId}/refresh`, {
-                  method: "POST",
-                });
-                setActionMessage(
-                  `${queued.requestCount} device refresh ${queued.requestCount === 1 ? "was" : "were"} queued. Recent Git history will be imported.`,
-                );
-                await reload();
-              } catch (caught: any) {
-                setActionError(caught.message);
-              } finally {
-                setRefreshPending(false);
-              }
+              try { await reload(); } finally { if (activeView.current) setRefreshPending(false); }
             }}
           >
-            {refreshPending ? "Queueing refresh…" : "Refresh repositories"}
+            {refreshPending ? "Refreshing…" : "Refresh dashboard"}
           </button>
-          {actionMessage && (
-            <div className="alert success compact" role="status">
-              {actionMessage}
-            </div>
-          )}
-          {actionError && (
-            <div className="alert error compact" role="alert">
-              {actionError}
-            </div>
-          )}
-          {refreshes.slice(0, 3).map((item: any) => (
-            <p className="muted compact" key={item.id}>
-              {item.status}
-              {item.error
-                ? `: ${item.error}`
-                : item.repositories_found !== null
-                  ? ` · ${item.repositories_found} found`
-                  : ""}
-            </p>
-          ))}
-          <h3>Devices</h3>
-          {agents.map((agent: any) => (
-            <p className="agent-line" key={agent.id}>
-              <i className={`status ${agent.status}`} /> {agent.machine_name}
-              <small>{agent.status}</small>
-            </p>
-          ))}
-          {!agents.length && <p className="muted">No device connected.</p>}
         </aside>
       </div>
       {error && (
@@ -1067,25 +1044,36 @@ function ReportDetail({ report, workspaceId, currentUserId, reload }: any) {
   const [pending, setPending] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const operationScope = useRef({identity: `${workspaceId}:${report.id}`, generation: 0});
+  const operationIdentity = `${workspaceId}:${report.id}`;
+  if (operationScope.current.identity !== operationIdentity) {
+    operationScope.current = {identity: operationIdentity, generation: operationScope.current.generation + 1};
+  }
+  useEffect(() => () => { operationScope.current.generation += 1; }, []);
   const rename = async (event: FormEvent) => {
     event.preventDefault();
+    const operation = ++operationScope.current.generation;
+    const active = () => operation === operationScope.current.generation;
     setPending(true);
     setMessage("");
     setError("");
     try {
       const updated = await request(`/reports/${report.id}`, {method: "PATCH", body: JSON.stringify({name})});
+      if (!active()) return;
       setName(updated.name);
       setMessage("Report renamed successfully.");
       setShowRename(false);
       await reload();
     } catch (caught: any) {
-      setError(caught.message);
+      if (active()) setError(caught.message);
     } finally {
-      setPending(false);
+      if (active()) setPending(false);
     }
   };
   const regenerate = async (event: FormEvent) => {
     event.preventDefault();
+    const operation = ++operationScope.current.generation;
+    const active = () => operation === operationScope.current.generation;
     setPending(true);
     setMessage("");
     setError("");
@@ -1094,24 +1082,28 @@ function ReportDetail({ report, workspaceId, currentUserId, reload }: any) {
         method: "POST",
         body: JSON.stringify({ reporter, prompt }),
       });
+      if (!active()) return;
       setMessage("Regeneration queued. Waiting for the connected device…");
-      for (let attempt = 0; attempt < 120; attempt += 1) {
-        await new Promise((resolve) => setTimeout(resolve, 1500));
-        const status = await request(`/reports/jobs/${job.id}`);
-        if (status.status === "completed") {
-          setMessage("Report regenerated successfully.");
-          setShowRegenerate(false);
-          setPrompt("");
-          await reload();
-          return;
-        }
-        if (status.status === "failed") throw new Error(status.error || "Report regeneration failed.");
+      const status = await waitForReportJob(
+        job.id,
+        (jobId) => request(`/reports/jobs/${jobId}`),
+        {isActive: active},
+      );
+      if (!status) return;
+      if (status.status === "completed") {
+        setMessage("Report regenerated successfully.");
+        setShowRegenerate(false);
+        setPrompt("");
+        await reload();
+        return;
       }
-      setMessage("Regeneration is still processing. The updated report will appear after it completes.");
+      if (status.status === "failed")
+        throw new Error(status.error || "Report regeneration failed.");
+      setMessage("Regeneration is still processing. Refresh this report later to see the update.");
     } catch (caught: any) {
-      setError(caught.message);
+      if (active()) setError(caught.message);
     } finally {
-      setPending(false);
+      if (active()) setPending(false);
     }
   };
   return (
@@ -1122,6 +1114,9 @@ function ReportDetail({ report, workspaceId, currentUserId, reload }: any) {
       <div className="actions report-actions">
         <button className="button secondary" onClick={() => navigate(workspacePath(workspaceId, "reports"))}>
           ← Report history
+        </button>
+        <button className="button secondary" onClick={() => void reload()}>
+          Refresh report
         </button>
         {report.user_id === currentUserId && (
           <>
@@ -1187,40 +1182,49 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error, timezon
   const [job, setJob] = useState<ReportJob>();
   const [includeDiff, setIncludeDiff] = useState(false);
   const [actionError, setActionError] = useState("");
+  const [message, setMessage] = useState("");
+  const operationScope = useRef({workspaceId, generation: 0});
+  const pollingGeneration = useRef(0);
+  const restorationGeneration = useRef(0);
+  if (operationScope.current.workspaceId !== workspaceId) {
+    operationScope.current = {workspaceId, generation: operationScope.current.generation + 1};
+  }
+  useEffect(() => () => {
+    operationScope.current.generation += 1;
+    pollingGeneration.current += 1;
+    restorationGeneration.current += 1;
+  }, []);
   const progress = job ? reportJobProgress(job) : undefined;
   useEffect(() => {
-    let cancelled = false;
+    const generation = ++restorationGeneration.current;
+    const operation = operationScope.current.generation;
+    const active = () => generation === restorationGeneration.current && operation === operationScope.current.generation;
     setJob(undefined);
     request(`/workspaces/${workspaceId}/report-jobs/active`)
-      .then((active) => { if (!cancelled) setJob(active || undefined); })
-      .catch((caught: any) => { if (!cancelled) setActionError(caught.message || "Could not restore report progress."); });
-    return () => { cancelled = true; };
+      .then((restored) => { if (active()) setJob(restored || undefined); })
+      .catch((caught: any) => { if (active()) setActionError(caught.message || "Could not restore report progress."); });
+    return () => { restorationGeneration.current += 1; };
   }, [workspaceId]);
   useEffect(() => {
     if (!job?.id || !progress?.active) return;
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout>;
-    const poll = async () => {
-      try {
-        const latest = await request(`/reports/jobs/${job.id}`);
-        if (cancelled) return;
-        setActionError("");
-        setJob(latest);
-        if (latest.status === "completed") await reload();
-        if (["pending", "running"].includes(latest.status)) timer = setTimeout(() => void poll(), 2000);
-      } catch (caught: any) {
-        if (!cancelled) {
-          setActionError(caught.message || "Could not check report progress.");
-          timer = setTimeout(() => void poll(), 2000);
-        }
-      }
-    };
-    timer = setTimeout(() => void poll(), 2000);
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-  }, [job?.id, job?.status]);
+    const generation = ++pollingGeneration.current;
+    const active = () => generation === pollingGeneration.current && operationScope.current.workspaceId === workspaceId;
+    void waitForReportJob(
+      job.id,
+      (jobId) => request(`/reports/jobs/${jobId}`),
+      {isActive: active, onStatus: (latest) => { if (active()) setJob(latest as ReportJob); }},
+    ).then(async (latest) => {
+      if (!latest || !active()) return;
+      if (latest.status === "failed") setActionError(latest.error || "Report generation failed.");
+      else if (latest.status === "completed") {
+        setMessage("Report generated successfully.");
+        await reload();
+      } else setMessage("Report is still processing. Use Refresh reports to check again.");
+    }).catch((caught: any) => {
+      if (active()) setActionError(caught.message || "Could not check report progress.");
+    });
+    return () => { pollingGeneration.current += 1; };
+  }, [job?.id, workspaceId]);
   return (
     <div className="page-stack">
       <PageHeading
@@ -1267,6 +1271,9 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error, timezon
             className="button primary"
             disabled={pending || Boolean(progress?.active)}
             onClick={async () => {
+              const operation = ++operationScope.current.generation;
+              restorationGeneration.current += 1;
+              const active = () => operation === operationScope.current.generation;
               setPending(true);
               setActionError("");
               try {
@@ -1282,12 +1289,14 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error, timezon
                     includeDiff,
                   }),
                 });
+                if (!active()) return;
                 setName("");
                 setJob(created);
+                setMessage("Report queued. A connected device will generate it shortly.");
               } catch (caught: any) {
-                setActionError(caught.message);
+                if (active()) setActionError(caught.message);
               } finally {
-                setPending(false);
+                if (active()) setPending(false);
               }
             }}
           >
@@ -1306,6 +1315,7 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error, timezon
             <small>Includes bounded Git diff excerpts so the report can explain exact features and behavior. Selected source excerpts are sent to the configured AI generator.</small>
           </span>
         </label>
+        {message && <div className="alert success" role="status">{message}</div>}
         {actionError && <div className="alert error" role="alert">{actionError}</div>}
       </section>
       <section className="card reports-list-card">
@@ -1314,7 +1324,12 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error, timezon
             <span>History</span>
             <h2>Completed reports</h2>
           </div>
-          <span className="count-badge">{reports.length}</span>
+          <div className="actions">
+            <span className="count-badge">{reports.length}</span>
+            <button className="button secondary" onClick={() => void reload()}>
+              Refresh reports
+            </button>
+          </div>
         </div>
         {reports.length ? reports.map((item: any) => (
           <button
@@ -1343,7 +1358,6 @@ function App() {
   const [members, setMembers] = useState<any[]>([]);
   const [reports, setReports] = useState<any[]>([]);
   const [agents, setAgents] = useState<any[]>([]);
-  const [refreshes, setRefreshes] = useState<any[]>([]);
   const [stats, setStats] = useState<any>({ totals: {}, daily: [] });
   const [report, setReport] = useState<any>();
   const [error, setError] = useState("");
@@ -1356,6 +1370,20 @@ function App() {
   const [logoutPending, setLogoutPending] = useState(false);
   const [logoutError, setLogoutError] = useState("");
   const loadGeneration = useRef(0);
+  const dataWorkspaceId = useRef(workspaceId);
+  useLayoutEffect(() => {
+    if (dataWorkspaceId.current === workspaceId) return;
+    dataWorkspaceId.current = workspaceId;
+    loadGeneration.current += 1;
+    setEvents([]);
+    setRepositories([]);
+    setMembers([]);
+    setReports([]);
+    setAgents([]);
+    setStats({totals: {}, daily: []});
+    setReport(undefined);
+    setError("");
+  }, [workspaceId]);
   useEffect(() => {
     const listener = () => {
       const nextRoute = location.pathname;
@@ -1371,12 +1399,13 @@ function App() {
     () => workspaces.find((item) => item.id === workspaceId),
     [workspaces, workspaceId],
   );
-  const loadIdentity = async (preferredId?: number) => {
+  const loadIdentity = async (preferredId?: number, active: () => boolean = () => true) => {
     try {
       const [me, list] = await Promise.all([
         request("/auth/me"),
         request("/workspaces"),
       ]);
+      if (!active()) return 0;
       setUser(me);
       setWorkspaces(list);
       const routeWorkspace = Number(
@@ -1389,6 +1418,7 @@ function App() {
       setWorkspaceId(selected);
       return selected;
     } catch {
+      if (!active()) return 0;
       localStorage.removeItem("token");
       setToken("");
       return 0;
@@ -1398,68 +1428,41 @@ function App() {
     const generation = ++loadGeneration.current;
     const selectedWorkspace = workspaceId;
     const selectedRoute = route;
-    setReport((current: any) => reportDuringLoad(current, selectedRoute));
     if (!selectedWorkspace) {
       setEvents([]);
       setRepositories([]);
       setMembers([]);
       setReports([]);
       setAgents([]);
-      setRefreshes([]);
       setStats({ totals: {}, daily: [] });
       return;
     }
     try {
       setError("");
-      const match = selectedRoute.match(
-        /^\/workspaces\/\d+\/(users|repositories)\/(\d+)/,
+      const plan = workspaceLoadPlan(selectedRoute, selectedWorkspace, dates, timezone);
+      const loaded = await Promise.all(
+        plan.map(async (item) => [item.key, await request(item.path)] as const),
       );
-      const eventPath = match
-        ? `/${match[1]}/${match[2]}/activity?workspaceId=${selectedWorkspace}&from=${dates.from}&to=${dates.to}&timezone=${encodeURIComponent(timezone)}`
-        : `/workspaces/${selectedWorkspace}/activity?from=${dates.from}&to=${dates.to}&timezone=${encodeURIComponent(timezone)}`;
-      const statsFilter = match
-        ? `&${match[1] === "users" ? "userId" : "repositoryId"}=${match[2]}`
-        : "";
-      const routeContext = getRouteContext(selectedRoute);
-      const [
-        activity,
-        repos,
-        people,
-        history,
-        machines,
-        refreshHistory,
-        summary,
-        detail,
-      ] = await Promise.all([
-        request(eventPath),
-        request(
-          `/workspaces/${selectedWorkspace}/repositories?includeArchived=true`,
-        ),
-        request(`/workspaces/${selectedWorkspace}/members`),
-        request(`/workspaces/${selectedWorkspace}/reports`),
-        request(`/workspaces/${selectedWorkspace}/agents`),
-        request(`/workspaces/${selectedWorkspace}/refresh`),
-        request(
-          `/workspaces/${selectedWorkspace}/stats?from=${dates.from}&to=${dates.to}&timezone=${encodeURIComponent(timezone)}${statsFilter}`,
-        ),
-        routeContext.reportId
-          ? request(`/reports/${routeContext.reportId}`)
-          : Promise.resolve(undefined),
-      ]);
+
       if (generation !== loadGeneration.current) return;
-      if (detail && !reportMatchesRoute(detail, selectedRoute))
-        throw new Error("Report does not belong to this workspace.");
-      setEvents(activity);
-      setRepositories(repos);
-      setMembers(people);
-      setReports(history);
-      setAgents(machines);
-      setRefreshes(refreshHistory);
-      setStats(summary);
-      setReport(detail);
+      const apply: Record<WorkspaceLoadKey, (value: any) => void> = {
+        events: setEvents,
+        repositories: setRepositories,
+        members: setMembers,
+        reports: setReports,
+        agents: setAgents,
+        stats: setStats,
+        report: (detail) => {
+          if (!reportMatchesRoute(detail, selectedRoute))
+            throw new Error("Report does not belong to this workspace.");
+          setReport(detail);
+        },
+      };
+      for (const [key, value] of loaded) apply[key](value);
     } catch (caught: any) {
       if (generation === loadGeneration.current) {
-        setReport(undefined);
+        if (getRouteView(selectedRoute, selectedWorkspace) === "report")
+          setReport(undefined);
         setError(caught.message);
       }
     }
@@ -1468,21 +1471,7 @@ function App() {
     if (token) void loadIdentity();
   }, [token]);
   useEffect(() => {
-    if (!workspaceId) {
-      void loadWorkspace();
-      return;
-    }
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const poll = async () => {
-      await loadWorkspace();
-      if (!cancelled) timer = setTimeout(() => void poll(), 5000);
-    };
-    void poll();
-    return () => {
-      cancelled = true;
-      if (timer) clearTimeout(timer);
-    };
+    void loadWorkspace();
   }, [workspaceId, route, dates.from, dates.to, timezone]);
   if (!token) return <Auth onLogin={setToken} route={route} />;
   const view = getRouteView(route, workspaceId);
@@ -1614,16 +1603,20 @@ function App() {
           {view === "workspace-required" || !workspaceId ? (
             <WorkspaceRequired openDialog={setDialog} />
           ) : view === "install" ? (
-            <Install workspaceId={workspaceId} agents={agents} userId={user?.id} onAgentsChecked={setAgents} />
+            <Install key={workspaceId} workspaceId={workspaceId} agents={agents} userId={user?.id} onAgentsChecked={(nextAgents) => {
+              if (dataWorkspaceId.current === workspaceId) setAgents(nextAgents);
+            }} />
           ) : view === "settings" ? (
             <Settings
+              key={workspaceId}
               workspace={workspace}
               members={members}
               repositories={repositories}
               agents={agents}
               reload={async () => {
-                await loadIdentity();
-                await loadWorkspace();
+                const expectedWorkspace = workspaceId;
+                const selected = await loadIdentity(expectedWorkspace, () => dataWorkspaceId.current === expectedWorkspace);
+                if (selected === expectedWorkspace && dataWorkspaceId.current === expectedWorkspace) await loadWorkspace();
               }}
             />
           ) : view === "reports" ? (
@@ -1639,7 +1632,7 @@ function App() {
             />
           ) : view === "report" ? (
             reportMatchesRoute(report, route) ? (
-              <ReportDetail report={report} workspaceId={workspaceId} currentUserId={user?.id} reload={loadWorkspace} />
+              <ReportDetail key={`${workspaceId}:${report.id}`} report={report} workspaceId={workspaceId} currentUserId={user?.id} reload={loadWorkspace} />
             ) : (
               <section className="card">
                 <h2>Loading report…</h2>
@@ -1652,6 +1645,7 @@ function App() {
             )
           ) : (
             <Dashboard
+              key={workspaceId}
               workspaceId={workspaceId}
               route={route}
               dates={dates}
@@ -1659,8 +1653,6 @@ function App() {
               stats={stats}
               events={events}
               repositories={repositories}
-              refreshes={refreshes}
-              agents={agents}
               reload={loadWorkspace}
               error={error}
               timezone={timezone}

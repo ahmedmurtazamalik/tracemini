@@ -290,7 +290,7 @@ else if(command==='status'){console.log(JSON.stringify(JSON.parse(fs.readFileSyn
     }
   });
 
-  it('queues refresh and push work, exposes stats, archive and agent status', async () => {
+  it('keeps repository setup local while exposing push work, stats, archive and agent status', async () => {
     db = await openTestDb();
     const app = createApp(db);
     const user = (await request(app).post('/api/auth/register').send({name: 'Ada', email: 'ada@test.local', password: 'password123'}).expect(201)).body;
@@ -303,11 +303,9 @@ else if(command==='status'){console.log(JSON.stringify(JSON.parse(fs.readFileSyn
     const renamedRepo = (await request(app).post('/api/repositories/register').set(auth(agent.agentToken)).send({workspaceId: String(workspace.id), name: 'RemoteProject', remoteUrl: 'file:///tmp/remote.git', localKey: '/clone', branch: 'main', headSha: 'abc', remoteHeadSha: 'abc'}).expect(200)).body;
     expect(renamedRepo).toMatchObject({id: repo.id, name: 'RemoteProject'});
 
-    const refresh = (await request(app).post(`/api/workspaces/${workspace.id}/refresh`).set(auth(user.token)).expect(201)).body;
-    expect((await request(app).get('/api/agents/refresh-requests').set(auth(agent.agentToken)).expect(200)).body[0].id).toBe(refresh.id);
-    await request(app).post(`/api/agents/refresh-requests/${refresh.id}/claim`).set(auth(agent.agentToken)).expect(200);
-    await request(app).post(`/api/agents/refresh-requests/${refresh.id}/complete`).set(auth(agent.agentToken)).send({repositoriesFound: 2}).expect(200);
-    expect((await request(app).get(`/api/workspaces/${workspace.id}/refresh`).set(auth(user.token)).expect(200)).body[0]).toMatchObject({status: 'completed', repositories_found: 2});
+    const refresh = (await request(app).post(`/api/workspaces/${workspace.id}/refresh`).set(auth(user.token)).expect(410)).body;
+    expect(refresh).toEqual({error: 'repository refresh moved to tracemini watch PATH'});
+    expect((await request(app).get('/api/agents/refresh-requests').set(auth(agent.agentToken)).expect(200)).body).toEqual([]);
 
     const pending = (await request(app).post('/api/pushes/pending').set(auth(agent.agentToken)).send({repositoryId: repo.id, eventKey: 'push-1', remoteName: 'origin', remoteUrl: 'file:///tmp/remote.git', ref: 'refs/heads/main', expectedSha: 'abc', occurredAt: new Date().toISOString()}).expect(201)).body;
     expect((await request(app).get('/api/agents/pushes').set(auth(agent.agentToken)).expect(200)).body[0].id).toBe(pending.id);
@@ -460,12 +458,19 @@ else if(command==='status'){console.log(JSON.stringify(JSON.parse(fs.readFileSyn
     expect(exchangeSql).toContain('SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=?');
 
     recording.reset();
-    await request(app).patch(`/api/workspaces/${workspace.id}/members/${member.user.id}`).set(auth(manager.token)).send({role: 'Manager'}).expect(200);
-    expect(recording.calls).toContainEqual({sql: "SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=? AND role='Manager'", inTransaction: true});
+    await request(app).post('/api/agents/workspace').set(auth(exchanged.agentToken)).send({workspaceId: String(workspace.id)}).expect(200);
+    const switchSql = recording.calls.filter(call => call.inTransaction).map(call => call.sql);
+    expect(switchSql.findIndex(sql => sql === 'SELECT id FROM workspaces WHERE id=? FOR UPDATE')).toBeLessThan(switchSql.findIndex(sql => sql === 'SELECT * FROM agents WHERE id=? FOR UPDATE'));
+    expect(recording.calls).toContainEqual({sql: 'SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=?', inTransaction: true});
 
     recording.reset();
-    await request(app).post(`/api/workspaces/${workspace.id}/refresh`).set(auth(manager.token)).expect(201);
-    expect(recording.calls.some(call => call.inTransaction && call.sql.includes('FROM agents a') && call.sql.includes('a.revoked_at IS NULL') && call.sql.includes('workspace_members'))).toBe(true);
+    await request(app).post('/api/repositories/register').set(auth(exchanged.agentToken)).send({workspaceId: String(workspace.id), name: 'locked-repo', remoteUrl: 'https://github.com/team/locked-repo.git', localKey: '/work/locked-repo'}).expect(200);
+    const registrationSql = recording.calls.filter(call => call.inTransaction).map(call => call.sql);
+    expect(registrationSql.findIndex(sql => sql === 'SELECT id FROM workspaces WHERE id=? FOR UPDATE')).toBeLessThan(registrationSql.findIndex(sql => sql === 'SELECT * FROM agents WHERE id=? FOR UPDATE'));
+
+    recording.reset();
+    await request(app).patch(`/api/workspaces/${workspace.id}/members/${member.user.id}`).set(auth(manager.token)).send({role: 'Manager'}).expect(200);
+    expect(recording.calls).toContainEqual({sql: "SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=? AND role='Manager'", inTransaction: true});
 
     recording.reset();
     await request(app).post(`/api/workspaces/${workspace.id}/agents/${exchanged.agentId}/revoke`).set(auth(manager.token)).expect(200);
@@ -506,5 +511,22 @@ else if(command==='status'){console.log(JSON.stringify(JSON.parse(fs.readFileSyn
     await request(app).post('/api/agents/heartbeat').set(auth(agent.agentToken)).expect(401);
     await request(app).post(`/api/agents/jobs/${job.id}/claim`).set(auth(agent.agentToken)).expect(401);
     expect((await request(app).get(`/api/reports/jobs/${job.id}`).set(auth(member.token)).expect(200)).body).toMatchObject({status: 'failed', error: 'workspace membership removed'});
+  });
+
+  it('removes local clone bindings when an agent changes workspace', async () => {
+    db = await openTestDb();
+    const app = createApp(db);
+    const user = (await request(app).post('/api/auth/register').send({name: 'switcher', email: 'switcher@isolation.test', password: 'password123'}).expect(201)).body;
+    const workspaceA = (await request(app).post('/api/workspaces').set(auth(user.token)).send({name: 'Workspace A'}).expect(201)).body;
+    const workspaceB = (await request(app).post('/api/workspaces').set(auth(user.token)).send({name: 'Workspace B'}).expect(201)).body;
+    const installation = (await request(app).post('/api/agents/installations').set(auth(user.token)).send({workspaceId: workspaceA.id}).expect(201)).body;
+    const agent = (await request(app).post('/api/agents/install/exchange').send({installToken: installToken(installation), machineName: 'switching-box'}).expect(201)).body;
+    const registration = await request(app).post('/api/repositories/register').set(auth(agent.agentToken)).send({workspaceId: String(workspaceA.id), name: 'repo', remoteUrl: 'https://github.com/team/repo.git', localKey: '/work/repo'});
+    expect(registration.status, JSON.stringify(registration.body)).toBe(200);
+    expect((await request(app).get(`/api/workspaces/${workspaceA.id}/repositories`).set(auth(user.token)).expect(200)).body[0].clone_count).toBe(1);
+
+    await request(app).post('/api/agents/workspace').set(auth(agent.agentToken)).send({workspaceId: String(workspaceB.id)}).expect(200);
+
+    expect((await request(app).get(`/api/workspaces/${workspaceA.id}/repositories`).set(auth(user.token)).expect(200)).body[0].clone_count).toBe(0);
   });
 });

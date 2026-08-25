@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
-import {loadConfig, saveConfig} from '../packages/cli/src/config.js';
+import {loadConfig, loadQueue, mutateCurrentBinding, saveConfig, saveQueue} from '../packages/cli/src/config.js';
 
 const originalHome = process.env.TRACEMINI_HOME;
 afterEach(() => {
@@ -13,16 +13,16 @@ afterEach(() => {
 });
 
 describe('concurrent CLI configuration', () => {
-  it('watches the user home directory by default, including existing empty configs', () => {
+  it('does not scan any directory until the user explicitly chooses a watch root', () => {
     const state = fs.mkdtempSync(path.join(os.tmpdir(), 'tracemini-default-home-'));
     const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'tracemini-user-home-'));
     process.env.TRACEMINI_HOME = state;
     const originalUserHome = process.env.HOME;
     process.env.HOME = fakeHome;
     try {
-      expect(loadConfig().watchedPaths).toEqual([fakeHome]);
+      expect(loadConfig().watchedPaths).toEqual([]);
       fs.writeFileSync(path.join(state, 'config.json'), JSON.stringify({watchedPaths: []}));
-      expect(loadConfig().watchedPaths).toEqual([fakeHome]);
+      expect(loadConfig().watchedPaths).toEqual([]);
     } finally {
       if (originalUserHome === undefined) delete process.env.HOME;
       else process.env.HOME = originalUserHome;
@@ -48,7 +48,7 @@ describe('concurrent CLI configuration', () => {
     fs.writeFileSync(gate, 'go');
     await Promise.all(children.map(child => new Promise<void>((resolve, reject) => child.once('exit', code => code === 0 ? resolve() : reject(new Error(`config writer exited ${code}`))))));
 
-    expect(loadConfig().watchedPaths.sort()).toEqual([os.homedir(), ...roots].sort());
+    expect(loadConfig().watchedPaths.sort()).toEqual(roots.sort());
     fs.rmSync(home, {recursive: true, force: true});
   }, 20_000);
 
@@ -66,7 +66,7 @@ describe('concurrent CLI configuration', () => {
     saveConfig(staleAgentConfig);
 
     expect(loadConfig()).toMatchObject({
-      watchedPaths: [os.homedir(), '/tmp/watched'],
+      watchedPaths: ['/tmp/watched'],
       clones: [{path: '/tmp/watched/repo', repositoryId: 7}],
     });
     fs.rmSync(home, {recursive: true, force: true});
@@ -85,15 +85,78 @@ describe('concurrent CLI configuration', () => {
     fs.rmSync(home, {recursive: true, force: true});
   });
 
-  it('persists background repository state without changing its current binding', () => {
+  it('ignores repository state from the same numeric IDs on another server binding', () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'tracemini-config-'));
     process.env.TRACEMINI_HOME = home;
     const clone = {path: '/work/repo', repositoryId: 7, normalizedRemote: 'example/repo', name: 'repo', headSha: 'old'};
-    saveConfig({...loadConfig(), workspaceId: 2, agentId: 22, clones: [clone]});
+    const stale = {...loadConfig(), serverUrl: 'https://old.example', workspaceId: 2, agentId: 22, agentToken: 'old-token', clones: [{...clone, headSha: 'new'}]};
+    saveConfig(stale);
+    saveConfig({...loadConfig(), serverUrl: 'https://new.example', workspaceId: 2, agentId: 22, agentToken: 'new-token', clones: [clone]}, {replaceRepositoryState: true});
 
-    saveConfig({...loadConfig(), workspaceId: 1, agentId: 11, clones: [{...clone, headSha: 'new'}]}, {preserveCurrentScalars: true});
+    saveConfig(stale, {preserveCurrentScalars: true});
 
-    expect(loadConfig()).toMatchObject({workspaceId: 2, agentId: 22, clones: [{repositoryId: 7, headSha: 'new'}]});
+    expect(loadConfig()).toMatchObject({serverUrl: 'https://new.example', workspaceId: 2, agentId: 22, agentToken: 'new-token', clones: [{repositoryId: 7, headSha: 'old'}]});
+    fs.rmSync(home, {recursive: true, force: true});
+  });
+
+  it('rejects a stale queue save after the device binding changes', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'tracemini-config-'));
+    process.env.TRACEMINI_HOME = home;
+    const stale = {...loadConfig(), serverUrl: 'https://old.example', workspaceId: 1, agentId: 1, agentToken: 'old-token'};
+    saveConfig(stale);
+    saveQueue([{eventKey: 'old', repositoryId: 1, type: 'commit', occurredAt: new Date().toISOString(), data: {}, attempts: 0, nextAttempt: 0}], stale);
+    const current = {...loadConfig(), serverUrl: 'https://new.example', workspaceId: 1, agentId: 1, agentToken: 'new-token', watchedPaths: [], clones: []};
+    saveConfig(current, {replaceRepositoryState: true});
+    saveQueue([], current);
+
+    expect(saveQueue([{eventKey: 'resurrected', repositoryId: 1, type: 'commit', occurredAt: new Date().toISOString(), data: {}, attempts: 0, nextAttempt: 0}], stale)).toBe(false);
+    expect(loadQueue()).toEqual([]);
+    fs.rmSync(home, {recursive: true, force: true});
+  });
+
+  it('replaces repository state when switching workspaces', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'tracemini-config-'));
+    process.env.TRACEMINI_HOME = home;
+    saveConfig({...loadConfig(), workspaceId: 1, watchedPaths: ['/one'], clones: [{path: '/one/repo', repositoryId: 7, normalizedRemote: 'one/repo', name: 'repo'}]});
+    const switched = {...loadConfig(), workspaceId: 2, watchedPaths: [], clones: []};
+
+    saveConfig(switched, {replaceRepositoryState: true});
+
+    expect(loadConfig()).toMatchObject({workspaceId: 2, watchedPaths: [], clones: []});
+    fs.rmSync(home, {recursive: true, force: true});
+  });
+
+  it('cleans the latest persisted clone list during a stale workspace reset', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'tracemini-config-'));
+    process.env.TRACEMINI_HOME = home;
+    saveConfig({...loadConfig(), workspaceId: 1, agentId: 1, agentToken: 'token'});
+    const staleReset = loadConfig();
+    saveConfig({...loadConfig(), watchedPaths: ['/new'], clones: [{path: '/new/repo', repositoryId: 7, normalizedRemote: 'new/repo', name: 'repo'}]});
+    const cleaned: string[] = [];
+    staleReset.workspaceId = 2;
+    staleReset.watchedPaths = [];
+    staleReset.clones = [];
+
+    saveConfig(staleReset, {
+      replaceRepositoryState: true,
+      beforeRepositoryStateReplace: current => cleaned.push(...current.clones.map(clone => clone.path)),
+    });
+
+    expect(cleaned).toEqual(['/new/repo']);
+    expect(loadConfig()).toMatchObject({workspaceId: 2, watchedPaths: [], clones: []});
+    fs.rmSync(home, {recursive: true, force: true});
+  });
+
+  it('does not execute a binding-locked mutation for a stale device', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'tracemini-config-'));
+    process.env.TRACEMINI_HOME = home;
+    const stale = {...loadConfig(), serverUrl: 'https://old.example', workspaceId: 1, agentId: 1, agentToken: 'old'};
+    saveConfig(stale);
+    saveConfig({...stale, serverUrl: 'https://new.example', agentToken: 'new'}, {replaceRepositoryState: true});
+    let invoked = false;
+
+    expect(mutateCurrentBinding(stale, () => { invoked = true; })).toBe(false);
+    expect(invoked).toBe(false);
     fs.rmSync(home, {recursive: true, force: true});
   });
 

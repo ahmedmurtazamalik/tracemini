@@ -318,15 +318,21 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
   });
   app.post('/api/agents/workspace', agentAuth, required(['workspaceId']), async (req: Authed, res) => {
     const workspaceId = Number(req.body.workspaceId);
-    if (!(await membership(req.agent.user_id, workspaceId))) return res.status(403).json({error: 'forbidden'});
-    await db.transaction(async () => {
-      if (req.agent.workspace_id && req.agent.workspace_id !== workspaceId) {
-        await db.prepare("UPDATE refresh_requests SET status='error',error='device changed workspace',completed_at=? WHERE agent_id=? AND status IN ('queued','running')").run(now(), req.agent.id);
-        await db.prepare("UPDATE pending_pushes SET status='unconfirmed',completed_at=? WHERE agent_id=? AND status='pending'").run(now(), req.agent.id);
-        await db.prepare("UPDATE report_jobs SET status='failed',error='device changed workspace',completed_at=? WHERE agent_id=? AND status='running'").run(now(), req.agent.id);
+    const outcome = await db.transaction(async () => {
+      const workspace = await db.prepare('SELECT id FROM workspaces WHERE id=? FOR UPDATE').get(workspaceId);
+      if (!workspace || !(await db.prepare('SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=?').get(workspaceId, req.agent.user_id))) return 'forbidden';
+      const agent: any = await db.prepare('SELECT * FROM agents WHERE id=? FOR UPDATE').get(req.agent.id);
+      if (!agent || agent.revoked_at) return 'forbidden';
+      if (agent.workspace_id && agent.workspace_id !== workspaceId) {
+        await db.prepare("UPDATE refresh_requests SET status='error',error='device changed workspace',completed_at=? WHERE agent_id=? AND status IN ('queued','running')").run(now(), agent.id);
+        await db.prepare("UPDATE pending_pushes SET status='unconfirmed',completed_at=? WHERE agent_id=? AND status='pending'").run(now(), agent.id);
+        await db.prepare("UPDATE report_jobs SET status='failed',error='device changed workspace',completed_at=? WHERE agent_id=? AND status='running'").run(now(), agent.id);
+        await db.prepare('DELETE FROM local_clones WHERE agent_id=?').run(agent.id);
       }
-      await db.prepare('UPDATE agents SET workspace_id=? WHERE id=?').run(workspaceId, req.agent.id);
+      await db.prepare('UPDATE agents SET workspace_id=? WHERE id=?').run(workspaceId, agent.id);
+      return 'updated';
     });
+    if (outcome === 'forbidden') return res.status(403).json({error: 'forbidden'});
     res.json({ok: true, workspaceId});
   });
   app.get('/api/agents/status', agentAuth, async (req: Authed, res) => res.json({id: req.agent.id, userId: req.agent.user_id, workspaceId: req.agent.workspace_id, machineName: req.agent.machine_name, lastSeen: req.agent.last_seen}));
@@ -367,12 +373,19 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
 
   app.post('/api/repositories/register', agentAuth, required(['workspaceId', 'name', 'remoteUrl', 'localKey']), async (req: Authed, res) => {
     const workspaceId = Number(req.body.workspaceId);
-    if (req.agent.workspace_id !== workspaceId) return res.status(403).json({error: 'device belongs to another workspace'});
     const normalized = normalizeRemote(req.body.remoteUrl);
     if (!normalized) return res.status(400).json({error: 'remote URL required'});
-    await db.prepare('INSERT INTO repositories(workspace_id,name,remote_url,normalized_remote,created_at) VALUES(?,?,?,?,?) ON CONFLICT(workspace_id,normalized_remote) DO UPDATE SET name=excluded.name,remote_url=excluded.remote_url').run(workspaceId, req.body.name, req.body.remoteUrl, normalized, now());
-    const repository: any = await db.prepare('SELECT * FROM repositories WHERE workspace_id=? AND normalized_remote=?').get(workspaceId, normalized);
-    await db.prepare('INSERT INTO local_clones(agent_id,repository_id,local_key,branch,last_seen,head_sha,remote_head_sha) VALUES(?,?,?,?,?,?,?) ON CONFLICT(agent_id,local_key) DO UPDATE SET repository_id=excluded.repository_id,branch=excluded.branch,last_seen=excluded.last_seen,head_sha=excluded.head_sha,remote_head_sha=excluded.remote_head_sha').run(req.agent.id, repository.id, req.body.localKey, req.body.branch || null, now(), req.body.headSha || null, req.body.remoteHeadSha || null);
+    const repository: any = await db.transaction(async () => {
+      const workspace = await db.prepare('SELECT id FROM workspaces WHERE id=? FOR UPDATE').get(workspaceId);
+      if (!workspace) return undefined;
+      const agent: any = await db.prepare('SELECT * FROM agents WHERE id=? FOR UPDATE').get(req.agent.id);
+      if (!agent || agent.revoked_at || agent.workspace_id !== workspaceId) return undefined;
+      await db.prepare('INSERT INTO repositories(workspace_id,name,remote_url,normalized_remote,created_at) VALUES(?,?,?,?,?) ON CONFLICT(workspace_id,normalized_remote) DO UPDATE SET name=excluded.name,remote_url=excluded.remote_url').run(workspaceId, req.body.name, req.body.remoteUrl, normalized, now());
+      const registered: any = await db.prepare('SELECT * FROM repositories WHERE workspace_id=? AND normalized_remote=?').get(workspaceId, normalized);
+      await db.prepare('INSERT INTO local_clones(agent_id,repository_id,local_key,branch,last_seen,head_sha,remote_head_sha) VALUES(?,?,?,?,?,?,?) ON CONFLICT(agent_id,local_key) DO UPDATE SET repository_id=excluded.repository_id,branch=excluded.branch,last_seen=excluded.last_seen,head_sha=excluded.head_sha,remote_head_sha=excluded.remote_head_sha').run(agent.id, registered.id, req.body.localKey, req.body.branch || null, now(), req.body.headSha || null, req.body.remoteHeadSha || null);
+      return registered;
+    });
+    if (!repository) return res.status(403).json({error: 'device belongs to another workspace'});
     res.json(repository);
   });
   app.get('/api/workspaces/:id/repositories', userAuth, requireMember, async (req, res) => {
@@ -388,21 +401,8 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
     res.json({ok: true});
   });
 
-  app.post('/api/workspaces/:id/refresh', userAuth, requireMember, async (req: Authed, res) => {
-    const ids = await db.transaction(async () => {
-      const workspace = await db.prepare('SELECT id FROM workspaces WHERE id=? FOR UPDATE').get(req.params.id);
-      if (!workspace || !(await db.prepare('SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=?').get(req.params.id, req.user.id))) return undefined;
-      const agents = await db.prepare('SELECT a.id FROM agents a JOIN workspace_members wm ON wm.workspace_id=a.workspace_id AND wm.user_id=a.user_id WHERE a.workspace_id=? AND a.revoked_at IS NULL ORDER BY a.id FOR UPDATE').all(req.params.id) as {id: number}[];
-      const targets: Array<number | null> = agents.length ? agents.map(agent => agent.id) : [null];
-      const requestIds: number[] = [];
-      for (const agentId of targets) {
-        const result = await db.prepare("INSERT INTO refresh_requests(workspace_id,requested_by,agent_id,status,created_at) VALUES(?,?,?,'queued',?) RETURNING id").run(req.params.id, req.user.id, agentId, now());
-        requestIds.push(Number(result.lastInsertRowid));
-      }
-      return requestIds;
-    });
-    if (!ids) return res.status(403).json({error: 'forbidden'});
-    res.status(201).json({id: ids[0], ids, requestCount: ids.length, status: 'queued'});
+  app.post('/api/workspaces/:id/refresh', userAuth, requireMember, async (_req: Authed, res) => {
+    res.status(410).json({error: 'repository refresh moved to tracemini watch PATH'});
   });
   app.get('/api/workspaces/:id/refresh', userAuth, requireMember, async (req, res) => res.json(await db.prepare('SELECT * FROM refresh_requests WHERE workspace_id=? ORDER BY id DESC LIMIT 20').all(req.params.id)));
   app.get('/api/agents/refresh-requests', agentAuth, async (req: Authed, res) => res.json(req.agent.workspace_id ? await db.prepare("SELECT rr.* FROM refresh_requests rr WHERE rr.workspace_id=? AND (rr.agent_id=? OR rr.agent_id IS NULL) AND rr.status='queued' ORDER BY rr.id LIMIT 1").all(req.agent.workspace_id, req.agent.id) : []));

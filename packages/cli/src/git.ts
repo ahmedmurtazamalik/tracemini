@@ -170,3 +170,18 @@ export function installHooks(repo: string) {
   }
   return hooks;
 }
+
+export function removeHooks(repo: string) {
+  const hooksDir = git(repo, ['rev-parse', '--git-path', 'hooks']);
+  const absolute = path.isAbsolute(hooksDir) ? hooksDir : path.join(repo, hooksDir);
+  const removed: string[] = [];
+  for (const hook of hooks) {
+    const target = path.join(absolute, hook);
+    const original = `${target}.tracemini-original`;
+    if (!fs.existsSync(target) || !fs.readFileSync(target, 'utf8').includes('TraceMini managed hook')) continue;
+    fs.rmSync(target);
+    if (fs.existsSync(original)) fs.renameSync(original, target);
+    removed.push(hook);
+  }
+  return removed;
+}

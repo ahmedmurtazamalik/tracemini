@@ -96,7 +96,7 @@ describe('existing CLI device sync', () => {
 
       const config = JSON.parse(fs.readFileSync(path.join(state, 'config.json'), 'utf8'));
       expect(result.stdout).toContain('installed and started');
-      expect(config).toMatchObject({serverUrl: origin, workspaceId: newWorkspace.id, watchedPaths: ['/work/project'], clones: []});
+      expect(config).toMatchObject({serverUrl: origin, workspaceId: newWorkspace.id, watchedPaths: [], clones: []});
       expect(config.agentToken).not.toBe(oldDevice.token);
       expect(JSON.parse(fs.readFileSync(path.join(state, 'queue.json'), 'utf8'))).toEqual([]);
       const serviceLog = fs.readFileSync(path.join(state, 'systemctl.log'), 'utf8');

@@ -4,15 +4,34 @@ import os from 'node:os';
 import path from 'node:path';
 import {api} from './api.js';
 import {loadConfig, saveConfig, loadQueue, saveQueue, eventKey} from './config.js';
-import {commitData, git, parsePrePush, stagedData} from './git.js';
-import {flush, runAgent, scanWatchedRoots} from './agent.js';
+import {commitData, git, parsePrePush, removeHooks, stagedData} from './git.js';
+import {flush, registerWatchedRoots, runAgent, syncHistory} from './agent.js';
 import {installStartup, restartStartup, stopStartup} from './install.js';
-import {normalizeServerUrl, previousDeviceTokenForServer, rebindDeviceConfig} from './pairing.js';
+import {normalizeServerUrl, previousDeviceTokenForServer} from './pairing.js';
 
 const args = process.argv.slice(2);
 const command = args.shift();
 const flag = (name: string) => { const index = args.indexOf(name); return index >= 0 ? args[index + 1] : undefined; };
 const config = loadConfig();
+
+function bindWorkspace(workspaceId?: number, forceReset = false) {
+  const changed = forceReset || config.workspaceId !== workspaceId;
+  if (changed) {
+    config.watchedPaths = [];
+    config.clones = [];
+  }
+  if (workspaceId) config.workspaceId = workspaceId;
+  else delete config.workspaceId;
+  saveConfig(config, {
+    replaceRepositoryState: changed,
+    beforeRepositoryStateReplace: changed
+      ? current => { for (const clone of current.clones) { try { removeHooks(clone.path); } catch {} } }
+      : undefined,
+  });
+  if (changed) {
+    saveQueue([], config);
+  }
+}
 
 async function exchangeInstallToken() {
   const requestedServer = flag('--server');
@@ -22,11 +41,11 @@ async function exchangeInstallToken() {
   const previousAgentToken = previousDeviceTokenForServer(config, server);
   const exchangeConfig = {...config, serverUrl: server, agentToken: previousAgentToken, userToken: undefined};
   const response = await api<any>(exchangeConfig, '/api/agents/install/exchange', {method: 'POST', body: JSON.stringify({installToken, machineName: flag('--machine') || os.hostname()})});
-  const rebound = rebindDeviceConfig(config, server, response);
-  Object.assign(config, rebound);
+  config.serverUrl = server;
+  config.agentToken = response.agentToken;
+  config.agentId = response.agentId;
   delete config.userToken;
-  saveConfig(rebound, {replaceCollections: true});
-  saveQueue([]);
+  bindWorkspace(response.workspaceId, true);
   return response;
 }
 
@@ -54,7 +73,7 @@ async function main() {
     const agent = await api<any>(config, '/api/agents/register', {method: 'POST', body: JSON.stringify({machineName: flag('--machine') || os.hostname()})}, false);
     config.agentToken = agent.token;
     config.agentId = agent.agentId;
-    saveConfig(config);
+    bindWorkspace(undefined, true);
     console.log(`Device ${agent.agentId} registered`);
     return;
   }
@@ -62,8 +81,7 @@ async function main() {
     if (!args[0]) throw new Error('join requires invite code');
     const workspace = await api<any>(config, '/api/workspaces/join', {method: 'POST', body: JSON.stringify({inviteCode: args[0]})}, false);
     await api(config, '/api/agents/workspace', {method: 'POST', body: JSON.stringify({workspaceId: String(workspace.id)})});
-    config.workspaceId = workspace.id;
-    saveConfig(config);
+    bindWorkspace(workspace.id);
     console.log(`Joined ${workspace.name} (${workspace.id})`);
     return;
   }
@@ -71,17 +89,25 @@ async function main() {
     const workspaceId = Number(args[0]);
     if (!workspaceId) throw new Error('use-workspace requires a workspace id');
     await api(config, '/api/agents/workspace', {method: 'POST', body: JSON.stringify({workspaceId: String(workspaceId)})});
-    config.workspaceId = workspaceId;
-    saveConfig(config);
+    bindWorkspace(workspaceId);
     console.log(`Workspace ${config.workspaceId} selected`);
     return;
   }
   if (command === 'watch') {
     if (!config.workspaceId) throw new Error('install or select a workspace first');
-    const root = path.resolve(args[0] || '');
+    if (!args[0]) throw new Error('watch requires a repository root path');
+    const root = path.resolve(args[0]);
     if (!config.watchedPaths.includes(root)) config.watchedPaths.push(root);
-    const found = await scanWatchedRoots(config);
-    console.log(`Scanned watched roots; ${found} repository clone(s) registered`);
+    const found = await registerWatchedRoots(config);
+    console.log(`Registered ${found} repository clone(s). Run tracemini sync-history to import existing commits.`);
+    return;
+  }
+  if (command === 'sync-history') {
+    if (!config.workspaceId) throw new Error('install or select a workspace first');
+    const days = Number(flag('--days') || 90);
+    if (!Number.isFinite(days) || days < 1) throw new Error('sync-history --days must be a positive number');
+    const result = await syncHistory(config, days);
+    console.log(`History synchronized: ${result.commits} commit(s) across ${result.repositories} repository clone(s)`);
     return;
   }
   if (command === 'repositories') { console.table(config.clones); return; }
@@ -112,12 +138,12 @@ async function main() {
     const occurredAt = new Date().toISOString();
     const queue = loadQueue();
     queue.push({eventKey: eventKey([type, clone.repositoryId, data.commitSha || '', data.oldCommit || '', data.newCommit || '', occurredAt.slice(0, 16), data]), repositoryId: clone.repositoryId, type, occurredAt, data, attempts: 0, nextAttempt: 0});
-    saveQueue(queue);
+    saveQueue(queue, config);
     await flush(config);
     return;
   }
   if (command === 'start' || command === 'once') { await runAgent(config, command === 'once'); return; }
-  console.log('Usage: tracemini sync --server URL --install-token TOKEN | watch PATH | repositories | status | event --repo PATH --type TYPE | start | once');
+  console.log('Usage: tracemini sync --server URL --install-token TOKEN | watch PATH | sync-history [--days 90] | repositories | status | event --repo PATH --type TYPE | start | once');
 }
 
 main().catch(error => {

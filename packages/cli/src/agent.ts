@@ -1,8 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {api} from './api.js';
-import {type Config, loadConfig, loadQueue, saveConfig, saveQueue, eventKey} from './config.js';
-import {commitHistory, commitHistoryAfterHeads, confirmPush, discover, git, historyHeads, inspectRepo, installHooks, observeRepositoryState, readRepositoryState, stagedData} from './git.js';
+import {type Config, loadConfig, loadQueue, mutateCurrentBinding, saveConfig, saveQueue, eventKey} from './config.js';
+import {commitHistory, commitHistoryAfterHeads, confirmPush, discover, git, historyHeads, inspectRepo, installHooks, removeHooks, observeRepositoryState, readRepositoryState, stagedData} from './git.js';
 import {CodexRunner, HermesRunner} from './runner.js';
 
 export async function flush(config: Config) {
@@ -13,54 +13,72 @@ export async function flush(config: Config) {
     try { await api(config, '/api/activity', {method: 'POST', body: JSON.stringify(event)}); }
     catch { event.attempts++; event.nextAttempt = Date.now() + Math.min(60_000, 1000 * 2 ** event.attempts); remaining.push(event); }
   }
-  saveQueue(remaining);
+  saveQueue(remaining, config);
   return {sent: queue.length - remaining.length, pending: remaining.length};
 }
 
-export async function scanWatchedRoots(config: Config) {
+export async function registerWatchedRoots(config: Config) {
   if (!config.workspaceId) throw new Error('device has no selected workspace');
-  let found = 0;
-  for (const root of config.watchedPaths) {
-    for (const repoPath of discover(root)) {
-      let info;
-      try { info = inspectRepo(repoPath); } catch { continue; }
-      const scanStartedAt = new Date().toISOString();
-      const repository = await api<any>(config, '/api/repositories/register', {method: 'POST', body: JSON.stringify({workspaceId: String(config.workspaceId), name: info.name, remoteUrl: info.remoteUrl, localKey: info.path, branch: info.branch, headSha: info.headSha, remoteHeadSha: info.remoteHeadSha})});
-      const existing = config.clones.find(clone => clone.path === info.path && clone.repositoryId === repository.id);
-      const currentHistoryHeads = historyHeads(info.path);
-      const incrementalHistory = existing?.historyHeads?.length ? commitHistoryAfterHeads(info.path, existing.historyHeads) : undefined;
-      const history = incrementalHistory ?? commitHistory(info.path, new Date(Date.parse(scanStartedAt) - 90 * 24 * 60 * 60_000).toISOString(), scanStartedAt);
-      for (const data of history) {
-        await api(config, '/api/activity', {method: 'POST', body: JSON.stringify({
-          eventKey: eventKey(['commit-history', repository.id, data.commitSha]),
-          repositoryId: repository.id,
+  const repoPaths = [...new Set(config.watchedPaths.flatMap(root => discover(root)))];
+  const discovered = repoPaths.flatMap(repoPath => {
+    try { return [inspectRepo(repoPath)]; } catch { return []; }
+  });
+  const registered = await Promise.all(discovered.map(async info => ({
+    info,
+    repository: await api<any>(config, '/api/repositories/register', {method: 'POST', body: JSON.stringify({workspaceId: String(config.workspaceId), name: info.name, remoteUrl: info.remoteUrl, localKey: info.path, branch: info.branch, headSha: info.headSha, remoteHeadSha: info.remoteHeadSha})}),
+  })));
+  let applied = 0;
+  for (const {info, repository} of registered) {
+    let committed = false;
+    try {
+      committed = mutateCurrentBinding(config, current => {
+        const existing = current.clones.find(clone => clone.path === info.path && clone.repositoryId === repository.id);
+        installHooks(info.path);
+        current.watchedPaths = [...new Set([...current.watchedPaths, ...config.watchedPaths])];
+        current.clones = current.clones.filter(clone => clone.path !== info.path);
+        current.clones.push({path: info.path, repositoryId: repository.id, normalizedRemote: repository.normalized_remote, name: repository.name, branch: info.branch, headSha: info.headSha, remoteHeadSha: info.remoteHeadSha, historyHeads: existing?.historyHeads});
+      });
+    } catch (error) {
+      try { removeHooks(info.path); } catch {}
+      throw error;
+    }
+    if (!committed) break;
+    applied += 1;
+  }
+  return applied;
+}
+
+export async function syncHistory(config: Config, days = 90) {
+  let commits = 0;
+  let repositories = 0;
+  for (const clone of config.clones) {
+    const scanStartedAt = new Date().toISOString();
+    const currentHistoryHeads = historyHeads(clone.path);
+    const incrementalHistory = clone.historyHeads?.length
+      ? commitHistoryAfterHeads(clone.path, clone.historyHeads)
+      : undefined;
+    const history = incrementalHistory ?? commitHistory(
+      clone.path,
+      new Date(Date.parse(scanStartedAt) - days * 24 * 60 * 60_000).toISOString(),
+      scanStartedAt,
+    );
+    for (let offset = 0; offset < history.length; offset += 8) {
+      await Promise.all(history.slice(offset, offset + 8).map(data =>
+        api(config, '/api/activity', {method: 'POST', body: JSON.stringify({
+          eventKey: eventKey(['commit-history', clone.repositoryId, data.commitSha]),
+          repositoryId: clone.repositoryId,
           type: 'commit',
           occurredAt: data.commitTimestamp,
           data: {...data, importedFromHistory: true},
-        })});
-      }
-      config.clones = config.clones.filter(clone => clone.path !== info.path);
-      config.clones.push({path: info.path, repositoryId: repository.id, normalizedRemote: repository.normalized_remote, name: repository.name, branch: info.branch, headSha: info.headSha, remoteHeadSha: info.remoteHeadSha, historyHeads: currentHistoryHeads});
-      installHooks(info.path);
-      found++;
+        })}),
+      ));
     }
+    clone.historyHeads = currentHistoryHeads;
+    commits += history.length;
+    repositories++;
   }
   saveConfig(config, {preserveCurrentScalars: true});
-  return found;
-}
-
-async function processRefresh(config: Config) {
-  const requests = await api<any[]>(config, '/api/agents/refresh-requests');
-  const request = requests[0];
-  if (!request) return;
-  await api(config, `/api/agents/refresh-requests/${request.id}/claim`, {method: 'POST'});
-  try {
-    config.workspaceId = request.workspace_id;
-    const repositoriesFound = await scanWatchedRoots(config);
-    await api(config, `/api/agents/refresh-requests/${request.id}/complete`, {method: 'POST', body: JSON.stringify({repositoriesFound})});
-  } catch (error: any) {
-    await api(config, `/api/agents/refresh-requests/${request.id}/complete`, {method: 'POST', body: JSON.stringify({error: String(error.message || error).slice(0, 2000)})});
-  }
+  return {repositories, commits};
 }
 
 async function processPushes(config: Config) {
@@ -171,9 +189,10 @@ export async function processJob(config: Config, job: any) {
 }
 
 export async function tick(config: Config, indexState: Map<string, {mtime: number; timer?: NodeJS.Timeout}>) {
-  await flush(config);
   await api(config, '/api/agents/heartbeat', {method: 'POST'});
-  await processRefresh(config);
+  const jobs = await api<any[]>(config, '/api/agents/jobs');
+  if (jobs[0]) await processJob(config, jobs[0]);
+  await flush(config);
   await processPushes(config);
   for (const clone of config.clones) {
     try {
@@ -183,7 +202,7 @@ export async function tick(config: Config, indexState: Map<string, {mtime: numbe
         if (observation.event) {
           const queue = loadQueue();
           queue.push({eventKey: eventKey(['pull', clone.repositoryId, current.headSha]), repositoryId: clone.repositoryId, type: 'pull', occurredAt: new Date().toISOString(), data: current, attempts: 0, nextAttempt: 0});
-          saveQueue(queue);
+          saveQueue(queue, config);
         }
       }
       Object.assign(clone, current);
@@ -199,15 +218,13 @@ export async function tick(config: Config, indexState: Map<string, {mtime: numbe
           if (!data.filesChanged) return;
           const queue = loadQueue();
           queue.push({eventKey: eventKey(['stage', clone.repositoryId, mtime, data]), repositoryId: clone.repositoryId, type: 'stage', occurredAt: new Date().toISOString(), data, attempts: 0, nextAttempt: 0});
-          saveQueue(queue);
+          saveQueue(queue, config);
         }, 1200);
       }
       indexState.set(clone.path, state);
     } catch {}
   }
   saveConfig(config, {preserveCurrentScalars: true});
-  const jobs = await api<any[]>(config, '/api/agents/jobs');
-  if (jobs[0]) await processJob(config, jobs[0]);
 }
 
 export function startHeartbeatLoop(

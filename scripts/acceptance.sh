@@ -68,8 +68,11 @@ HOME="$TMP/home-a" PATH="$TMP/bin:$PATH" "$TMP/home-a/.local/bin/tracemini" stat
 AGENT_B=$(api -X POST "$BASE/api/agents/install/exchange" -d "{\"installToken\":\"$ITOKEN_B\",\"machineName\":\"bob-box\"}")
 node -e "require('fs').writeFileSync(process.argv[1],JSON.stringify({serverUrl:process.argv[2],agentToken:JSON.parse(process.argv[3]).agentToken,agentId:JSON.parse(process.argv[3]).agentId,workspaceId:Number(process.argv[4]),watchedPaths:[],clones:[],reporter:'codex',pollMs:2000}))" "$TMP/home-b/config.json" "$BASE" "$AGENT_B" "$WID"
 test "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/agents/install/exchange" -H 'content-type: application/json' -d "{\"installToken\":\"$ITOKEN_A\",\"machineName\":\"replay\"}")" = 409
+if TRACEMINI_HOME="$TMP/home-a/.tracemini" "${CLI[@]}" watch >/dev/null 2>&1; then echo 'watch unexpectedly accepted a missing path' >&2; exit 1; fi
 TRACEMINI_HOME="$TMP/home-a/.tracemini" "${CLI[@]}" watch "$TMP/repos/a-root" >/dev/null
 TRACEMINI_HOME="$TMP/home-b" "${CLI[@]}" watch "$TMP/repos/b-root" >/dev/null
+TRACEMINI_HOME="$TMP/home-a/.tracemini" "${CLI[@]}" sync-history --days 90 >/dev/null
+TRACEMINI_HOME="$TMP/home-b" "${CLI[@]}" sync-history --days 90 >/dev/null
 
 printf 'acceptance\n' >"$TMP/repos/a-root/clone-a/work.txt"
 git -C "$TMP/repos/a-root/clone-a" add work.txt
@@ -80,21 +83,15 @@ TRACEMINI_HOME="$TMP/home-a/.tracemini" TRACEMINI_PUSH_CONFIRM_DELAY_MS=0 "${CLI
 git clone "$TMP/remote.git" "$TMP/repos/a-root/discovered-later" >/dev/null 2>&1
 git -C "$TMP/repos/a-root/discovered-later" config user.name discovered
 git -C "$TMP/repos/a-root/discovered-later" config user.email discovered@example.test
-REFRESH=$(api -X POST "$BASE/api/workspaces/$WID/refresh" -H "authorization: Bearer $AT")
-RID=$(printf '%s' "$REFRESH" | json id)
-TRACEMINI_HOME="$TMP/home-a/.tracemini" "${CLI[@]}" once >/dev/null
-TRACEMINI_HOME="$TMP/home-b" "${CLI[@]}" once >/dev/null
-REFRESHES=$(api "$BASE/api/workspaces/$WID/refresh" -H "authorization: Bearer $AT")
+TRACEMINI_HOME="$TMP/home-a/.tracemini" "${CLI[@]}" watch "$TMP/repos/a-root" >/dev/null
 REPOSITORIES=$(api "$BASE/api/workspaces/$WID/repositories?includeArchived=true" -H "authorization: Bearer $AT")
-[[ "$REFRESHES" == *'"status":"completed"'* ]]
-[[ "$REFRESHES" != *'"status":"queued"'* ]]
 [[ "$REPOSITORIES" == *'"clone_count":3'* ]]
 
 ACTIVITY=$(api "$BASE/api/workspaces/$WID/activity" -H "authorization: Bearer $AT")
 [[ "$ACTIVITY" == *'Acceptance commit'* ]]
 [[ "$ACTIVITY" == *'"confirmation":"confirmed"'* ]]
 STATS=$(api "$BASE/api/workspaces/$WID/stats" -H "authorization: Bearer $AT")
-[[ "$STATS" == *'"commits":1'* ]]
+printf '%s' "$STATS" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{if(!(Number(JSON.parse(s).totals.commits)>0))process.exit(1)})"
 REPO_ID=$(api "$BASE/api/workspaces/$WID/repositories" -H "authorization: Bearer $AT" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s)[0].id))")
 REPO_ACTIVITY=$(api "$BASE/api/repositories/$REPO_ID/activity?workspaceId=$WID" -H "authorization: Bearer $AT")
 USER_ACTIVITY=$(api "$BASE/api/users/$(printf '%s' "$A" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).user.id))")/activity?workspaceId=$WID" -H "authorization: Bearer $AT")
@@ -113,4 +110,4 @@ REPORT_ID=$(api "$BASE/api/workspaces/$WID/reports" -H "authorization: Bearer $B
 REPORT=$(api "$BASE/api/reports/$REPORT_ID" -H "authorization: Bearer $BT")
 [[ "$REPORT" == *'Acceptance report'* ]]
 
-echo "TraceMini acceptance passed: install exchange, Manager authorization, refresh discovery $RID, real hooks/push confirmation, stats, and Markdown report retrieval."
+echo "TraceMini acceptance passed: install exchange, Manager authorization, explicit watch/history sync, real hooks/push confirmation, stats, and Markdown report retrieval."
