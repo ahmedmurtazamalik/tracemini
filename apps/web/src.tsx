@@ -17,6 +17,7 @@ import {
   workspacePath,
 } from "./routes.js";
 import { downloadReport } from "./report-download.js";
+import { checkCliConnection } from "./device-connection.js";
 import "./style.css";
 
 const request = async (path: string, init: RequestInit = {}) => {
@@ -227,14 +228,36 @@ async function copyText(value: string) {
   if (!copied) throw new Error("Copy failed. Select and copy the command manually.");
 }
 
-function Install({ workspaceId, agents, userId }: { workspaceId: number; agents: any[]; userId: number }) {
+function Install({ workspaceId, agents, userId, onAgentsChecked }: { workspaceId: number; agents: any[]; userId: number; onAgentsChecked: (agents: any[]) => void }) {
   const [installation, setInstallation] = useState<any>();
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
+  const [checkPending, setCheckPending] = useState(false);
+  const [checkMessage, setCheckMessage] = useState("");
   const [copied, setCopied] = useState("");
   const [copyPending, setCopyPending] = useState("");
   const personalDevices = agents.filter((agent) => agent.user_id === userId && !agent.revoked_at);
   const onlineDevices = personalDevices.filter((agent) => agent.status === "online");
+  const checkConnection = async () => {
+    setError("");
+    setCheckMessage("");
+    setCheckPending(true);
+    try {
+      const result = await checkCliConnection(workspaceId, userId, request);
+      onAgentsChecked(result.agents);
+      setCheckMessage(
+        result.state === "connected"
+          ? `${result.machineNames.join(", ")} ${result.machineNames.length === 1 ? "is" : "are"} connected.`
+          : result.state === "offline"
+            ? `CLI found on ${result.machineNames.join(", ")}, but it is offline.`
+            : "No CLI device was found for your account in this workspace.",
+      );
+    } catch (caught: any) {
+      setError(caught.message || "Could not check the CLI connection.");
+    } finally {
+      setCheckPending(false);
+    }
+  };
   const mint = async () => {
     setError("");
     setPending(true);
@@ -294,6 +317,10 @@ function Install({ workspaceId, agents, userId }: { workspaceId: number; agents:
               ? `TraceMini was installed on ${personalDevices.map((device) => device.machine_name).join(", ")}, but no heartbeat was received in the last minute.`
               : "No TraceMini device has connected for your account in this workspace yet."}
         </p>
+        <button className="button secondary" onClick={checkConnection} disabled={checkPending}>
+          {checkPending ? "Checking…" : "Check CLI connection"}
+        </button>
+        {checkMessage && <p className="muted" role="status">{checkMessage}</p>}
       </section>
       <section className="card install-card">
         <div className="step-number">01</div>
@@ -1506,7 +1533,7 @@ function App() {
           {view === "workspace-required" || !workspaceId ? (
             <WorkspaceRequired openDialog={setDialog} />
           ) : view === "install" ? (
-            <Install workspaceId={workspaceId} agents={agents} userId={user?.id} />
+            <Install workspaceId={workspaceId} agents={agents} userId={user?.id} onAgentsChecked={setAgents} />
           ) : view === "settings" ? (
             <Settings
               workspace={workspace}
