@@ -34,9 +34,17 @@ describe('CLI device re-pairing', () => {
     expect(rebound).not.toHaveProperty('userToken');
   });
 
-  it('clears watched roots and clones when the workspace binding changes', () => {
-    expect(rebindWorkspaceConfig(existing(), 8)).toMatchObject({workspaceId: 8, watchedPaths: [], clones: [], agentToken: 'old-device'});
+  it('preserves watched roots and clones when only the preferred workspace changes', () => {
+    expect(rebindWorkspaceConfig(existing(), 8)).toMatchObject({workspaceId: 8, watchedPaths: ['/home/ali', '/work/project'], clones: [{path: '/work/project'}], agentToken: 'old-device'});
     expect(rebindWorkspaceConfig(existing(), 3)).toMatchObject({workspaceId: 3, watchedPaths: ['/home/ali', '/work/project']});
+  });
+
+  it('preserves repository state when the same account device rotates its token', () => {
+    const rebound = rebindDeviceConfig(existing(), 'https://old.example.test', {
+      agentToken: 'rotated-device', agentId: 9, workspaceId: 8,
+    });
+
+    expect(rebound).toMatchObject({workspaceId: 8, watchedPaths: ['/home/ali', '/work/project'], clones: [{path: '/work/project'}], agentToken: 'rotated-device'});
   });
 
   it('restarts the existing Linux user service after credentials change', () => {

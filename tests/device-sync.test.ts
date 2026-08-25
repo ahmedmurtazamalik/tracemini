@@ -107,6 +107,21 @@ describe('existing CLI device sync', () => {
       const status = (await request(origin).get('/api/agents/status').set(authorization(config.agentToken)).expect(200)).body;
       expect(status).toMatchObject({workspaceId: newWorkspace.id});
       expect(status.machineName).toBeTruthy();
+
+      const preserved = {...config, watchedPaths: ['/work/project'], watchedRoots: [{path: '/work/project', workspaceId: newWorkspace.id}], clones: [{path: '/work/project', workspaceId: newWorkspace.id, repositoryId: 99, normalizedRemote: 'new/repo', name: 'repo'}]};
+      fs.writeFileSync(path.join(state, 'config.json'), JSON.stringify(preserved));
+      fs.writeFileSync(path.join(state, 'queue.json'), JSON.stringify([{eventKey: 'preserved-event', workspaceId: newWorkspace.id}]));
+      const repeated = (await request(origin).post('/api/agents/installations').set(authorization(newAccount.token)).send({workspaceId: newWorkspace.id}).expect(201)).body;
+      await execFileAsync('/bin/sh', ['-c', repeated.syncCommand], {
+        cwd: path.resolve('.'),
+        env: {...process.env, HOME: temporary, TRACEMINI_HOME: state, PATH: `${fakeBin}:${process.env.PATH}`},
+      });
+      const synchronized = JSON.parse(fs.readFileSync(path.join(state, 'config.json'), 'utf8'));
+      expect(synchronized).toMatchObject({agentId: config.agentId, watchedPaths: ['/work/project'], watchedRoots: [{path: '/work/project', workspaceId: newWorkspace.id}], clones: [expect.objectContaining({workspaceId: newWorkspace.id, repositoryId: 99})]});
+      expect(synchronized.agentToken).not.toBe(config.agentToken);
+      expect(JSON.parse(fs.readFileSync(path.join(state, 'queue.json'), 'utf8'))).toEqual([{eventKey: 'preserved-event', workspaceId: newWorkspace.id}]);
+      await request(origin).get('/api/agents/status').set(authorization(config.agentToken)).expect(401);
+      await request(origin).get('/api/agents/status').set(authorization(synchronized.agentToken)).expect(200);
     } finally {
       server.close();
       fs.rmSync(temporary, {recursive: true, force: true});

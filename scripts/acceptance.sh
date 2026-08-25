@@ -71,6 +71,16 @@ test "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/agents/install
 if TRACEMINI_HOME="$TMP/home-a/.tracemini" "${CLI[@]}" watch >/dev/null 2>&1; then echo 'watch unexpectedly accepted a missing path' >&2; exit 1; fi
 TRACEMINI_HOME="$TMP/home-a/.tracemini" "${CLI[@]}" watch "$TMP/repos/a-root" >/dev/null
 TRACEMINI_HOME="$TMP/home-b" "${CLI[@]}" watch "$TMP/repos/b-root" >/dev/null
+select_candidates() {
+  local bearer=$1 home=$2 workspace_id=${3:-$WID} candidate_id
+  while IFS= read -r candidate_id; do
+    [ -n "$candidate_id" ] || continue
+    api -X PATCH "$BASE/api/workspaces/$workspace_id/repository-candidates/$candidate_id" -H "authorization: Bearer $bearer" -d '{"traced":true}' >/dev/null
+  done < <(api "$BASE/api/workspaces/$workspace_id/repository-candidates" -H "authorization: Bearer $bearer" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>JSON.parse(s).forEach(row=>console.log(row.id)))")
+  TRACEMINI_HOME="$home" "${CLI[@]}" once >/dev/null
+}
+select_candidates "$AT" "$TMP/home-a/.tracemini"
+select_candidates "$BT" "$TMP/home-b"
 TRACEMINI_HOME="$TMP/home-a/.tracemini" "${CLI[@]}" sync-history --days 90 >/dev/null
 TRACEMINI_HOME="$TMP/home-b" "${CLI[@]}" sync-history --days 90 >/dev/null
 
@@ -84,6 +94,7 @@ git clone "$TMP/remote.git" "$TMP/repos/a-root/discovered-later" >/dev/null 2>&1
 git -C "$TMP/repos/a-root/discovered-later" config user.name discovered
 git -C "$TMP/repos/a-root/discovered-later" config user.email discovered@example.test
 TRACEMINI_HOME="$TMP/home-a/.tracemini" "${CLI[@]}" watch "$TMP/repos/a-root" >/dev/null
+select_candidates "$AT" "$TMP/home-a/.tracemini"
 REPOSITORIES=$(api "$BASE/api/workspaces/$WID/repositories?includeArchived=true" -H "authorization: Bearer $AT")
 [[ "$REPOSITORIES" == *'"clone_count":3'* ]]
 
@@ -110,4 +121,25 @@ REPORT_ID=$(api "$BASE/api/workspaces/$WID/reports" -H "authorization: Bearer $B
 REPORT=$(api "$BASE/api/reports/$REPORT_ID" -H "authorization: Bearer $BT")
 [[ "$REPORT" == *'Acceptance report'* ]]
 
-echo "TraceMini acceptance passed: install exchange, Manager authorization, explicit watch/history sync, real hooks/push confirmation, stats, and Markdown report retrieval."
+SECOND=$(api -X POST "$BASE/api/workspaces" -H "authorization: Bearer $AT" -d '{"name":"Acceptance second"}')
+SECOND_ID=$(printf '%s' "$SECOND" | json id)
+mkdir -p "$TMP/repos/second-root"
+git clone "$TMP/remote.git" "$TMP/repos/second-root/clone-second" >/dev/null 2>&1
+git -C "$TMP/repos/second-root/clone-second" config user.name second
+git -C "$TMP/repos/second-root/clone-second" config user.email second@example.test
+TOKEN_BEFORE_SWITCH=$(node -e "console.log(require(process.argv[1]).agentToken)" "$TMP/home-a/.tracemini/config.json")
+TRACEMINI_HOME="$TMP/home-a/.tracemini" "${CLI[@]}" use-workspace "$SECOND_ID" >/dev/null
+TRACEMINI_HOME="$TMP/home-a/.tracemini" "${CLI[@]}" watch "$TMP/repos/second-root" >/dev/null
+select_candidates "$AT" "$TMP/home-a/.tracemini" "$SECOND_ID"
+TOKEN_AFTER_SWITCH=$(node -e "console.log(require(process.argv[1]).agentToken)" "$TMP/home-a/.tracemini/config.json")
+test "$TOKEN_BEFORE_SWITCH" = "$TOKEN_AFTER_SWITCH"
+SECOND_REPOSITORIES=$(api "$BASE/api/workspaces/$SECOND_ID/repositories?includeArchived=true" -H "authorization: Bearer $AT")
+[[ "$SECOND_REPOSITORIES" == *'"clone_count":1'* ]]
+
+api -X DELETE "$BASE/api/workspaces/$WID/members/$(printf '%s' "$A" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).user.id))")" -H "authorization: Bearer $BT" >/dev/null
+TRACEMINI_HOME="$TMP/home-a/.tracemini" "${CLI[@]}" once >/dev/null
+node -e "const c=require(process.argv[1]);if(c.workspaceId!==Number(process.argv[2])||c.clones.length!==1||c.clones[0].workspaceId!==Number(process.argv[2])||c.watchedRoots.some(r=>r.workspaceId!==Number(process.argv[2])))process.exit(1)" "$TMP/home-a/.tracemini/config.json" "$SECOND_ID"
+STATUS=$(api "$BASE/api/agents/status" -H "authorization: Bearer $TOKEN_AFTER_SWITCH")
+printf '%s' "$STATUS" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const x=JSON.parse(s),lost=Number(process.argv[1]),kept=Number(process.argv[2]);if(x.workspaceIds.includes(lost)||!x.workspaceIds.includes(kept))process.exit(1)})" "$WID" "$SECOND_ID"
+
+echo "TraceMini acceptance passed: one account device across two workspaces, targeted membership-loss cleanup, explicit repository selection/history sync, real hooks/push confirmation, stats, and Markdown report retrieval."

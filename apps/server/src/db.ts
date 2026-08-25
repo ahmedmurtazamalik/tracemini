@@ -146,6 +146,38 @@ ALTER TABLE repository_candidates ADD COLUMN IF NOT EXISTS repository_fingerprin
 CREATE INDEX IF NOT EXISTS repository_candidates_workspace_owner_idx ON repository_candidates(workspace_id,agent_id);
 `;
 
+export const accountDeviceMigrationSql = `
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS installation_id TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS agents_installation_uidx ON agents(user_id,installation_id);
+ALTER TABLE agents DROP CONSTRAINT IF EXISTS agents_workspace_id_fkey;
+ALTER TABLE agents ADD CONSTRAINT agents_workspace_id_fkey FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE SET NULL;
+UPDATE repository_candidates rc
+SET workspace_id=a.workspace_id
+FROM agents a
+JOIN workspace_members wm ON wm.user_id=a.user_id AND wm.workspace_id=a.workspace_id
+WHERE rc.agent_id=a.id AND rc.workspace_id IS NULL;
+DELETE FROM repository_candidates WHERE workspace_id IS NULL;
+ALTER TABLE repository_candidates ALTER COLUMN workspace_id SET NOT NULL;
+ALTER TABLE repository_candidates DROP CONSTRAINT IF EXISTS repository_candidates_agent_id_local_key_key;
+ALTER TABLE repository_candidates ADD CONSTRAINT repository_candidates_agent_workspace_local_key_key UNIQUE(agent_id,workspace_id,local_key);
+ALTER TABLE local_clones DROP CONSTRAINT IF EXISTS local_clones_agent_id_local_key_key;
+ALTER TABLE local_clones ADD CONSTRAINT local_clones_agent_repository_local_key_key UNIQUE(agent_id,repository_id,local_key);
+`;
+
+// pg-mem cannot reliably drop an existing unique constraint. Fresh test databases
+// start with the current constraints; hosted PostgreSQL follows the legacy schema
+// plus migration 16 above so existing migration checksums remain stable.
+const freshSchemaSql = schemaSql
+  .replace('workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE', 'workspace_id INTEGER REFERENCES workspaces(id) ON DELETE SET NULL')
+  .replace('UNIQUE(agent_id,local_key));\nCREATE INDEX IF NOT EXISTS idx_local_clones_repository', 'UNIQUE(agent_id,repository_id,local_key));\nCREATE INDEX IF NOT EXISTS idx_local_clones_repository');
+const freshRepositorySelectionMigrationSql = repositorySelectionMigrationSql
+  .replace('agent_id BIGINT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,\n  local_key', 'agent_id BIGINT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,\n  workspace_id BIGINT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,\n  local_key')
+  .replace('UNIQUE(agent_id,local_key)', 'UNIQUE(agent_id,workspace_id,local_key)');
+const freshAccountDeviceMigrationSql = `
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS installation_id TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS agents_installation_uidx ON agents(user_id,installation_id);
+`;
+
 export function normalizePostgresConnectionString(connectionString: string) {
   const url = new URL(connectionString);
   const isSupabasePooler = url.hostname === 'pooler.supabase.com' || url.hostname.endsWith('.pooler.supabase.com');
@@ -248,7 +280,7 @@ export class DB {
       )`);
       const applied = new Map((await this.query('SELECT version,checksum FROM schema_migrations')).rows.map((row: any) => [row.version, row.checksum]));
       const migrations = [
-        {version: 1, name: 'initial PostgreSQL schema', sql: schemaSql},
+        {version: 1, name: 'initial PostgreSQL schema', sql: compatibilityMigrations ? schemaSql : freshSchemaSql},
         ...(compatibilityMigrations ? [{version: 2, name: 'PostgreSQL native temporal and JSON types', sql: nativeTypesMigrationSql}] : []),
         {version: 3, name: 'password recovery tokens', sql: passwordResetMigrationSql},
         {version: 4, name: 'workspace invite refresh cooldown', sql: inviteRefreshMigrationSql},
@@ -257,9 +289,10 @@ export class DB {
         {version: 9, name: 'prompted report regeneration', sql: reportRegenerationMigrationSql},
         {version: 11, name: 'report naming', sql: reportNamingMigrationSql},
         {version: 12, name: 'hide removed revoked devices', sql: removedDevicesMigrationSql},
-        {version: 13, name: 'repository selection', sql: repositorySelectionMigrationSql},
+        {version: 13, name: 'repository selection', sql: compatibilityMigrations ? repositorySelectionMigrationSql : freshRepositorySelectionMigrationSql},
         {version: 14, name: 'enforce repository selection at ingestion', sql: repositorySelectionEnforcementMigrationSql},
         {version: 15, name: 'repository selection lifecycle fencing', sql: repositorySelectionLifecycleMigrationSql},
+        {version: 16, name: 'account-level device installation identity', sql: compatibilityMigrations ? accountDeviceMigrationSql : freshAccountDeviceMigrationSql},
       ];
       for (const migration of migrations) {
         const checksum = crypto.createHash('sha256').update(migration.sql).digest('hex');

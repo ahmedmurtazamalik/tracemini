@@ -35,7 +35,6 @@ describe('agent service work ordering', () => {
     await tick(config, new Map());
 
     expect(paths).toEqual([
-      '/api/agents/heartbeat',
       '/api/agents/jobs',
       '/api/agents/repository-selections',
       '/api/agents/pushes',

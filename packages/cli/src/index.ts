@@ -7,7 +7,7 @@ import {enqueue, loadConfig, saveConfig, loadQueue, saveQueue, eventKey} from '.
 import {commitData, git, parsePrePush, removeHooks, repositoryFingerprint, stagedData} from './git.js';
 import {flush, runAgent, scanWatchedRoots} from './agent.js';
 import {installStartup, restartStartup, stopStartup} from './install.js';
-import {normalizeServerUrl, previousDeviceTokenForServer, rebindDeviceConfig, rebindWorkspaceConfig} from './pairing.js';
+import {installationId, normalizeServerUrl, previousDeviceTokenForServer, rebindDeviceConfig, rebindWorkspaceConfig} from './pairing.js';
 
 const args = process.argv.slice(2);
 const command = args.shift();
@@ -15,15 +15,8 @@ const flag = (name: string) => { const index = args.indexOf(name); return index 
 const config = loadConfig();
 
 function bindWorkspace(workspaceId?: number, forceReset = false) {
-  const changed = forceReset || config.workspaceId !== workspaceId;
   Object.assign(config, rebindWorkspaceConfig(config, workspaceId, forceReset));
-  saveConfig(config, {
-    replaceRepositoryState: changed,
-    beforeRepositoryStateReplace: changed
-      ? current => { for (const clone of current.clones) { try { removeHooks(clone.path); } catch {} } }
-      : undefined,
-  });
-  if (changed) saveQueue([], config);
+  saveConfig(config);
 }
 
 async function exchangeInstallToken() {
@@ -33,15 +26,19 @@ async function exchangeInstallToken() {
   const server = normalizeServerUrl(requestedServer);
   const previousAgentToken = previousDeviceTokenForServer(config, server);
   const exchangeConfig = {...config, serverUrl: server, agentToken: previousAgentToken, userToken: undefined};
-  const response = await api<any>(exchangeConfig, '/api/agents/install/exchange', {method: 'POST', body: JSON.stringify({installToken, machineName: flag('--machine') || os.hostname()})});
+  const response = await api<any>(exchangeConfig, '/api/agents/install/exchange', {method: 'POST', body: JSON.stringify({installToken, machineName: flag('--machine') || os.hostname(), installationId: installationId(server)})});
+  const sameDevice = config.agentId === Number(response.agentId) && normalizeServerUrl(config.serverUrl) === server;
   const rebound = rebindDeviceConfig(config, server, response);
   Object.assign(config, rebound);
   delete config.userToken;
-  saveConfig(rebound, {
-    replaceCollections: true,
-    beforeRepositoryStateReplace: current => { for (const clone of current.clones) { try { removeHooks(clone.path); } catch {} } },
-  });
-  saveQueue([], rebound);
+  if (sameDevice) saveConfig(rebound);
+  else {
+    saveConfig(rebound, {
+      replaceCollections: true,
+      beforeRepositoryStateReplace: current => { for (const clone of current.clones) { try { removeHooks(clone.path); } catch {} } },
+    });
+    saveQueue([], rebound);
+  }
   return response;
 }
 
@@ -61,15 +58,31 @@ async function main() {
     return;
   }
   if (command === 'login') {
+    const previousServer = config.serverUrl;
     const server = flag('--server');
     if (server) config.serverUrl = server;
     const bearer = flag('--token');
     if (!bearer) throw new Error('login requires --token; browser onboarding should use the generated install command instead');
     config.userToken = bearer;
-    const agent = await api<any>(config, '/api/agents/register', {method: 'POST', body: JSON.stringify({machineName: flag('--machine') || os.hostname()})}, false);
+    const agent = await api<any>(config, '/api/agents/register', {method: 'POST', body: JSON.stringify({machineName: flag('--machine') || os.hostname(), installationId: installationId(config.serverUrl)})}, false);
+    const sameDevice = config.agentId === Number(agent.agentId) && normalizeServerUrl(previousServer) === normalizeServerUrl(config.serverUrl);
     config.agentToken = agent.token;
     config.agentId = agent.agentId;
-    bindWorkspace(undefined, true);
+    delete config.userToken;
+    if (sameDevice) {
+      saveConfig(config);
+      console.log(`Device ${agent.agentId} synchronized`);
+      return;
+    }
+    delete config.workspaceId;
+    config.watchedPaths = [];
+    config.watchedRoots = [];
+    config.clones = [];
+    saveConfig(config, {
+      replaceCollections: true,
+      beforeRepositoryStateReplace: current => { for (const clone of current.clones) { try { removeHooks(clone.path); } catch {} } },
+    });
+    saveQueue([], config);
     console.log(`Device ${agent.agentId} registered`);
     return;
   }
@@ -107,16 +120,26 @@ async function main() {
   if (command === 'event') {
     const repoPath = path.resolve(flag('--repo') || process.cwd());
     const type = flag('--type') || args[0];
-    const clone = config.clones.find(item => item.path === repoPath);
-    if (!clone) throw new Error(`repository is not registered: ${repoPath}`);
+    const clones = config.clones.filter(item => item.path === repoPath);
+    if (!clones.length) throw new Error(`repository is not registered: ${repoPath}`);
     const identityFingerprint = repositoryFingerprint(repoPath);
-    if (!clone.repositoryFingerprint || clone.repositoryFingerprint !== identityFingerprint) throw new Error(`repository identity changed: ${repoPath}`);
+    if (clones.some(clone => !clone.repositoryFingerprint || clone.repositoryFingerprint !== identityFingerprint)) throw new Error(`repository identity changed: ${repoPath}`);
     if (type === 'push' && flag('--hook') === 'pre-push') {
       const stdin = fs.readFileSync(0, 'utf8');
       for (const intent of parsePrePush(args.at(-2) || '', args.at(-1) || '', stdin)) {
         if (repositoryFingerprint(repoPath) !== identityFingerprint) throw new Error(`repository identity changed: ${repoPath}`);
         const occurredAt = new Date().toISOString();
-        await api(config, '/api/pushes/pending', {method: 'POST', body: JSON.stringify({...intent, repositoryId: clone.repositoryId, localKey: clone.path, identityFingerprint, occurredAt, eventKey: eventKey(['push', clone.repositoryId, intent.ref, intent.expectedSha, occurredAt])})});
+        let sent = 0;
+        let firstError: unknown;
+        for (const clone of clones) {
+          try {
+            await api(config, '/api/pushes/pending', {method: 'POST', body: JSON.stringify({...intent, repositoryId: clone.repositoryId, localKey: clone.path, identityFingerprint, occurredAt, eventKey: eventKey(['push', clone.repositoryId, intent.ref, intent.expectedSha, occurredAt])})});
+            sent++;
+          } catch (error) {
+            firstError ??= error;
+          }
+        }
+        if (!sent && firstError) throw firstError;
       }
       return;
     }
@@ -128,7 +151,9 @@ async function main() {
     else if (type === 'push') data = {...data, confirmation: 'unconfirmed', reason: 'explicit event has no remote verification target'};
     if (repositoryFingerprint(repoPath) !== identityFingerprint) throw new Error(`repository identity changed: ${repoPath}`);
     const occurredAt = new Date().toISOString();
-    enqueue({eventKey: eventKey([type, clone.repositoryId, data.commitSha || '', data.oldCommit || '', data.newCommit || '', occurredAt.slice(0, 16), data]), repositoryId: clone.repositoryId, localKey: clone.path, identityFingerprint, type, occurredAt, data, attempts: 0, nextAttempt: 0});
+    for (const clone of clones) {
+      enqueue(config, {eventKey: eventKey([type, clone.repositoryId, data.commitSha || '', data.oldCommit || '', data.newCommit || '', occurredAt.slice(0, 16), data]), workspaceId: clone.workspaceId, repositoryId: clone.repositoryId, localKey: clone.path, identityFingerprint, type, occurredAt, data, attempts: 0, nextAttempt: 0});
+    }
     await flush(config);
     return;
   }

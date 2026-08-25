@@ -329,17 +329,17 @@ function Install({ workspaceId, agents, userId, onAgentsChecked }: { workspaceId
       <PageHeading
         eyebrow="Local device"
         title="Install TraceMini CLI"
-        description="Connect this Linux device to the selected workspace without uploading source code."
+        description="Connect this Linux device once to your account. Repositories and reports remain workspace-scoped, and source code stays local."
       />
       <section className="card device-detection" aria-live="polite">
         <span>CLI connection</span>
         <h2>{onlineDevices.length ? "CLI connected" : personalDevices.length ? "CLI installed, device offline" : "CLI not detected"}</h2>
         <p className="muted">
           {onlineDevices.length
-            ? `${onlineDevices.map((device) => device.machine_name).join(", ")} ${onlineDevices.length === 1 ? "is" : "are"} sending heartbeats to this workspace.`
+            ? `${onlineDevices.map((device) => device.machine_name).join(", ")} ${onlineDevices.length === 1 ? "is" : "are"} connected to your account and available in this workspace.`
             : personalDevices.length
               ? `TraceMini was installed on ${personalDevices.map((device) => device.machine_name).join(", ")}, but no heartbeat was received in the last minute.`
-              : "No TraceMini device has connected for your account in this workspace yet."}
+              : "No TraceMini device has connected to your account yet."}
         </p>
         <button className="button secondary" onClick={checkConnection} disabled={checkPending}>
           {checkPending ? "Checking…" : "Check CLI connection"}
@@ -566,7 +566,7 @@ function RepositorySelection({workspaceId, candidates, reload}: {workspaceId: nu
   </section>;
 }
 
-function Settings({ workspace, members, repositories, agents, repositoryCandidates, reload, reloadCandidates }: any) {
+function Settings({ workspace, members, repositories, agents, repositoryCandidates, reload, reloadCandidates, userId }: any) {
   const active = useActiveView();
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
@@ -742,6 +742,7 @@ function Settings({ workspace, members, repositories, agents, repositoryCandidat
         <section className="card settings-card">
           <span>Machines</span>
           <h2>Devices</h2>
+          <p className="muted">Account devices for current workspace members. You can revoke only your own device, which disconnects it from every workspace.</p>
           {agents.length ? (
             agents.map((agent: any) => (
               <div className="row" key={agent.id}>
@@ -754,12 +755,13 @@ function Settings({ workspace, members, repositories, agents, repositoryCandidat
                     {agent.user_name} · {agent.status}
                   </small>
                 </span>
-                {(() => {
+                {agent.user_id === userId && (() => {
                   const action = deviceManagementAction(agent, workspace.id);
                   return <button
                     className="button secondary"
                     onClick={() =>
                       (action.label !== "Remove" || confirm(`Remove revoked device ${agent.machine_name} from this website? Its historical activity will be preserved.`)) &&
+                      (action.label !== "Revoke" || confirm(`Revoke ${agent.machine_name}? This disconnects the account device from every workspace.`)) &&
                       mutate(action.path, action.method)
                     }
                   >
@@ -1650,6 +1652,7 @@ function App() {
               repositories={repositories}
               repositoryCandidates={repositoryCandidates}
               agents={agents}
+              userId={user?.id}
               reloadCandidates={loadWorkspace}
               reload={async () => {
                 const expectedWorkspace = workspaceId;

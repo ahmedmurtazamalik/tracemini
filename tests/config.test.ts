@@ -13,6 +13,24 @@ afterEach(() => {
 });
 
 describe('concurrent CLI configuration', () => {
+  it('keeps the same physical clone registered independently in two workspaces', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'tracemini-shared-clone-'));
+    process.env.TRACEMINI_HOME = home;
+    const base = {...loadConfig(), serverUrl: 'https://trace.example', agentToken: 'device', agentId: 1, workspaceId: 1};
+    base.clones = [
+      {path: '/work/shared', workspaceId: 1, repositoryId: 11, normalizedRemote: 'one/repo', name: 'one'},
+      {path: '/work/shared', workspaceId: 2, repositoryId: 22, normalizedRemote: 'two/repo', name: 'two'},
+    ];
+
+    saveConfig(base, {replaceCollections: true});
+
+    expect(loadConfig().clones).toEqual([
+      expect.objectContaining({path: '/work/shared', workspaceId: 1, repositoryId: 11}),
+      expect.objectContaining({path: '/work/shared', workspaceId: 2, repositoryId: 22}),
+    ]);
+    fs.rmSync(home, {recursive: true, force: true});
+  });
+
   it('does not scan any directory until the user explicitly chooses a watch root', () => {
     const state = fs.mkdtempSync(path.join(os.tmpdir(), 'tracemini-default-home-'));
     const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'tracemini-user-home-'));

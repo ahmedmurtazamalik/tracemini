@@ -23,7 +23,7 @@ The built Express process serves the API and `apps/web/dist` at `http://localhos
 
 ## Workspace and CLI onboarding
 
-Roles are only **Manager** and **Member**. A workspace creator is its first Manager. Managers can promote/demote existing members, remove members, rotate or disable the invite, archive repositories, revoke agents, and delete the workspace. A mutation that would leave zero Managers is rejected. Members cannot perform management mutations.
+Roles are only **Manager** and **Member**. A workspace creator is its first Manager. Managers can promote/demote existing members, remove members, rotate or disable the invite, archive repositories, and delete the workspace. A mutation that would leave zero Managers is rejected. Members cannot perform management mutations. A device is account-level rather than owned by one workspace, so only its owner can revoke it; revocation disconnects that device from every workspace.
 
 From **Install CLI** in the authenticated web app, generate and copy the Linux install command. The command uses `curl` to download a server-generated installer file and then runs that local file; it does not pipe network content directly into a shell. The installer contains a short-lived, single-use opaque install token, installs the compiled dependency-free CLI under `~/.local/share/tracemini/cli`, creates `~/.local/bin/tracemini`, exchanges the token for a dedicated agent credential, and enables and starts `tracemini.service` with `systemd --user`. It requires Node.js 22+ but does not require npm, a package registry, sudo, or a preinstalled `tracemini` command.
 
@@ -38,7 +38,7 @@ tracemini watch /absolute/path/to/a/root
 
 Add `export PATH="$HOME/.local/bin:$PATH"` to the appropriate shell startup file if `~/.local/bin` is not already on `PATH`. A newly started service can have no journal output; `-- No entries --` is normal immediately after installation. Agent credentials, watched roots, clone state, and the retry queue are stored with user-only permissions under `~/.tracemini`; `TRACEMINI_HOME` overrides the state directory. Configuration writes are atomic, and the background service reloads roots and clones written by interactive `tracemini watch` commands instead of overwriting them with an older in-memory snapshot.
 
-Each installed agent is bound to one selected workspace. Repository, refresh, push, activity, and report operations are rejected outside that binding. Removing a member revokes that member's agents for the workspace and fails their unfinished report jobs.
+Each installed agent is one account/machine device connection that serves every workspace where its owner currently has live membership. The selected workspace is only the active CLI context: changing it does not re-pair the device or rotate its credential. Watched roots, clones, queues, repository activity, repository selection, and report jobs remain workspace-partitioned, and every workspace operation revalidates current membership. Removing a member cancels that workspace's unfinished work and removes only its local partition; the account device remains connected to the owner's other workspaces.
 
 Windows installation and startup support is explicitly deferred.
 
@@ -46,7 +46,7 @@ The dashboard shows agent online/offline state. “Online” means a heartbeat w
 
 ## Discovery and refresh
 
-`watch` recursively discovers repositories only below an explicit root, requires an `origin`, registers remote-normalized repositories/clones, and installs hooks. **Refresh repositories** creates one PostgreSQL-backed request for each non-revoked agent in the workspace. Each polling agent rescans its own stored watched roots, registers newly found clones and hooks, and completes its request with a repository count or error. There is no queue service or extra worker process; requests for offline agents remain queued.
+`watch` recursively discovers repositories only below an explicit root, requires an `origin`, publishes workspace-scoped candidates, and installs hooks after repository selection. Discovery is explicit: the agent does not broadly poll arbitrary filesystem roots. The former refresh-request creation, claim, and completion endpoints are retired compatibility routes that return `410`; the agent does not consume refresh requests.
 
 ## Git activity and push confirmation
 

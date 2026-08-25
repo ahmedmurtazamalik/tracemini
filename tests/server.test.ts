@@ -237,10 +237,57 @@ describe('approved server workflows', () => {
     expect(installation).not.toHaveProperty('code');
     expect(installation.installCommand).toContain('https://tracemini-eight.vercel.app');
     const token = installToken(installation);
-    const exchange = (await request(app).post('/api/agents/install/exchange').send({installToken: token, machineName: 'member-box'}).expect(201)).body;
+    const installationIdentity = 'c'.repeat(64);
+    const exchange = (await request(app).post('/api/agents/install/exchange').send({installToken: token, machineName: 'member-box', installationId: installationIdentity}).expect(201)).body;
     expect(exchange).toMatchObject({workspaceId: workspace.id, agentId: expect.any(Number), agentToken: expect.any(String)});
     expect(exchange).not.toHaveProperty('userToken');
     await request(app).post('/api/agents/install/exchange').send({installToken: token, machineName: 'replay'}).expect(409);
+
+    const synchronizedInstallation = (await request(app).post('/api/agents/installations').set(auth(memberUser.token)).send({workspaceId: workspace.id}).expect(201)).body;
+    const synchronized = (await request(app).post('/api/agents/install/exchange').set(auth(exchange.agentToken)).send({installToken: installToken(synchronizedInstallation), machineName: 'member-box', installationId: installationIdentity}).expect(201)).body;
+    expect(synchronized.agentId).toBe(exchange.agentId);
+    await request(app).get('/api/agents/status').set(auth(exchange.agentToken)).expect(401);
+    await request(app).get('/api/agents/status').set(auth(synchronized.agentToken)).expect(200);
+    const visibleDevices = (await request(app).get(`/api/workspaces/${workspace.id}/agents`).set(auth(memberUser.token)).expect(200)).body;
+    expect(visibleDevices.filter((device: any) => device.user_id === memberUser.user.id)).toHaveLength(1);
+
+    const restoredInstallation = (await request(app).post('/api/agents/installations').set(auth(memberUser.token)).send({workspaceId: workspace.id}).expect(201)).body;
+    const restored = (await request(app).post('/api/agents/install/exchange').send({installToken: installToken(restoredInstallation), machineName: 'member-box', installationId: installationIdentity}).expect(201)).body;
+    expect(restored.agentId).toBe(exchange.agentId);
+    await request(app).get('/api/agents/status').set(auth(synchronized.agentToken)).expect(401);
+    await request(app).get('/api/agents/status').set(auth(restored.agentToken)).expect(200);
+    expect((await request(app).get(`/api/workspaces/${workspace.id}/agents`).set(auth(memberUser.token)).expect(200)).body.filter((device: any) => device.user_id === memberUser.user.id)).toHaveLength(1);
+
+    const legacyLogin = (await request(app).post('/api/agents/register').set(auth(memberUser.token)).send({machineName: 'member-box', installationId: installationIdentity}).expect(201)).body;
+    expect(legacyLogin.agentId).toBe(exchange.agentId);
+    await request(app).get('/api/agents/status').set(auth(restored.agentToken)).expect(401);
+    await request(app).get('/api/agents/status').set(auth(legacyLogin.token)).expect(200);
+    expect((await request(app).get(`/api/workspaces/${workspace.id}/agents`).set(auth(memberUser.token)).expect(200)).body.filter((device: any) => device.user_id === memberUser.user.id)).toHaveLength(1);
+
+    const parallel = (await request(app).post('/api/auth/register').send({name: 'Parallel device', email: 'parallel-device@example.test', password: 'password123'}).expect(201)).body;
+    await request(app).post('/api/workspaces/join').set(auth(parallel.token)).send({inviteCode: workspace.inviteCode}).expect(200);
+    const parallelSetups = await Promise.all([1, 2].map(async () => (await request(app).post('/api/agents/installations').set(auth(parallel.token)).send({workspaceId: workspace.id}).expect(201)).body));
+    const parallelIdentity = 'd'.repeat(64);
+    const parallelExchanges = await Promise.all(parallelSetups.map(setup => request(app).post('/api/agents/install/exchange').send({installToken: installToken(setup), machineName: 'parallel-box', installationId: parallelIdentity}).expect(201).then(response => response.body)));
+    expect(new Set(parallelExchanges.map(exchangeResult => exchangeResult.agentId)).size).toBe(1);
+    expect((await request(app).get(`/api/workspaces/${workspace.id}/agents`).set(auth(parallel.token)).expect(200)).body.filter((device: any) => device.user_id === parallel.user.id)).toHaveLength(1);
+    const parallelStatuses = await Promise.all(parallelExchanges.map(exchangeResult => request(app).get('/api/agents/status').set(auth(exchangeResult.agentToken)).then(response => response.status)));
+    expect(parallelStatuses.sort()).toEqual([200, 401]);
+
+    const legacy = (await request(app).post('/api/auth/register').send({name: 'Legacy duplicate', email: 'legacy-duplicate@example.test', password: 'password123'}).expect(201)).body;
+    await request(app).post('/api/workspaces/join').set(auth(legacy.token)).send({inviteCode: workspace.inviteCode}).expect(200);
+    const legacyDevices = await Promise.all([1, 2].map(async index => (await request(app).post('/api/agents/register').set(auth(legacy.token)).send({machineName: `legacy-box-${index}`}).expect(201)).body));
+    const legacyIdentity = 'e'.repeat(64);
+    const legacyResults: any[] = [];
+    for (const legacyDevice of legacyDevices) {
+      const setup = (await request(app).post('/api/agents/installations').set(auth(legacy.token)).send({workspaceId: workspace.id}).expect(201)).body;
+      legacyResults.push((await request(app).post('/api/agents/install/exchange').set(auth(legacyDevice.token)).send({installToken: installToken(setup), machineName: 'legacy-box', installationId: legacyIdentity}).expect(201)).body);
+    }
+    expect(legacyResults[0].agentId).toBe(legacyDevices[0].agentId);
+    expect(legacyResults[1].agentId).toBe(legacyDevices[1].agentId);
+    await request(app).get('/api/agents/status').set(auth(legacyResults[0].agentToken)).expect(401);
+    await request(app).get('/api/agents/status').set(auth(legacyResults[1].agentToken)).expect(200);
+    expect((await request(app).get(`/api/workspaces/${workspace.id}/agents`).set(auth(legacy.token)).expect(200)).body.filter((device: any) => device.user_id === legacy.user.id)).toHaveLength(1);
 
     const memberId = memberUser.user.id;
     await request(app).patch(`/api/workspaces/${workspace.id}/members/${memberId}`).set(auth(memberUser.token)).send({role: 'Manager'}).expect(403);
@@ -321,6 +368,8 @@ else if(command==='status'){console.log(JSON.stringify(JSON.parse(fs.readFileSyn
     const refresh = (await request(app).post(`/api/workspaces/${workspace.id}/refresh`).set(auth(user.token)).expect(410)).body;
     expect(refresh).toEqual({error: 'repository refresh moved to tracemini watch PATH'});
     expect((await request(app).get('/api/agents/refresh-requests').set(auth(agent.agentToken)).expect(200)).body).toEqual([]);
+    await request(app).post('/api/agents/refresh-requests/1/claim').set(auth(agent.agentToken)).expect(410);
+    await request(app).post('/api/agents/refresh-requests/1/complete').set(auth(agent.agentToken)).expect(410);
 
     const pending = (await request(app).post('/api/pushes/pending').set(auth(agent.agentToken)).send({repositoryId: repo.id, localKey: '/clone', identityFingerprint: testFingerprint, eventKey: 'push-1', remoteName: 'origin', remoteUrl: 'file:///tmp/remote.git', ref: 'refs/heads/main', expectedSha: 'abc', occurredAt: new Date().toISOString()}).expect(201)).body;
     expect((await request(app).get('/api/agents/pushes').set(auth(agent.agentToken)).expect(200)).body[0].id).toBe(pending.id);
@@ -488,10 +537,11 @@ else if(command==='status'){console.log(JSON.stringify(JSON.parse(fs.readFileSyn
     expect(registrationSql.findIndex(sql => sql === 'SELECT id FROM workspaces WHERE id=? FOR UPDATE')).toBeLessThan(registrationSql.findIndex(sql => sql === 'SELECT * FROM agents WHERE id=? FOR UPDATE'));
 
     recording.reset();
-    await request(app).post(`/api/workspaces/${workspace.id}/agents/${exchanged.agentId}/revoke`).set(auth(manager.token)).expect(200);
+    await request(app).post(`/api/workspaces/${workspace.id}/agents/${exchanged.agentId}/revoke`).set(auth(manager.token)).expect(404);
+    await request(app).post(`/api/workspaces/${workspace.id}/agents/${exchanged.agentId}/revoke`).set(auth(member.token)).expect(200);
     const revokeSql = recording.calls.filter(call => call.inTransaction).map(call => call.sql);
     expect(revokeSql.findIndex(sql => sql.includes('FROM agents') && sql.includes('FOR UPDATE'))).toBeLessThan(revokeSql.findIndex(sql => sql.startsWith('UPDATE refresh_requests')));
-    expect(recording.calls).toContainEqual({sql: "SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=? AND role='Manager'", inTransaction: true});
+    expect(recording.calls).toContainEqual({sql: 'SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=?', inTransaction: true});
 
     recording.reset();
     await request(app).delete(`/api/workspaces/${workspace.id}/members/${member.user.id}`).set(auth(manager.token)).expect(204);
@@ -502,30 +552,58 @@ else if(command==='status'){console.log(JSON.stringify(JSON.parse(fs.readFileSyn
     expect(recording.calls).toContainEqual({sql: "SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=? AND role='Manager'", inTransaction: true});
   });
 
-  it('binds agents and report work to one workspace and revokes them on member removal', async () => {
+  it('keeps one account device online across workspaces and removes only departed workspace work', async () => {
     db = await openTestDb();
     const app = createApp(db);
     const createUser = async (name: string) => (await request(app).post('/api/auth/register').send({name, email: `${name}@isolation.test`, password: 'password123'}).expect(201)).body;
-    const member = await createUser('bound-member');
-    const manager = await createUser('removing-manager');
+    const member = await createUser('account-device-member');
+    const manager = await createUser('account-device-manager');
     const workspaceA = (await request(app).post('/api/workspaces').set(auth(member.token)).send({name: 'Workspace A'}).expect(201)).body;
     const workspaceB = (await request(app).post('/api/workspaces').set(auth(member.token)).send({name: 'Workspace B'}).expect(201)).body;
     await request(app).post('/api/workspaces/join').set(auth(manager.token)).send({inviteCode: workspaceA.inviteCode}).expect(200);
     await request(app).patch(`/api/workspaces/${workspaceA.id}/members/${manager.user.id}`).set(auth(member.token)).send({role: 'Manager'}).expect(200);
 
     const installation = (await request(app).post('/api/agents/installations').set(auth(member.token)).send({workspaceId: workspaceA.id}).expect(201)).body;
-    const agent = (await request(app).post('/api/agents/install/exchange').send({installToken: installToken(installation), machineName: 'workspace-a-box'}).expect(201)).body;
+    const agent = (await request(app).post('/api/agents/install/exchange').send({installToken: installToken(installation), machineName: 'account-box'}).expect(201)).body;
     expect((await request(app).get(`/api/workspaces/${workspaceA.id}/agents`).set(auth(member.token)).expect(200)).body).toHaveLength(1);
-    expect((await request(app).get(`/api/workspaces/${workspaceB.id}/agents`).set(auth(member.token)).expect(200)).body).toEqual([]);
-    await request(app).post(`/api/workspaces/${workspaceB.id}/agents/${agent.agentId}/revoke`).set(auth(member.token)).expect(404);
+    expect((await request(app).get(`/api/workspaces/${workspaceB.id}/agents`).set(auth(member.token)).expect(200)).body).toHaveLength(1);
 
-    const jobResponse = await request(app).post('/api/reports/jobs').set(auth(member.token)).send({workspaceId: String(workspaceA.id), startDate: '2026-08-21', endDate: '2026-08-21', reporter: 'codex'});
-    expect(jobResponse.status, JSON.stringify(jobResponse.body)).toBe(201);
-    const job = jobResponse.body;
+    const repositories: any[] = [];
+    const sharedLocalKey = '/shared-working-tree';
+    for (const workspace of [workspaceA, workspaceB]) {
+      await request(app).post('/api/agents/repository-candidates').set(auth(agent.agentToken)).send({workspaceId: workspace.id, repositories: [{localKey: sharedLocalKey, name: workspace.name, remoteUrl: `file:///tmp/workspace-${workspace.id}.git`, traced: false, identityFingerprint: testFingerprint}]}).expect(200);
+      const candidates = (await request(app).get(`/api/workspaces/${workspace.id}/repository-candidates`).set(auth(member.token)).expect(200)).body;
+      expect(candidates).toEqual([
+        expect.objectContaining({local_key: sharedLocalKey, machine_name: 'account-box'}),
+      ]);
+      await request(app).patch(`/api/workspaces/${workspace.id}/repository-candidates/${candidates[0].id}`).set(auth(member.token)).send({traced: true}).expect(200);
+      const repository = (await request(app).post('/api/repositories/register').set(auth(agent.agentToken)).send({workspaceId: String(workspace.id), localKey: sharedLocalKey, name: workspace.name, remoteUrl: `file:///tmp/workspace-${workspace.id}.git`, identityFingerprint: testFingerprint}).expect(200)).body;
+      repositories.push(repository);
+      await request(app).post('/api/activity').set(auth(agent.agentToken)).send({eventKey: `before-${workspace.id}`, repositoryId: repository.id, localKey: sharedLocalKey, identityFingerprint: testFingerprint, type: 'commit', occurredAt: new Date().toISOString()}).expect(201);
+    }
+    expect((await db.prepare('SELECT COUNT(*)::INTEGER count FROM local_clones WHERE agent_id=? AND local_key=?').get(agent.agentId, sharedLocalKey) as any).count).toBe(2);
+
+    const jobA = (await request(app).post('/api/reports/jobs').set(auth(member.token)).send({workspaceId: String(workspaceA.id), startDate: '2026-08-21', endDate: '2026-08-21', reporter: 'codex'}).expect(201)).body;
+    const jobB = (await request(app).post('/api/reports/jobs').set(auth(member.token)).send({workspaceId: String(workspaceB.id), startDate: '2026-08-21', endDate: '2026-08-21', reporter: 'codex'}).expect(201)).body;
+
     await request(app).delete(`/api/workspaces/${workspaceA.id}/members/${member.user.id}`).set(auth(manager.token)).expect(204);
-    await request(app).post('/api/agents/heartbeat').set(auth(agent.agentToken)).expect(401);
-    await request(app).post(`/api/agents/jobs/${job.id}/claim`).set(auth(agent.agentToken)).expect(401);
-    expect((await request(app).get(`/api/reports/jobs/${job.id}`).set(auth(member.token)).expect(200)).body).toMatchObject({status: 'failed', error: 'workspace membership removed'});
+    const statusAfterRemoval = (await request(app).get('/api/agents/status').set(auth(agent.agentToken)).expect(200)).body;
+    expect(statusAfterRemoval.workspaceId).not.toBe(workspaceA.id);
+    expect(await db.prepare('SELECT workspace_id FROM agents WHERE id=?').get(agent.agentId)).toMatchObject({workspace_id: statusAfterRemoval.workspaceId});
+    const workspaceIds = (await request(app).post('/api/agents/heartbeat').set(auth(agent.agentToken)).expect(200)).body.workspaceIds;
+    expect(workspaceIds).toContain(statusAfterRemoval.workspaceId);
+    expect(workspaceIds).toContain(workspaceB.id);
+    expect(workspaceIds).not.toContain(workspaceA.id);
+    await request(app).post('/api/activity').set(auth(agent.agentToken)).send({eventKey: 'after-a', repositoryId: repositories[0].id, localKey: sharedLocalKey, identityFingerprint: testFingerprint, type: 'commit', occurredAt: new Date().toISOString()}).expect(403);
+    await request(app).post('/api/activity').set(auth(agent.agentToken)).send({eventKey: 'after-b', repositoryId: repositories[1].id, localKey: sharedLocalKey, identityFingerprint: testFingerprint, type: 'commit', occurredAt: new Date().toISOString()}).expect(201);
+    await request(app).post(`/api/agents/jobs/${jobA.id}/claim`).set(auth(agent.agentToken)).expect(409);
+    await request(app).post(`/api/agents/jobs/${jobB.id}/claim`).set(auth(agent.agentToken)).expect(200);
+    expect(await db.prepare('SELECT status,error FROM report_jobs WHERE id=?').get(jobA.id)).toMatchObject({status: 'failed', error: 'workspace membership removed'});
+    await request(app).get(`/api/reports/jobs/${jobA.id}`).set(auth(member.token)).expect(404);
+    expect((await request(app).get(`/api/workspaces/${workspaceB.id}/repository-candidates`).set(auth(member.token)).expect(200)).body).toEqual([
+      expect.objectContaining({local_key: sharedLocalKey}),
+    ]);
+    expect((await db.prepare('SELECT COUNT(*)::INTEGER count FROM local_clones WHERE agent_id=? AND local_key=?').get(agent.agentId, sharedLocalKey) as any).count).toBe(1);
   });
 
   it('lets a user select which repositories their device should trace', async () => {

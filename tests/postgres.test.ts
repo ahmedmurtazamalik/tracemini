@@ -40,14 +40,16 @@ describe('PostgreSQL database', () => {
     const db = await openTestDb();
     try {
       const migrations = await db.query('SELECT version,name,checksum FROM schema_migrations ORDER BY version');
-      expect(migrations.rows.map((row: any) => row.version)).toEqual([1, 3, 4, 5, 6, 9, 11, 12, 13, 14, 15]);
+      expect(migrations.rows.map((row: any) => row.version)).toEqual([1, 3, 4, 5, 6, 9, 11, 12, 13, 14, 15, 16]);
       for (const migration of migrations.rows) expect(migration.checksum).toMatch(/^[a-f0-9]{64}$/);
       const reportJobColumns = await db.query("SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='report_jobs'");
       expect(reportJobColumns.rows.map((row: any) => row.column_name)).toEqual(expect.arrayContaining(['custom_prompt', 'target_report_id', 'report_name']));
       const reportColumns = await db.query("SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='reports'");
       expect(reportColumns.rows.map((row: any) => row.column_name)).toEqual(expect.arrayContaining(['name']));
       const agentColumns = await db.query("SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='agents'");
-      expect(agentColumns.rows.map((row: any) => row.column_name)).toEqual(expect.arrayContaining(['removed_at']));
+      expect(agentColumns.rows.map((row: any) => row.column_name)).toEqual(expect.arrayContaining(['removed_at', 'installation_id']));
+      const candidateWorkspace = await db.query("SELECT is_nullable FROM information_schema.columns WHERE table_schema='public' AND table_name='repository_candidates' AND column_name='workspace_id'");
+      expect(candidateWorkspace.rows).toEqual([{is_nullable: 'NO'}]);
       const tables = await db.query(
         "SELECT table_name FROM information_schema.tables WHERE table_schema='public' ORDER BY table_name",
       );
@@ -66,4 +68,12 @@ describe('PostgreSQL database', () => {
       await db.close();
     }
   });
+
+  it('makes legacy candidate workspace scope mandatory in migration 16', async () => {
+    const {accountDeviceMigrationSql} = await import('../apps/server/src/db.js');
+    expect(accountDeviceMigrationSql).toContain('DELETE FROM repository_candidates WHERE workspace_id IS NULL');
+    expect(accountDeviceMigrationSql).toContain('ALTER COLUMN workspace_id SET NOT NULL');
+  });
+
+
 });

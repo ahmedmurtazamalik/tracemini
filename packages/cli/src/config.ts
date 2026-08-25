@@ -1,13 +1,15 @@
 import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import crypto from 'node:crypto';
-export type Clone={path:string;repositoryId:number;normalizedRemote:string;name:string;branch?:string;headSha?:string;remoteHeadSha?:string;historyHeads?:string[];repositoryFingerprint?:string};
-export type Config={serverUrl:string;userToken?:string;agentToken?:string;agentId?:number;workspaceId?:number;watchedPaths:string[];clones:Clone[];reporter:'codex'|'hermes';pollMs:number};
-export type Queued={eventKey:string;repositoryId:number;localKey?:string;identityFingerprint?:string;type:string;occurredAt:string;data:Record<string,unknown>;attempts:number;nextAttempt:number;claimId?:string;claimedAt?:number};
+export type Clone={path:string;workspaceId?:number;repositoryId:number;normalizedRemote:string;name:string;branch?:string;headSha?:string;remoteHeadSha?:string;historyHeads?:string[];repositoryFingerprint?:string};
+export type WatchedRoot={path:string;workspaceId:number};
+export type Config={serverUrl:string;userToken?:string;agentToken?:string;agentId?:number;workspaceId?:number;watchedPaths:string[];watchedRoots?:WatchedRoot[];clones:Clone[];reporter:'codex'|'hermes';pollMs:number};
+export type Queued={eventKey:string;workspaceId?:number;repositoryId:number;localKey?:string;identityFingerprint?:string;type:string;occurredAt:string;data:Record<string,unknown>;attempts:number;nextAttempt:number;claimId?:string;claimedAt?:number};
 export const stateDir=()=>process.env.TRACEMINI_HOME||path.join(os.homedir(),'.tracemini');
-const file=(n:string)=>path.join(stateDir(),n);const defaults=():Config=>({serverUrl:'http://localhost:3000',watchedPaths:[],clones:[],reporter:'codex',pollMs:2000});
+const file=(n:string)=>path.join(stateDir(),n);const defaults=():Config=>({serverUrl:'http://localhost:3000',watchedPaths:[],watchedRoots:[],clones:[],reporter:'codex',pollMs:2000});
 function readStored():Partial<Config>{try{return JSON.parse(fs.readFileSync(file('config.json'),'utf8'))}catch{return {}}}
-function sameBinding(a:Partial<Config>,b:Partial<Config>){return a.serverUrl===b.serverUrl&&a.agentId===b.agentId&&a.agentToken===b.agentToken&&a.workspaceId===b.workspaceId}
+function hydrate(stored:Partial<Config>):Config{const watchedPaths=stored.watchedPaths||[];const watchedRoots=stored.watchedRoots||(stored.workspaceId?watchedPaths.map(root=>({path:root,workspaceId:stored.workspaceId!})):[]);return {...defaults(),...stored,watchedPaths,watchedRoots,clones:(stored.clones||[]).map(clone=>({...clone,workspaceId:clone.workspaceId??stored.workspaceId}))}}
+function sameBinding(a:Partial<Config>,b:Partial<Config>){return a.serverUrl===b.serverUrl&&a.agentId===b.agentId&&a.agentToken===b.agentToken}
 export function isCurrentBinding(c:Config){const current=readStored();return sameBinding(c,current)}
-export function loadConfig():Config{fs.mkdirSync(stateDir(),{recursive:true,mode:0o700});const stored=readStored();return {...defaults(),...stored,watchedPaths:stored.watchedPaths||[]}}
+export function loadConfig():Config{fs.mkdirSync(stateDir(),{recursive:true,mode:0o700});return hydrate(readStored())}
 const wait=(milliseconds:number)=>Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,milliseconds);
 function withConfigLock<T>(operation:()=>T):T{
   const lock=file('config.lock');
@@ -48,13 +50,13 @@ function writeConfig(c:Config){
   fs.writeFileSync(temporary,JSON.stringify(c,null,2),{mode:0o600});
   fs.renameSync(temporary,target);
 }
-export function mutateCurrentBinding(c:Config, operation:(current:Config)=>void){
+export function mutateCurrentBinding(c:Config, operation:(current:Config)=>void|false){
   fs.mkdirSync(stateDir(),{recursive:true,mode:0o700});
   return withConfigLock(()=>{
     const stored=readStored();
     if(!sameBinding(c,stored))return false;
-    const current={...defaults(),...stored,watchedPaths:stored.watchedPaths||[],clones:stored.clones||[]} as Config;
-    operation(current);
+    const current=hydrate(stored);
+    if(operation(current)===false)return true;
     writeConfig(current);
     Object.assign(c,current);
     return true;
@@ -69,27 +71,40 @@ export function saveConfig(c:Config, options:{preserveCurrentScalars?:boolean;re
   const current=readStored();
   const replaceRepositoryState=options.replaceRepositoryState||options.replaceCollections;
   if(replaceRepositoryState&&options.beforeRepositoryStateReplace){
-    options.beforeRepositoryStateReplace({...defaults(),...current,watchedPaths:current.watchedPaths||[],clones:current.clones||[]} as Config);
+    options.beforeRepositoryStateReplace(hydrate(current));
   }
   const currentHasBinding=current.workspaceId!==undefined||current.agentId!==undefined||current.agentToken!==undefined;
   const sameWorkspace=!currentHasBinding||sameBinding(c,current);
   const sources=replaceRepositoryState?[c]:options.preserveCurrentScalars&&!sameWorkspace?[current]:options.preserveCurrentScalars?[c,current]:[current,c];
+  const cloneKey=(clone:Clone)=>`${clone.workspaceId || ''}\0${clone.path}`;
   const clones=new Map<string,Clone>();
   if(options.preserveCurrentScalars&&sameWorkspace&&!replaceRepositoryState){
-    for(const clone of c.clones)clones.set(clone.path,clone);
+    for(const clone of c.clones)clones.set(cloneKey(clone),clone);
     for(const clone of current.clones||[]){
-      const background=clones.get(clone.path);
-      clones.set(clone.path,background?.repositoryId===clone.repositoryId?{...clone,...background}:clone);
+      const key=cloneKey(clone);
+      const background=clones.get(key);
+      clones.set(key,background?.repositoryId===clone.repositoryId?{...clone,...background}:clone);
     }
-  }else{
-    for(const source of sources)for(const clone of source.clones||[])clones.set(clone.path,clone);
-  }
+  }else for(const source of sources)for(const clone of source.clones||[])clones.set(cloneKey(clone),clone);
   const scalarConfig=options.preserveCurrentScalars?{...defaults(),...current}:c;
-  const merged={...scalarConfig,watchedPaths:[...new Set(sources.flatMap(source=>source.watchedPaths||[]))],clones:[...clones.values()]};
+  const watchedRoots=new Map<string,WatchedRoot>();
+  for(const source of sources)for(const root of hydrate(source).watchedRoots||[])watchedRoots.set(`${root.workspaceId}\0${root.path}`,root);
+  const merged={...scalarConfig,watchedPaths:[...new Set(sources.flatMap(source=>source.watchedPaths||[]))],watchedRoots:[...watchedRoots.values()],clones:[...clones.values()]};
   writeConfig(merged);
   });
 }
-export function loadQueue():Queued[]{try{return JSON.parse(fs.readFileSync(file('queue.json'),'utf8'))}catch{return[]}}
+export function loadQueue():Queued[]{try{
+  const config=hydrate(readStored());
+  return JSON.parse(fs.readFileSync(file('queue.json'),'utf8')).map((event:Queued)=>{
+    if(event.workspaceId!=null)return event;
+    const candidates=config.clones.filter(clone=>
+      event.localKey===clone.path&&event.repositoryId===clone.repositoryId&&
+      (!event.identityFingerprint||event.identityFingerprint===clone.repositoryFingerprint)&&clone.workspaceId!=null
+    );
+    const workspaceIds=[...new Set(candidates.map(clone=>clone.workspaceId!))];
+    return workspaceIds.length===1?{...event,workspaceId:workspaceIds[0]}:event;
+  });
+}catch{return[]}}
 export function saveQueue(q:Queued[], binding?:Config){
   fs.mkdirSync(stateDir(),{recursive:true,mode:0o700});
   return withConfigLock(()=>{
@@ -105,7 +120,7 @@ export function updateConfig(operation:(current:Config)=>Config|void):Config{
   fs.mkdirSync(stateDir(),{recursive:true,mode:0o700});
   return withConfigLock(()=>{
     const stored=readStored();
-    const current={...defaults(),...stored,watchedPaths:stored.watchedPaths||[],clones:stored.clones||[]} as Config;
+    const current=hydrate(stored);
     const updated=operation(current)||current;
     writeConfig(updated);
     return updated;
@@ -123,12 +138,25 @@ export function mutateQueue<T>(operation:(queue:Queued[])=>T):T{
     return result;
   });
 }
-export function enqueue(event:Queued):boolean{
-  return mutateQueue(queue=>{
-    const stored=readStored();
-    if(!event.localKey||!event.identityFingerprint||!(stored.clones||[]).some(clone=>clone.path===event.localKey&&clone.repositoryId===event.repositoryId&&clone.repositoryFingerprint===event.identityFingerprint))return false;
+export function mutateCurrentQueue<T>(binding:Config,operation:(queue:Queued[])=>T):T|undefined{
+  fs.mkdirSync(stateDir(),{recursive:true,mode:0o700});
+  return withConfigLock(()=>{
+    if(!sameBinding(binding,readStored()))return undefined;
+    const queue=loadQueue();
+    const result=operation(queue);
+    const target=file('queue.json');
+    const temporary=`${target}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+    fs.writeFileSync(temporary,JSON.stringify(queue,null,2),{mode:0o600});
+    fs.renameSync(temporary,target);
+    return result;
+  });
+}
+export function enqueue(binding:Config,event:Queued):boolean{
+  return mutateCurrentQueue(binding,queue=>{
+    const stored=hydrate(readStored());
+    if(event.workspaceId==null||!event.localKey||!event.identityFingerprint||!stored.clones.some(clone=>clone.workspaceId===event.workspaceId&&clone.path===event.localKey&&clone.repositoryId===event.repositoryId&&clone.repositoryFingerprint===event.identityFingerprint))return false;
     if(queue.some(current=>current.eventKey===event.eventKey))return true;
     queue.push(event);return true;
-  });
+  })??false;
 }
 export const eventKey=(parts:unknown[])=>crypto.createHash('sha256').update(JSON.stringify(parts)).digest('hex');
