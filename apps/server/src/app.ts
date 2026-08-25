@@ -327,6 +327,7 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
         await db.prepare("UPDATE refresh_requests SET status='error',error='device changed workspace',completed_at=? WHERE agent_id=? AND status IN ('queued','running')").run(now(), agent.id);
         await db.prepare("UPDATE pending_pushes SET status='unconfirmed',completed_at=? WHERE agent_id=? AND status='pending'").run(now(), agent.id);
         await db.prepare("UPDATE report_jobs SET status='failed',error='device changed workspace',completed_at=? WHERE agent_id=? AND status='running'").run(now(), agent.id);
+        await db.prepare('DELETE FROM repository_candidates WHERE agent_id=?').run(agent.id);
         await db.prepare('DELETE FROM local_clones WHERE agent_id=?').run(agent.id);
       }
       await db.prepare('UPDATE agents SET workspace_id=? WHERE id=?').run(workspaceId, agent.id);
@@ -337,6 +338,80 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
   });
   app.get('/api/agents/status', agentAuth, async (req: Authed, res) => res.json({id: req.agent.id, userId: req.agent.user_id, workspaceId: req.agent.workspace_id, machineName: req.agent.machine_name, lastSeen: req.agent.last_seen}));
   app.post('/api/agents/heartbeat', agentAuth, async (_req, res) => res.json({ok: true, at: now()}));
+  app.post('/api/agents/repository-candidates', agentAuth, async (req: Authed, res) => {
+    const repositories = req.body?.repositories;
+    if (!Array.isArray(repositories) || repositories.length > 500) return res.status(400).json({error: 'repositories array required (maximum 500)'});
+    if (!req.agent.workspace_id) return res.status(409).json({error: 'device has no workspace'});
+    for (const candidate of repositories) {
+      if (!candidate || typeof candidate.localKey !== 'string' || !candidate.localKey.startsWith('/') || candidate.localKey.length > 4096 || typeof candidate.name !== 'string' || !candidate.name.trim() || candidate.name.length > 200 || typeof candidate.remoteUrl !== 'string' || candidate.remoteUrl.length > 4096 || typeof candidate.traced !== 'boolean' || (candidate.branch != null && (typeof candidate.branch !== 'string' || candidate.branch.length > 500)) || (candidate.repositoryId != null && !Number.isInteger(Number(candidate.repositoryId))) || (candidate.identityFingerprint != null && (typeof candidate.identityFingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(candidate.identityFingerprint))) || (candidate.identityChanged != null && typeof candidate.identityChanged !== 'boolean')) {
+        return res.status(400).json({error: 'invalid repository candidate'});
+      }
+    }
+    await db.transaction(async () => {
+      await db.prepare('SELECT id FROM workspaces WHERE id=? FOR UPDATE').get(req.agent.workspace_id);
+      for (const candidate of repositories) {
+        const normalized = normalizeRemote(candidate.remoteUrl) || `local/${req.agent.id}/${candidate.name}`;
+        const existing: any = await db.prepare('SELECT * FROM repository_candidates WHERE agent_id=? AND local_key=? FOR UPDATE').get(req.agent.id, candidate.localKey);
+        const incomingFingerprint = candidate.identityFingerprint || null;
+        const identityChanged = candidate.identityChanged === true || Boolean(existing?.repository_fingerprint && existing.repository_fingerprint !== incomingFingerprint);
+        if (existing && identityChanged) {
+          await db.prepare(`UPDATE repository_candidates SET workspace_id=?,name=?,remote_url=?,normalized_remote=?,branch=?,traced=FALSE,desired_traced=FALSE,last_seen=?,error='repository identity changed; select again to resume',repository_id=NULL,repository_fingerprint=?,revision=revision+1 WHERE id=?`).run(req.agent.workspace_id, candidate.name.trim(), candidate.remoteUrl, normalized, candidate.branch || null, now(), incomingFingerprint, existing.id);
+          await db.prepare('DELETE FROM local_clones WHERE agent_id=? AND local_key=?').run(req.agent.id, candidate.localKey);
+          await db.prepare("UPDATE pending_pushes SET status='unconfirmed',completed_at=? WHERE agent_id=? AND local_key=? AND status='pending'").run(now(), req.agent.id, candidate.localKey);
+          continue;
+        }
+        const clone: any = candidate.repositoryId == null ? undefined : await db.prepare(`SELECT lc.repository_id FROM local_clones lc JOIN repositories r ON r.id=lc.repository_id WHERE lc.agent_id=? AND lc.local_key=? AND lc.repository_id=? AND r.workspace_id=?`).get(req.agent.id, candidate.localKey, Number(candidate.repositoryId), req.agent.workspace_id);
+        const traced = Boolean(candidate.traced);
+        const desiredTraced = Boolean(candidate.traced && clone?.repository_id);
+        await db.prepare(`INSERT INTO repository_candidates(agent_id,workspace_id,local_key,name,remote_url,normalized_remote,branch,traced,desired_traced,last_seen,error,repository_id,repository_fingerprint)
+          VALUES(?,?,?,?,?,?,?,?,?,?,NULL,?,?)
+          ON CONFLICT(agent_id,local_key) DO UPDATE SET workspace_id=excluded.workspace_id,name=excluded.name,remote_url=excluded.remote_url,normalized_remote=excluded.normalized_remote,branch=excluded.branch,traced=excluded.traced,last_seen=excluded.last_seen,error=NULL,repository_id=COALESCE(excluded.repository_id,repository_candidates.repository_id),repository_fingerprint=COALESCE(excluded.repository_fingerprint,repository_candidates.repository_fingerprint)`).run(
+          req.agent.id, req.agent.workspace_id, candidate.localKey, candidate.name.trim(), candidate.remoteUrl, normalized, candidate.branch || null, traced, desiredTraced, now(), clone?.repository_id || null, incomingFingerprint,
+        );
+      }
+    });
+    res.json({ok: true, count: repositories.length});
+  });
+  app.get('/api/workspaces/:id/repository-candidates', userAuth, requireMember, async (req: Authed, res) => {
+    const rows = await db.prepare(`SELECT c.id,c.local_key,c.name,c.normalized_remote,c.branch,c.traced,c.desired_traced,c.revision,c.last_seen,c.error,c.repository_id,a.id agent_id,a.machine_name
+      FROM repository_candidates c JOIN agents a ON a.id=c.agent_id JOIN workspace_members wm ON wm.workspace_id=c.workspace_id AND wm.user_id=?
+      WHERE c.workspace_id=? AND a.workspace_id=c.workspace_id AND a.user_id=? AND a.revoked_at IS NULL ORDER BY a.machine_name,c.name,c.local_key`).all(req.user.id, req.params.id, req.user.id);
+    res.json(rows);
+  });
+  app.patch('/api/workspaces/:id/repository-candidates/:candidateId', userAuth, requireMember, async (req: Authed, res) => {
+    if (typeof req.body.traced !== 'boolean') return res.status(400).json({error: 'traced boolean required'});
+    const revision = await db.transaction(async () => {
+      const workspace = await db.prepare('SELECT id FROM workspaces WHERE id=? FOR UPDATE').get(req.params.id);
+      if (!workspace) return undefined;
+      const candidate: any = await db.prepare(`SELECT c.* FROM repository_candidates c JOIN agents a ON a.id=c.agent_id JOIN workspace_members wm ON wm.workspace_id=c.workspace_id AND wm.user_id=? WHERE c.id=? AND c.workspace_id=? AND a.workspace_id=c.workspace_id AND a.user_id=? AND a.revoked_at IS NULL FOR UPDATE`).get(req.user.id, req.params.candidateId, req.params.id, req.user.id);
+      if (!candidate) return undefined;
+      const nextRevision = Number(candidate.revision) + 1;
+      await db.prepare('UPDATE repository_candidates SET desired_traced=?,revision=?,error=NULL WHERE id=?').run(req.body.traced, nextRevision, candidate.id);
+      if (!req.body.traced && candidate.repository_id) await db.prepare("UPDATE pending_pushes SET status='unconfirmed',completed_at=? WHERE agent_id=? AND repository_id=? AND local_key=? AND status='pending'").run(now(), candidate.agent_id, candidate.repository_id, candidate.local_key);
+      return nextRevision;
+    });
+    if (revision == null) return res.status(404).json({error: 'repository candidate not found'});
+    res.json({ok: true, revision});
+  });
+  app.get('/api/agents/repository-selections', agentAuth, async (req: Authed, res) => {
+    const rows = await db.prepare('SELECT id,local_key,name,remote_url,normalized_remote,branch,traced,desired_traced,revision,repository_fingerprint FROM repository_candidates WHERE agent_id=? AND workspace_id=? AND desired_traced<>traced ORDER BY id').all(req.agent.id, req.agent.workspace_id);
+    res.json(rows);
+  });
+  app.post('/api/agents/repository-selections/:candidateId/claim', agentAuth, async (req: Authed, res) => {
+    const revision = Number(req.body.revision);
+    if (!Number.isInteger(revision) || typeof req.body.desiredTraced !== 'boolean') return res.status(400).json({error: 'revision and desiredTraced required'});
+    const candidate = await db.prepare('SELECT 1 FROM repository_candidates WHERE id=? AND agent_id=? AND workspace_id=? AND revision=? AND desired_traced=?').get(req.params.candidateId, req.agent.id, req.agent.workspace_id, revision, req.body.desiredTraced);
+    if (!candidate) return res.status(409).json({error: 'repository selection changed'});
+    res.json({ok: true});
+  });
+  app.post('/api/agents/repository-selections/:candidateId/complete', agentAuth, async (req: Authed, res) => {
+    const revision = Number(req.body.revision);
+    if (typeof req.body.traced !== 'boolean' || typeof req.body.desiredTraced !== 'boolean' || !Number.isInteger(revision)) return res.status(400).json({error: 'traced, desiredTraced, and revision required'});
+    const updated = await db.prepare('UPDATE repository_candidates SET traced=?,last_seen=?,error=? WHERE id=? AND agent_id=? AND workspace_id=? AND revision=? AND desired_traced=?').run(req.body.traced, now(), req.body.error ? String(req.body.error).slice(0, 2000) : null, req.params.candidateId, req.agent.id, req.agent.workspace_id, revision, req.body.desiredTraced);
+    if (!updated.changes && req.body.traced === false) await db.prepare('UPDATE repository_candidates SET traced=FALSE,last_seen=? WHERE id=? AND agent_id=? AND workspace_id=?').run(now(), req.params.candidateId, req.agent.id, req.agent.workspace_id);
+    if (!updated.changes) return res.status(409).json({error: 'repository selection changed'});
+    res.json({ok: true});
+  });
   app.get('/api/workspaces/:id/agents', userAuth, requireMember, async (req, res) => {
     const cutoff = new Date(Date.now() - 60_000).toISOString();
     const rows = await db.prepare("SELECT a.id,a.user_id,a.machine_name,a.last_seen,a.revoked_at,u.name user_name,CASE WHEN a.revoked_at IS NOT NULL THEN 'revoked' WHEN a.last_seen>=? THEN 'online' ELSE 'offline' END status FROM agents a JOIN users u ON u.id=a.user_id WHERE a.workspace_id=? AND a.removed_at IS NULL ORDER BY a.id").all(cutoff, req.params.id);
@@ -373,19 +448,26 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
 
   app.post('/api/repositories/register', agentAuth, required(['workspaceId', 'name', 'remoteUrl', 'localKey']), async (req: Authed, res) => {
     const workspaceId = Number(req.body.workspaceId);
+    if (req.agent.workspace_id !== workspaceId) return res.status(403).json({error: 'device belongs to another workspace'});
     const normalized = normalizeRemote(req.body.remoteUrl);
     if (!normalized) return res.status(400).json({error: 'remote URL required'});
+    const fingerprint = typeof req.body.identityFingerprint === 'string' && /^[a-f0-9]{64}$/.test(req.body.identityFingerprint) ? req.body.identityFingerprint : null;
+    if (!fingerprint) return res.status(409).json({error: 'repository fingerprint required'});
     const repository: any = await db.transaction(async () => {
       const workspace = await db.prepare('SELECT id FROM workspaces WHERE id=? FOR UPDATE').get(workspaceId);
       if (!workspace) return undefined;
       const agent: any = await db.prepare('SELECT * FROM agents WHERE id=? FOR UPDATE').get(req.agent.id);
       if (!agent || agent.revoked_at || agent.workspace_id !== workspaceId) return undefined;
+      const candidate: any = await db.prepare(`SELECT c.id FROM repository_candidates c JOIN agents a ON a.id=c.agent_id JOIN workspace_members wm ON wm.workspace_id=c.workspace_id AND wm.user_id=a.user_id
+        WHERE c.agent_id=? AND c.workspace_id=? AND c.local_key=? AND c.desired_traced=TRUE AND c.repository_fingerprint=? AND a.workspace_id=c.workspace_id AND a.revoked_at IS NULL FOR UPDATE`).get(req.agent.id, workspaceId, req.body.localKey, fingerprint);
+      if (!candidate) return undefined;
       await db.prepare('INSERT INTO repositories(workspace_id,name,remote_url,normalized_remote,created_at) VALUES(?,?,?,?,?) ON CONFLICT(workspace_id,normalized_remote) DO UPDATE SET name=excluded.name,remote_url=excluded.remote_url').run(workspaceId, req.body.name, req.body.remoteUrl, normalized, now());
-      const registered: any = await db.prepare('SELECT * FROM repositories WHERE workspace_id=? AND normalized_remote=?').get(workspaceId, normalized);
-      await db.prepare('INSERT INTO local_clones(agent_id,repository_id,local_key,branch,last_seen,head_sha,remote_head_sha) VALUES(?,?,?,?,?,?,?) ON CONFLICT(agent_id,local_key) DO UPDATE SET repository_id=excluded.repository_id,branch=excluded.branch,last_seen=excluded.last_seen,head_sha=excluded.head_sha,remote_head_sha=excluded.remote_head_sha').run(agent.id, registered.id, req.body.localKey, req.body.branch || null, now(), req.body.headSha || null, req.body.remoteHeadSha || null);
-      return registered;
+      const selected: any = await db.prepare('SELECT * FROM repositories WHERE workspace_id=? AND normalized_remote=?').get(workspaceId, normalized);
+      await db.prepare('INSERT INTO local_clones(agent_id,repository_id,local_key,branch,last_seen,head_sha,remote_head_sha) VALUES(?,?,?,?,?,?,?) ON CONFLICT(agent_id,local_key) DO UPDATE SET repository_id=excluded.repository_id,branch=excluded.branch,last_seen=excluded.last_seen,head_sha=excluded.head_sha,remote_head_sha=excluded.remote_head_sha').run(req.agent.id, selected.id, req.body.localKey, req.body.branch || null, now(), req.body.headSha || null, req.body.remoteHeadSha || null);
+      await db.prepare('UPDATE repository_candidates SET workspace_id=?,repository_id=?,repository_fingerprint=?,last_seen=?,error=NULL WHERE id=?').run(workspaceId, selected.id, fingerprint, now(), candidate.id);
+      return selected;
     });
-    if (!repository) return res.status(403).json({error: 'device belongs to another workspace'});
+    if (!repository) return res.status(409).json({error: 'repository must be selected before registration'});
     res.json(repository);
   });
   app.get('/api/workspaces/:id/repositories', userAuth, requireMember, async (req, res) => {
@@ -418,21 +500,34 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
     res.json({ok: true});
   });
 
-  app.post('/api/pushes/pending', agentAuth, required(['eventKey', 'remoteName', 'remoteUrl', 'ref', 'expectedSha', 'occurredAt']), async (req: Authed, res) => {
+  app.post('/api/pushes/pending', agentAuth, required(['eventKey', 'localKey', 'remoteName', 'remoteUrl', 'ref', 'expectedSha', 'occurredAt']), async (req: Authed, res) => {
     const occurredAt = instant(req.body.occurredAt);
     if (!occurredAt) return res.status(400).json({error: 'occurredAt must be an ISO timestamp'});
-    const repository: any = await db.prepare('SELECT * FROM repositories WHERE id=? AND workspace_id=?').get(req.body.repositoryId, req.agent.workspace_id);
-    if (!repository) return res.status(403).json({error: 'repository not available'});
-    const result = await db.prepare("INSERT INTO pending_pushes(event_key,user_id,agent_id,repository_id,remote_name,remote_url,ref,expected_sha,status,occurred_at) VALUES(?,?,?,?,?,?,?,?, 'pending',?) ON CONFLICT DO NOTHING").run(req.body.eventKey, req.agent.user_id, req.agent.id, repository.id, req.body.remoteName, req.body.remoteUrl, req.body.ref, req.body.expectedSha, occurredAt);
-    const push = await db.prepare('SELECT * FROM pending_pushes WHERE event_key=?').get(req.body.eventKey);
-    res.status(result.changes ? 201 : 200).json(push);
+    const fingerprint = typeof req.body.identityFingerprint === 'string' && /^[a-f0-9]{64}$/.test(req.body.identityFingerprint) ? req.body.identityFingerprint : null;
+    if (!fingerprint) return res.status(403).json({error: 'repository fingerprint required'});
+    const outcome = await db.transaction(async () => {
+      await db.prepare('SELECT id FROM workspaces WHERE id=? FOR UPDATE').get(req.agent.workspace_id);
+      const repository: any = await db.prepare('SELECT r.* FROM repositories r JOIN repository_candidates c ON c.repository_id=r.id AND c.agent_id=? AND c.workspace_id=? AND c.local_key=? AND c.desired_traced=TRUE AND c.repository_fingerprint=? JOIN agents a ON a.id=c.agent_id AND a.workspace_id=c.workspace_id AND a.revoked_at IS NULL JOIN workspace_members wm ON wm.workspace_id=c.workspace_id AND wm.user_id=a.user_id WHERE r.id=? AND r.workspace_id=?').get(req.agent.id, req.agent.workspace_id, req.body.localKey, fingerprint, req.body.repositoryId, req.agent.workspace_id);
+      if (!repository) return undefined;
+      const result = await db.prepare("INSERT INTO pending_pushes(event_key,user_id,agent_id,repository_id,local_key,repository_fingerprint,remote_name,remote_url,ref,expected_sha,status,occurred_at) VALUES(?,?,?,?,?,?,?,?,?,?, 'pending',?) ON CONFLICT DO NOTHING").run(req.body.eventKey, req.agent.user_id, req.agent.id, repository.id, req.body.localKey, fingerprint, req.body.remoteName, req.body.remoteUrl, req.body.ref, req.body.expectedSha, occurredAt);
+      const push = await db.prepare('SELECT * FROM pending_pushes WHERE event_key=?').get(req.body.eventKey);
+      return {created: Boolean(result.changes), push};
+    });
+    if (!outcome) return res.status(403).json({error: 'repository not available'});
+    res.status(outcome.created ? 201 : 200).json(outcome.push);
   });
   app.get('/api/agents/pushes', agentAuth, async (req: Authed, res) => res.json(await db.prepare("SELECT * FROM pending_pushes WHERE agent_id=? AND status='pending' AND (next_check_at IS NULL OR next_check_at<=?) ORDER BY id LIMIT 10").all(req.agent.id, now())));
   app.post('/api/agents/pushes/:pushId/complete', agentAuth, async (req: Authed, res) => {
     if (!['confirmed', 'unconfirmed'].includes(req.body.status)) return res.status(400).json({error: 'invalid status'});
+    const fingerprint = typeof req.body.identityFingerprint === 'string' && /^[a-f0-9]{64}$/.test(req.body.identityFingerprint) ? req.body.identityFingerprint : null;
+    if (!fingerprint) return res.status(409).json({error: 'repository fingerprint required'});
     const outcome = await db.transaction(async () => {
+      await db.prepare('SELECT id FROM workspaces WHERE id=? FOR UPDATE').get(req.agent.workspace_id);
       const push: any = await db.prepare("SELECT * FROM pending_pushes WHERE id=? AND agent_id=? AND status='pending' FOR UPDATE").get(req.params.pushId, req.agent.id);
       if (!push) return {kind: 'unavailable'} as const;
+      if (push.repository_fingerprint !== fingerprint) return {kind: 'unavailable'} as const;
+      const active = await db.prepare('SELECT 1 FROM repository_candidates c JOIN agents a ON a.id=c.agent_id AND a.workspace_id=c.workspace_id AND a.revoked_at IS NULL JOIN workspace_members wm ON wm.workspace_id=c.workspace_id AND wm.user_id=a.user_id WHERE c.agent_id=? AND c.workspace_id=? AND c.repository_id=? AND c.local_key=? AND c.repository_fingerprint=? AND c.desired_traced=TRUE').get(push.agent_id, req.agent.workspace_id, push.repository_id, push.local_key, fingerprint);
+      if (!active) return {kind: 'unavailable'} as const;
       if (req.body.status === 'unconfirmed' && push.attempts < 2) {
         const nextCheckAt = new Date(Date.now() + 10_000).toISOString();
         await db.prepare("UPDATE pending_pushes SET attempts=attempts+1,next_check_at=? WHERE id=? AND status='pending'").run(nextCheckAt, push.id);
@@ -448,14 +543,21 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
     res.json({ok: true});
   });
 
-  app.post('/api/activity', agentAuth, required(['eventKey', 'type', 'occurredAt']), async (req: Authed, res) => {
+  app.post('/api/activity', agentAuth, required(['eventKey', 'localKey', 'type', 'occurredAt']), async (req: Authed, res) => {
     const occurredAt = instant(req.body.occurredAt);
     if (!occurredAt) return res.status(400).json({error: 'occurredAt must be an ISO timestamp'});
     const repositoryId = Number(req.body.repositoryId);
-    const repository: any = await db.prepare('SELECT * FROM repositories WHERE id=? AND workspace_id=?').get(repositoryId, req.agent.workspace_id);
-    if (!repository) return res.status(403).json({error: 'repository not available'});
-    const result = await db.prepare('INSERT INTO activity_events(event_key,user_id,agent_id,repository_id,type,occurred_at,data,created_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING').run(req.body.eventKey, req.agent.user_id, req.agent.id, repository.id, req.body.type, occurredAt, JSON.stringify(req.body.data || {}), now());
-    res.status(result.changes ? 201 : 200).json({accepted: Boolean(result.changes)});
+    const fingerprint = typeof req.body.identityFingerprint === 'string' && /^[a-f0-9]{64}$/.test(req.body.identityFingerprint) ? req.body.identityFingerprint : null;
+    if (!fingerprint) return res.status(403).json({error: 'repository fingerprint required'});
+    const accepted = await db.transaction(async () => {
+      await db.prepare('SELECT id FROM workspaces WHERE id=? FOR UPDATE').get(req.agent.workspace_id);
+      const repository: any = await db.prepare('SELECT r.* FROM repositories r JOIN repository_candidates c ON c.repository_id=r.id AND c.agent_id=? AND c.workspace_id=? AND c.local_key=? AND c.desired_traced=TRUE AND c.repository_fingerprint=? JOIN agents a ON a.id=c.agent_id AND a.workspace_id=c.workspace_id AND a.revoked_at IS NULL JOIN workspace_members wm ON wm.workspace_id=c.workspace_id AND wm.user_id=a.user_id WHERE r.id=? AND r.workspace_id=?').get(req.agent.id, req.agent.workspace_id, req.body.localKey, fingerprint, repositoryId, req.agent.workspace_id);
+      if (!repository) return undefined;
+      const result = await db.prepare('INSERT INTO activity_events(event_key,user_id,agent_id,repository_id,type,occurred_at,data,created_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING').run(req.body.eventKey, req.agent.user_id, req.agent.id, repository.id, req.body.type, occurredAt, JSON.stringify(req.body.data || {}), now());
+      return Boolean(result.changes);
+    });
+    if (accepted == null) return res.status(403).json({error: 'repository not available'});
+    res.status(accepted ? 201 : 200).json({accepted});
   });
   const queryActivity = async (req: Authed, res: Response, extra: string, args: any[]) => {
     const workspaceId = Number(req.params.workspaceId || req.query.workspaceId || 0);

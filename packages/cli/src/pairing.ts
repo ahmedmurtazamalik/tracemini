@@ -30,3 +30,11 @@ export function rebindDeviceConfig(config: Config, serverUrl: string, pairing: D
     clones: [],
   };
 }
+
+export function rebindWorkspaceConfig(config: Config, workspaceId?: number, forceReset = false): Config {
+  if (!forceReset && config.workspaceId === workspaceId) return {...config};
+  const rebound = {...config, watchedPaths: [], clones: []};
+  if (workspaceId) rebound.workspaceId = workspaceId;
+  else delete rebound.workspaceId;
+  return rebound;
+}

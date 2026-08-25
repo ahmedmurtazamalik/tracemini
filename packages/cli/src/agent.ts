@@ -1,84 +1,281 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import {api} from './api.js';
-import {type Config, loadConfig, loadQueue, mutateCurrentBinding, saveConfig, saveQueue, eventKey} from './config.js';
-import {commitHistory, commitHistoryAfterHeads, confirmPush, discover, git, historyHeads, inspectRepo, installHooks, removeHooks, observeRepositoryState, readRepositoryState, stagedData} from './git.js';
+import {type Config, enqueue, loadConfig, loadQueue, saveConfig, eventKey, updateConfig, mutateCurrentBinding, mutateQueue} from './config.js';
+import {commitHistory, commitHistoryAfterHeads, confirmPush, discover, git, historyHeads, inspectRepo, installHooks, uninstallHooks, normalizeRemote, observeRepositoryState, readRepositoryState, repositoryFingerprint, stagedData} from './git.js';
 import {CodexRunner, HermesRunner} from './runner.js';
 
 export async function flush(config: Config) {
-  const queue = loadQueue();
-  const remaining = [];
+  const claimId = crypto.randomUUID();
+  const claimedAt = Date.now();
+  const configuredLease = Number(process.env.TRACEMINI_QUEUE_LEASE_MS);
+  const leaseMs = Number.isFinite(configuredLease) ? Math.max(1_000, configuredLease) : 60_000;
+  const queue = mutateQueue(current => current.filter(event => {
+    const claimExpired = !event.claimId || !event.claimedAt || event.claimedAt <= claimedAt - leaseMs;
+    if (event.nextAttempt > claimedAt || !claimExpired) return false;
+    event.claimId = claimId;
+    event.claimedAt = claimedAt;
+    return true;
+  }).map(event => ({...event})));
+  let sent = 0;
   for (const event of queue) {
-    if (event.nextAttempt > Date.now()) { remaining.push(event); continue; }
-    try { await api(config, '/api/activity', {method: 'POST', body: JSON.stringify(event)}); }
-    catch { event.attempts++; event.nextAttempt = Date.now() + Math.min(60_000, 1000 * 2 ** event.attempts); remaining.push(event); }
+    // Queue entries created before per-clone authorization cannot be attributed
+    // safely when the same repository exists at multiple local paths.
+    if (!event.localKey || !event.identityFingerprint) {
+      mutateQueue(current => { const index = current.findIndex(item => item.eventKey === event.eventKey && item.claimId === claimId); if (index >= 0) current.splice(index, 1); });
+      continue;
+    }
+    try {
+      await api(config, '/api/activity', {method: 'POST', body: JSON.stringify(event)});
+      sent++;
+      mutateQueue(current => { const index = current.findIndex(item => item.eventKey === event.eventKey && item.claimId === claimId); if (index >= 0) current.splice(index, 1); });
+    } catch {
+      mutateQueue(current => {
+        const pending = current.find(item => item.eventKey === event.eventKey && item.claimId === claimId);
+        if (!pending) return;
+        pending.attempts++;
+        pending.nextAttempt = Date.now() + Math.min(60_000, 1000 * 2 ** pending.attempts);
+        delete pending.claimId;
+        delete pending.claimedAt;
+      });
+    }
   }
-  saveQueue(remaining, config);
-  return {sent: queue.length - remaining.length, pending: remaining.length};
+  return {sent, pending: loadQueue().length};
 }
 
-export async function registerWatchedRoots(config: Config) {
-  if (!config.workspaceId) throw new Error('device has no selected workspace');
-  const repoPaths = [...new Set(config.watchedPaths.flatMap(root => discover(root)))];
-  const discovered = repoPaths.flatMap(repoPath => {
-    try { return [inspectRepo(repoPath)]; } catch { return []; }
+async function deactivateChangedRepository(config: Config, repoPath: string) {
+  const removed = updateConfig(current => { current.clones = current.clones.filter(clone => clone.path !== repoPath); });
+  Object.assign(config, removed);
+  mutateQueue(queue => {
+    const retained = queue.filter(event => event.localKey !== repoPath);
+    queue.splice(0, queue.length, ...retained);
   });
-  const registered = await Promise.all(discovered.map(async info => ({
-    info,
-    repository: await api<any>(config, '/api/repositories/register', {method: 'POST', body: JSON.stringify({workspaceId: String(config.workspaceId), name: info.name, remoteUrl: info.remoteUrl, localKey: info.path, branch: info.branch, headSha: info.headSha, remoteHeadSha: info.remoteHeadSha})}),
-  })));
-  let applied = 0;
-  for (const {info, repository} of registered) {
-    let committed = false;
+  try { uninstallHooks(repoPath); } catch {}
+  let info: ReturnType<typeof inspectRepo> | undefined;
+  let fingerprint: string | null = null;
+  try { info = inspectRepo(fs.realpathSync(repoPath)); fingerprint = repositoryFingerprint(info.path); } catch {}
+  try {
+    await api(config, '/api/agents/repository-candidates', {method: 'POST', body: JSON.stringify({repositories: [{
+      localKey: repoPath,
+      name: info?.name || path.basename(repoPath),
+      remoteUrl: info?.remoteUrl || `local:${repoPath}`,
+      branch: info?.branch,
+      traced: false,
+      identityFingerprint: fingerprint,
+      identityChanged: true,
+    }]})});
+  } catch {}
+}
+
+export async function traceRepository(config: Config, repoPath: string) {
+  if (!config.workspaceId) throw new Error('device has no selected workspace');
+  const canonicalPath = fs.realpathSync(repoPath);
+  const info = inspectRepo(canonicalPath);
+  const registrationRemoteUrl = info.remoteUrl.startsWith('local:') ? `local-device-${config.agentId}:${info.path}` : info.remoteUrl;
+  const scanStartedAt = new Date().toISOString();
+  const fingerprint = repositoryFingerprint(info.path);
+  const assertIdentity = () => {
     try {
-      committed = mutateCurrentBinding(config, current => {
-        const existing = current.clones.find(clone => clone.path === info.path && clone.repositoryId === repository.id);
-        installHooks(info.path);
-        current.watchedPaths = [...new Set([...current.watchedPaths, ...config.watchedPaths])];
-        current.clones = current.clones.filter(clone => clone.path !== info.path);
-        current.clones.push({path: info.path, repositoryId: repository.id, normalizedRemote: repository.normalized_remote, name: repository.name, branch: info.branch, headSha: info.headSha, remoteHeadSha: info.remoteHeadSha, historyHeads: existing?.historyHeads});
-      });
-    } catch (error) {
-      try { removeHooks(info.path); } catch {}
+      if (fs.realpathSync(repoPath) === canonicalPath && repositoryFingerprint(canonicalPath) === fingerprint) return;
+    } catch {}
+    throw new Error('repository identity changed during activation');
+  };
+  try {
+    const repository = await api<any>(config, '/api/repositories/register', {method: 'POST', body: JSON.stringify({workspaceId: String(config.workspaceId), name: info.name, remoteUrl: registrationRemoteUrl, localKey: info.path, branch: info.branch, headSha: info.headSha, remoteHeadSha: info.remoteHeadSha, identityFingerprint: fingerprint})});
+    assertIdentity();
+    const existing = config.clones.find(clone => clone.path === info.path && clone.repositoryId === repository.id);
+    const currentHistoryHeads = historyHeads(info.path);
+    const incrementalHistory = existing?.historyHeads?.length ? commitHistoryAfterHeads(info.path, existing.historyHeads) : undefined;
+    const history = incrementalHistory ?? commitHistory(info.path, new Date(Date.parse(scanStartedAt) - 90 * 24 * 60 * 60_000).toISOString(), scanStartedAt);
+    for (const data of history) {
+      assertIdentity();
+      await api(config, '/api/activity', {method: 'POST', body: JSON.stringify({
+        eventKey: eventKey(['commit-history', repository.id, data.commitSha]), repositoryId: repository.id, localKey: info.path, identityFingerprint: fingerprint, type: 'commit', occurredAt: data.commitTimestamp, data: {...data, importedFromHistory: true},
+      })});
+      assertIdentity();
+    }
+    assertIdentity();
+    try { installHooks(info.path); } catch (error) {
+      try { uninstallHooks(info.path); } catch {}
       throw error;
     }
-    if (!committed) break;
-    applied += 1;
+    assertIdentity();
+    config.clones = config.clones.filter(clone => clone.path !== info.path);
+    config.clones.push({path: info.path, repositoryId: repository.id, normalizedRemote: repository.normalized_remote, name: repository.name, branch: info.branch, headSha: info.headSha, remoteHeadSha: info.remoteHeadSha, historyHeads: currentHistoryHeads, repositoryFingerprint: fingerprint});
+    assertIdentity();
+    return info;
+  } catch (error) {
+    let changed = false;
+    try { changed = fs.realpathSync(repoPath) !== canonicalPath || repositoryFingerprint(canonicalPath) !== fingerprint; } catch { changed = true; }
+    if (changed) await deactivateChangedRepository(config, canonicalPath);
+    throw error;
   }
-  return applied;
 }
 
-export async function syncHistory(config: Config, days = 90) {
-  let commits = 0;
-  let repositories = 0;
+export async function scanWatchedRoots(config: Config, roots = config.watchedPaths) {
+  const watchedRoots = roots.map(root => path.resolve(root));
+  const found = new Set(watchedRoots.flatMap(root => { try { return discover(root); } catch { return []; } }));
+  const persisted = mutateCurrentBinding(config, current => {
+    current.watchedPaths = [...new Set([...current.watchedPaths, ...config.watchedPaths, ...watchedRoots])];
+  });
+  if (!persisted) return 0;
+  await publishRepositoryCandidates(config);
+  return found.size;
+}
+
+export function prioritizeCandidatePaths(configured: string[], discovered: string[], limit = 500) {
+  // Already trusted clones must never be displaced by the bounded discovery list.
+  return [...new Set([...configured, ...discovered])].slice(0, limit);
+}
+
+export async function reconcileConfiguredCloneIdentities(config: Config, indexState: Map<string, {mtime: number; timer?: NodeJS.Timeout}>) {
+  const invalid: Array<{clone: Config['clones'][number]; info?: ReturnType<typeof inspectRepo>; fingerprint?: string}> = [];
+  const adopted = new Map<string, string>();
   for (const clone of config.clones) {
-    const scanStartedAt = new Date().toISOString();
-    const currentHistoryHeads = historyHeads(clone.path);
-    const incrementalHistory = clone.historyHeads?.length
-      ? commitHistoryAfterHeads(clone.path, clone.historyHeads)
-      : undefined;
-    const history = incrementalHistory ?? commitHistory(
-      clone.path,
-      new Date(Date.parse(scanStartedAt) - days * 24 * 60 * 60_000).toISOString(),
-      scanStartedAt,
-    );
-    for (let offset = 0; offset < history.length; offset += 8) {
-      await Promise.all(history.slice(offset, offset + 8).map(data =>
-        api(config, '/api/activity', {method: 'POST', body: JSON.stringify({
-          eventKey: eventKey(['commit-history', clone.repositoryId, data.commitSha]),
-          repositoryId: clone.repositoryId,
-          type: 'commit',
-          occurredAt: data.commitTimestamp,
-          data: {...data, importedFromHistory: true},
-        })}),
-      ));
+    try {
+      const info = inspectRepo(fs.realpathSync(clone.path));
+      const fingerprint = repositoryFingerprint(info.path);
+      const remoteMatches = info.remoteUrl.startsWith('local:')
+        ? clone.normalizedRemote.startsWith(`local-device-${config.agentId}:`) || clone.normalizedRemote.startsWith(`local-device-${config.agentId}/`)
+        : normalizeRemote(info.remoteUrl) === clone.normalizedRemote;
+      if (!remoteMatches || (clone.repositoryFingerprint && clone.repositoryFingerprint !== fingerprint)) invalid.push({clone, info, fingerprint});
+      else if (!clone.repositoryFingerprint) adopted.set(clone.path, fingerprint);
+    } catch {
+      invalid.push({clone});
     }
-    clone.historyHeads = currentHistoryHeads;
-    commits += history.length;
-    repositories++;
   }
-  saveConfig(config, {preserveCurrentScalars: true});
-  return {repositories, commits};
+  if (!invalid.length && !adopted.size) return;
+  const invalidPaths = new Set(invalid.map(item => item.clone.path));
+  for (const clonePath of invalidPaths) {
+    const state = indexState.get(clonePath);
+    if (state?.timer) clearTimeout(state.timer);
+    indexState.delete(clonePath);
+    try { uninstallHooks(clonePath); } catch {}
+  }
+  const persisted = updateConfig(current => {
+    current.clones = current.clones
+      .filter(clone => !invalidPaths.has(clone.path))
+      .map(clone => adopted.has(clone.path) ? {...clone, repositoryFingerprint: adopted.get(clone.path)} : clone);
+  });
+  Object.assign(config, persisted);
+  if (invalidPaths.size) mutateQueue(queue => {
+    const retained = queue.filter(event => !event.localKey || !invalidPaths.has(event.localKey));
+    queue.splice(0, queue.length, ...retained);
+  });
+  if (invalid.length) await api(config, '/api/agents/repository-candidates', {method: 'POST', body: JSON.stringify({repositories: invalid.map(({clone, info, fingerprint}) => ({
+    localKey: clone.path,
+    name: info?.name || clone.name,
+    remoteUrl: info?.remoteUrl || clone.normalizedRemote,
+    branch: info?.branch || clone.branch,
+    traced: false,
+    identityFingerprint: fingerprint || null,
+    identityChanged: true,
+  }))})});
+}
+
+export async function publishRepositoryCandidates(config: Config, root?: string) {
+  const discoveryRoots = [...new Set([...(root ? [root] : []), ...config.watchedPaths])];
+  const discovered = discoveryRoots.flatMap(discoveryRoot => {
+    try { return discover(discoveryRoot, {maxRepositories: 500, maxDirectories: 10_000}); } catch { return []; }
+  });
+  const paths = prioritizeCandidatePaths(config.clones.map(clone => clone.path), discovered);
+  const repositories: Array<{localKey: string; name: string; remoteUrl: string; branch?: string; traced: boolean; repositoryId?: number; identityFingerprint?: string | null; identityChanged?: boolean}> = [];
+  for (const repoPath of paths) {
+    try {
+      const info = inspectRepo(fs.realpathSync(repoPath));
+      const clone = config.clones.find(candidate => {
+        try { return fs.realpathSync(candidate.path) === info.path; } catch { return candidate.path === info.path; }
+      });
+      const fingerprint = repositoryFingerprint(info.path);
+      const identityChanged = Boolean(clone?.repositoryFingerprint && clone.repositoryFingerprint !== fingerprint);
+      repositories.push({localKey: info.path, name: info.name, remoteUrl: info.remoteUrl, branch: info.branch, traced: Boolean(clone && !identityChanged), repositoryId: identityChanged ? undefined : clone?.repositoryId, identityFingerprint: fingerprint, identityChanged});
+    } catch {
+      const clone = config.clones.find(candidate => candidate.path === repoPath);
+      if (clone) repositories.push({localKey: path.resolve(clone.path), name: clone.name, remoteUrl: clone.normalizedRemote, branch: clone.branch, traced: false, identityFingerprint: null, identityChanged: true});
+    }
+  }
+  await api(config, '/api/agents/repository-candidates', {method: 'POST', body: JSON.stringify({repositories})});
+  return repositories;
+}
+
+export function verifyRepositorySelection(config: Config, selection: {local_key: string; normalized_remote: string; repository_fingerprint?: string | null}, discoveryRoot?: string) {
+  const target = fs.realpathSync(selection.local_key);
+  const approvedRoots = [...(discoveryRoot ? [discoveryRoot] : []), ...(config.watchedPaths || [])].flatMap(candidate => { try { return [fs.realpathSync(candidate)]; } catch { return []; } });
+  const withinRoot = approvedRoots.some(root => {
+    const relative = path.relative(root, target);
+    return relative === '' || (relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative));
+  });
+  if (!withinRoot) throw new Error('repository is outside the approved discovery root');
+  const current = inspectRepo(target);
+  if (normalizeRemote(current.remoteUrl) !== selection.normalized_remote) throw new Error('repository identity changed after discovery; wait for the next scan');
+  if (selection.repository_fingerprint && repositoryFingerprint(target) !== selection.repository_fingerprint) throw new Error('repository identity changed after discovery; wait for the next scan');
+  return current;
+}
+
+export async function processRepositorySelections(config: Config, indexState?: Map<string, {mtime: number; timer?: NodeJS.Timeout}>) {
+  const selections = await api<any[]>(config, '/api/agents/repository-selections');
+  for (const selection of selections) {
+    try {
+      await api(config, `/api/agents/repository-selections/${selection.id}/claim`, {method: 'POST', body: JSON.stringify({revision: Number(selection.revision), desiredTraced: selection.desired_traced})});
+      if (selection.desired_traced) {
+        const current = verifyRepositorySelection(config, selection);
+        const target = current.path;
+        await traceRepository(config, target);
+        const clone = config.clones.find(candidate => candidate.path === target);
+        if (!clone) throw new Error('repository registration did not persist locally');
+        const persisted = updateConfig(currentConfig => {
+          currentConfig.clones = [...currentConfig.clones.filter(candidate => candidate.path !== target), clone];
+        });
+        Object.assign(config, persisted);
+        const finalIdentity = verifyRepositorySelection(config, selection);
+        const finalFingerprint = repositoryFingerprint(finalIdentity.path);
+        const persistedClone = loadConfig().clones.find(candidate => candidate.path === target);
+        if (!persistedClone?.repositoryFingerprint || persistedClone.repositoryFingerprint !== finalFingerprint) {
+          throw new Error('repository identity changed after activation; wait for the next scan');
+        }
+      } else {
+        const removedClone = config.clones.find(clone => clone.path === selection.local_key);
+        const state = indexState?.get(selection.local_key);
+        if (state?.timer) clearTimeout(state.timer);
+        indexState?.delete(selection.local_key);
+        try { uninstallHooks(selection.local_key); } catch {}
+        const persisted = updateConfig(currentConfig => {
+          currentConfig.clones = currentConfig.clones.filter(clone => clone.path !== selection.local_key);
+        });
+        Object.assign(config, persisted);
+        if (removedClone) mutateQueue(queue => {
+          const retained = queue.filter(event => event.localKey ? event.localKey !== selection.local_key : event.repositoryId !== removedClone.repositoryId);
+          queue.splice(0, queue.length, ...retained);
+        });
+      }
+      await api(config, `/api/agents/repository-selections/${selection.id}/complete`, {method: 'POST', body: JSON.stringify({traced: selection.desired_traced, desiredTraced: selection.desired_traced, revision: Number(selection.revision)})});
+    } catch (error: any) {
+      if (selection.desired_traced && !selection.traced) {
+        try { uninstallHooks(selection.local_key); } catch {}
+        const rolledBack = updateConfig(currentConfig => {
+          currentConfig.clones = currentConfig.clones.filter(clone => clone.path !== selection.local_key);
+          return currentConfig;
+        });
+        Object.assign(config, rolledBack);
+      }
+      try { await api(config, `/api/agents/repository-selections/${selection.id}/complete`, {method: 'POST', body: JSON.stringify({traced: Boolean(selection.traced), desiredTraced: selection.desired_traced, revision: Number(selection.revision), error: String(error.message || error).slice(0, 2000)})}); } catch {}
+    }
+  }
+}
+
+export function confirmPushForClone(
+  clone: Config['clones'][number],
+  push: any,
+  confirm: typeof confirmPush = confirmPush,
+) {
+  if (!clone.repositoryFingerprint || clone.repositoryFingerprint !== push.repository_fingerprint) throw new Error('repository identity changed');
+  const before = repositoryFingerprint(clone.path);
+  if (before !== clone.repositoryFingerprint) throw new Error('repository identity changed');
+  const result = confirm({remoteName: push.remote_name, remoteUrl: push.remote_url, ref: push.ref, expectedSha: push.expected_sha});
+  const after = repositoryFingerprint(clone.path);
+  if (after !== before) throw new Error('repository identity changed');
+  return {...result, identityFingerprint: after};
 }
 
 async function processPushes(config: Config) {
@@ -89,7 +286,10 @@ async function processPushes(config: Config) {
     // pre-push runs before Git contacts the remote. Give the push time to finish
     // rather than permanently marking a successful in-flight push unconfirmed.
     if (Date.now() - Date.parse(push.occurred_at) < confirmationDelayMs) continue;
-    const result = confirmPush({remoteName: push.remote_name, remoteUrl: push.remote_url, ref: push.ref, expectedSha: push.expected_sha});
+    const clone = config.clones.find(item => item.path === push.local_key && item.repositoryId === push.repository_id);
+    if (!clone?.repositoryFingerprint) continue;
+    let result;
+    try { result = confirmPushForClone(clone, push); } catch { await deactivateChangedRepository(config, push.local_key); continue; }
     await api(config, `/api/agents/pushes/${push.id}/complete`, {method: 'POST', body: JSON.stringify(result)});
   }
 }
@@ -192,17 +392,21 @@ export async function tick(config: Config, indexState: Map<string, {mtime: numbe
   await api(config, '/api/agents/heartbeat', {method: 'POST'});
   const jobs = await api<any[]>(config, '/api/agents/jobs');
   if (jobs[0]) await processJob(config, jobs[0]);
+  await reconcileConfiguredCloneIdentities(config, indexState);
+  await processRepositorySelections(config, indexState);
   await flush(config);
   await processPushes(config);
   for (const clone of config.clones) {
     try {
+      const beforeReadFingerprint = repositoryFingerprint(clone.path);
+      if (!clone.repositoryFingerprint || beforeReadFingerprint !== clone.repositoryFingerprint) throw new Error('repository identity changed');
       const current = readRepositoryState(clone.path);
+      const afterReadFingerprint = repositoryFingerprint(clone.path);
+      if (afterReadFingerprint !== beforeReadFingerprint) throw new Error('repository identity changed');
       if (clone.headSha && clone.branch) {
         const observation = observeRepositoryState({branch: clone.branch, headSha: clone.headSha, remoteHeadSha: clone.remoteHeadSha}, current);
         if (observation.event) {
-          const queue = loadQueue();
-          queue.push({eventKey: eventKey(['pull', clone.repositoryId, current.headSha]), repositoryId: clone.repositoryId, type: 'pull', occurredAt: new Date().toISOString(), data: current, attempts: 0, nextAttempt: 0});
-          saveQueue(queue, config);
+          enqueue({eventKey: eventKey(['pull', clone.repositoryId, current.headSha]), repositoryId: clone.repositoryId, localKey: clone.path, identityFingerprint: afterReadFingerprint, type: 'pull', occurredAt: new Date().toISOString(), data: current, attempts: 0, nextAttempt: 0});
         }
       }
       Object.assign(clone, current);
@@ -214,11 +418,16 @@ export async function tick(config: Config, indexState: Map<string, {mtime: numbe
         state.mtime = mtime;
         clearTimeout(state.timer);
         state.timer = setTimeout(() => {
+          if (!config.clones.some(candidate => candidate.path === clone.path)) return;
+          let beforeRead: string;
+          try { beforeRead = repositoryFingerprint(clone.path); } catch { return; }
+          if (!clone.repositoryFingerprint || beforeRead !== clone.repositoryFingerprint) return;
           const data = stagedData(clone.path);
           if (!data.filesChanged) return;
-          const queue = loadQueue();
-          queue.push({eventKey: eventKey(['stage', clone.repositoryId, mtime, data]), repositoryId: clone.repositoryId, type: 'stage', occurredAt: new Date().toISOString(), data, attempts: 0, nextAttempt: 0});
-          saveQueue(queue, config);
+          let identityFingerprint: string;
+          try { identityFingerprint = repositoryFingerprint(clone.path); } catch { return; }
+          if (identityFingerprint !== beforeRead) return;
+          enqueue({eventKey: eventKey(['stage', clone.repositoryId, mtime, data]), repositoryId: clone.repositoryId, localKey: clone.path, identityFingerprint, type: 'stage', occurredAt: new Date().toISOString(), data, attempts: 0, nextAttempt: 0});
         }, 1200);
       }
       indexState.set(clone.path, state);
@@ -246,12 +455,16 @@ export async function runAgent(config: Config, once = false) {
   const stopHeartbeat = once
     ? undefined
     : startHeartbeatLoop(() => api(loadConfig(), '/api/agents/heartbeat', {method: 'POST'}));
+  let lastCandidatePublish = 0;
   try {
     do {
       // Pick up roots/clones written by interactive CLI commands while this
       // long-running process is alive instead of retaining its startup snapshot.
       config = loadConfig();
       try { await tick(config, states); } catch (error) { console.error(new Date().toISOString(), String(error)); }
+      if (Date.now() - lastCandidatePublish >= 5 * 60_000) {
+        try { await publishRepositoryCandidates(config); lastCandidatePublish = Date.now(); } catch (error) { console.error(new Date().toISOString(), `repository discovery: ${String(error)}`); }
+      }
       if (once) return;
       await new Promise(resolve => setTimeout(resolve, config.pollMs));
     } while (true);

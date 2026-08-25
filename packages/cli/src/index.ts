@@ -3,11 +3,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {api} from './api.js';
-import {loadConfig, saveConfig, loadQueue, saveQueue, eventKey} from './config.js';
-import {commitData, git, parsePrePush, removeHooks, stagedData} from './git.js';
-import {flush, registerWatchedRoots, runAgent, syncHistory} from './agent.js';
+import {enqueue, loadConfig, saveConfig, loadQueue, saveQueue, eventKey} from './config.js';
+import {commitData, git, parsePrePush, removeHooks, repositoryFingerprint, stagedData} from './git.js';
+import {flush, runAgent, scanWatchedRoots} from './agent.js';
 import {installStartup, restartStartup, stopStartup} from './install.js';
-import {normalizeServerUrl, previousDeviceTokenForServer} from './pairing.js';
+import {normalizeServerUrl, previousDeviceTokenForServer, rebindDeviceConfig, rebindWorkspaceConfig} from './pairing.js';
 
 const args = process.argv.slice(2);
 const command = args.shift();
@@ -16,21 +16,14 @@ const config = loadConfig();
 
 function bindWorkspace(workspaceId?: number, forceReset = false) {
   const changed = forceReset || config.workspaceId !== workspaceId;
-  if (changed) {
-    config.watchedPaths = [];
-    config.clones = [];
-  }
-  if (workspaceId) config.workspaceId = workspaceId;
-  else delete config.workspaceId;
+  Object.assign(config, rebindWorkspaceConfig(config, workspaceId, forceReset));
   saveConfig(config, {
     replaceRepositoryState: changed,
     beforeRepositoryStateReplace: changed
       ? current => { for (const clone of current.clones) { try { removeHooks(clone.path); } catch {} } }
       : undefined,
   });
-  if (changed) {
-    saveQueue([], config);
-  }
+  if (changed) saveQueue([], config);
 }
 
 async function exchangeInstallToken() {
@@ -41,11 +34,14 @@ async function exchangeInstallToken() {
   const previousAgentToken = previousDeviceTokenForServer(config, server);
   const exchangeConfig = {...config, serverUrl: server, agentToken: previousAgentToken, userToken: undefined};
   const response = await api<any>(exchangeConfig, '/api/agents/install/exchange', {method: 'POST', body: JSON.stringify({installToken, machineName: flag('--machine') || os.hostname()})});
-  config.serverUrl = server;
-  config.agentToken = response.agentToken;
-  config.agentId = response.agentId;
+  const rebound = rebindDeviceConfig(config, server, response);
+  Object.assign(config, rebound);
   delete config.userToken;
-  bindWorkspace(response.workspaceId, true);
+  saveConfig(rebound, {
+    replaceCollections: true,
+    beforeRepositoryStateReplace: current => { for (const clone of current.clones) { try { removeHooks(clone.path); } catch {} } },
+  });
+  saveQueue([], rebound);
   return response;
 }
 
@@ -98,16 +94,8 @@ async function main() {
     if (!args[0]) throw new Error('watch requires a repository root path');
     const root = path.resolve(args[0]);
     if (!config.watchedPaths.includes(root)) config.watchedPaths.push(root);
-    const found = await registerWatchedRoots(config);
-    console.log(`Registered ${found} repository clone(s). Run tracemini sync-history to import existing commits.`);
-    return;
-  }
-  if (command === 'sync-history') {
-    if (!config.workspaceId) throw new Error('install or select a workspace first');
-    const days = Number(flag('--days') || 90);
-    if (!Number.isFinite(days) || days < 1) throw new Error('sync-history --days must be a positive number');
-    const result = await syncHistory(config, days);
-    console.log(`History synchronized: ${result.commits} commit(s) across ${result.repositories} repository clone(s)`);
+    const found = await scanWatchedRoots(config, [root]);
+    console.log(`Scanned watched roots; ${found} repository candidate(s) discovered. Select tracing in TraceMini Settings.`);
     return;
   }
   if (command === 'repositories') { console.table(config.clones); return; }
@@ -121,11 +109,14 @@ async function main() {
     const type = flag('--type') || args[0];
     const clone = config.clones.find(item => item.path === repoPath);
     if (!clone) throw new Error(`repository is not registered: ${repoPath}`);
+    const identityFingerprint = repositoryFingerprint(repoPath);
+    if (!clone.repositoryFingerprint || clone.repositoryFingerprint !== identityFingerprint) throw new Error(`repository identity changed: ${repoPath}`);
     if (type === 'push' && flag('--hook') === 'pre-push') {
       const stdin = fs.readFileSync(0, 'utf8');
       for (const intent of parsePrePush(args.at(-2) || '', args.at(-1) || '', stdin)) {
+        if (repositoryFingerprint(repoPath) !== identityFingerprint) throw new Error(`repository identity changed: ${repoPath}`);
         const occurredAt = new Date().toISOString();
-        await api(config, '/api/pushes/pending', {method: 'POST', body: JSON.stringify({...intent, repositoryId: clone.repositoryId, occurredAt, eventKey: eventKey(['push', clone.repositoryId, intent.ref, intent.expectedSha, occurredAt])})});
+        await api(config, '/api/pushes/pending', {method: 'POST', body: JSON.stringify({...intent, repositoryId: clone.repositoryId, localKey: clone.path, identityFingerprint, occurredAt, eventKey: eventKey(['push', clone.repositoryId, intent.ref, intent.expectedSha, occurredAt])})});
       }
       return;
     }
@@ -135,15 +126,14 @@ async function main() {
     else if (type === 'branch') data = {...data, oldCommit: args.at(-3), newCommit: args.at(-2), branchCheckout: args.at(-1)};
     else if (type === 'merge' || type === 'pull') data = {...data, commitSha: git(repoPath, ['rev-parse', 'HEAD'])};
     else if (type === 'push') data = {...data, confirmation: 'unconfirmed', reason: 'explicit event has no remote verification target'};
+    if (repositoryFingerprint(repoPath) !== identityFingerprint) throw new Error(`repository identity changed: ${repoPath}`);
     const occurredAt = new Date().toISOString();
-    const queue = loadQueue();
-    queue.push({eventKey: eventKey([type, clone.repositoryId, data.commitSha || '', data.oldCommit || '', data.newCommit || '', occurredAt.slice(0, 16), data]), repositoryId: clone.repositoryId, type, occurredAt, data, attempts: 0, nextAttempt: 0});
-    saveQueue(queue, config);
+    enqueue({eventKey: eventKey([type, clone.repositoryId, data.commitSha || '', data.oldCommit || '', data.newCommit || '', occurredAt.slice(0, 16), data]), repositoryId: clone.repositoryId, localKey: clone.path, identityFingerprint, type, occurredAt, data, attempts: 0, nextAttempt: 0});
     await flush(config);
     return;
   }
   if (command === 'start' || command === 'once') { await runAgent(config, command === 'once'); return; }
-  console.log('Usage: tracemini sync --server URL --install-token TOKEN | watch PATH | sync-history [--days 90] | repositories | status | event --repo PATH --type TYPE | start | once');
+  console.log('Usage: tracemini sync --server URL --install-token TOKEN | watch PATH | repositories | status | event --repo PATH --type TYPE | start | once');
 }
 
 main().catch(error => {

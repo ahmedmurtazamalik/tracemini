@@ -23,6 +23,7 @@ describe('route-specific workspace loading', () => {
     expect(workspaceLoadPlan('/workspaces/8/settings', 8, dates)).toEqual([
       {key: 'members', path: '/workspaces/8/members'},
       {key: 'repositories', path: '/workspaces/8/repositories?includeArchived=true'},
+      {key: 'repositoryCandidates', path: '/workspaces/8/repository-candidates'},
       {key: 'agents', path: '/workspaces/8/agents'},
     ]);
   });

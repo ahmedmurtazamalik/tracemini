@@ -1,6 +1,6 @@
 import {getRouteContext, getRouteView} from './routes.js';
 
-export type WorkspaceLoadKey = 'events' | 'repositories' | 'members' | 'reports' | 'agents' | 'stats' | 'report';
+export type WorkspaceLoadKey = 'events' | 'repositories' | 'repositoryCandidates' | 'members' | 'reports' | 'agents' | 'stats' | 'report';
 export type WorkspaceLoadItem = {key: WorkspaceLoadKey; path: string};
 
 export function workspaceLoadPlan(
@@ -16,6 +16,7 @@ export function workspaceLoadPlan(
   if (view === 'settings') return [
     {key: 'members', path: `${base}/members`},
     {key: 'repositories', path: `${base}/repositories?includeArchived=true`},
+    {key: 'repositoryCandidates', path: `${base}/repository-candidates`},
     {key: 'agents', path: `${base}/agents`},
   ];
   if (view === 'reports') return [{key: 'reports', path: `${base}/reports`}];
