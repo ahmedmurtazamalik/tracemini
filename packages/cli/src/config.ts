@@ -6,7 +6,7 @@ export type Queued={eventKey:string;workspaceId?:number;repositoryId:number;loca
 export const stateDir=()=>process.env.TRACEMINI_HOME||path.join(os.homedir(),'.tracemini');
 const file=(n:string)=>path.join(stateDir(),n);const defaults=():Config=>({serverUrl:'http://localhost:3000',watchedPaths:[],watchedRoots:[],clones:[],reporter:'codex',pollMs:60000});
 function readStored():Partial<Config>{try{return JSON.parse(fs.readFileSync(file('config.json'),'utf8'))}catch{return {}}}
-function hydrate(stored:Partial<Config>):Config{const watchedPaths=stored.watchedPaths||[];const watchedRoots=stored.watchedRoots||(stored.workspaceId?watchedPaths.map(root=>({path:root,workspaceId:stored.workspaceId!})):[]);return {...defaults(),...stored,watchedPaths,watchedRoots,clones:(stored.clones||[]).map(clone=>({...clone,workspaceId:clone.workspaceId??stored.workspaceId}))}}
+function hydrate(stored:Partial<Config>):Config{const watchedPaths=[...new Set([...(stored.watchedPaths||[]),...(stored.watchedRoots||[]).map(root=>root.path)].map(root=>path.resolve(root)))];return {...defaults(),...stored,watchedPaths,watchedRoots:[],clones:(stored.clones||[]).map(clone=>({...clone,workspaceId:clone.workspaceId??stored.workspaceId}))}}
 function sameBinding(a:Partial<Config>,b:Partial<Config>){return a.serverUrl===b.serverUrl&&a.agentId===b.agentId&&a.agentToken===b.agentToken}
 export function isCurrentBinding(c:Config){const current=readStored();return sameBinding(c,current)}
 export function loadConfig():Config{fs.mkdirSync(stateDir(),{recursive:true,mode:0o700});return hydrate(readStored())}
@@ -87,9 +87,8 @@ export function saveConfig(c:Config, options:{preserveCurrentScalars?:boolean;re
     }
   }else for(const source of sources)for(const clone of source.clones||[])clones.set(cloneKey(clone),clone);
   const scalarConfig=options.preserveCurrentScalars?{...defaults(),...current}:c;
-  const watchedRoots=new Map<string,WatchedRoot>();
-  for(const source of sources)for(const root of hydrate(source).watchedRoots||[])watchedRoots.set(`${root.workspaceId}\0${root.path}`,root);
-  const merged={...scalarConfig,watchedPaths:[...new Set(sources.flatMap(source=>source.watchedPaths||[]))],watchedRoots:[...watchedRoots.values()],clones:[...clones.values()]};
+  const watchedPaths=[...new Set(sources.flatMap(source=>[...(source.watchedPaths||[]),...(source.watchedRoots||[]).map(root=>root.path)]).map(root=>path.resolve(root)))];
+  const merged={...scalarConfig,watchedPaths,watchedRoots:[],clones:[...clones.values()]};
   writeConfig(merged);
   });
 }

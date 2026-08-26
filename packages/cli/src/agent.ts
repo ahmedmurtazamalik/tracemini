@@ -84,10 +84,9 @@ export function reconcileAuthorizedWorkspaces(config: Config, workspaceIds: numb
   let changed = false;
   const matched = mutateCurrentBinding(config, current => {
     const removed = current.clones.filter(clone => clone.workspaceId != null && !authorized.has(clone.workspaceId));
-    const unauthorizedRoot = (current.watchedRoots || []).some(root => !authorized.has(root.workspaceId));
     const unauthorizedQueue = loadQueue().some(event => event.workspaceId == null || !authorized.has(event.workspaceId));
     const unauthorizedPreferred = current.workspaceId != null && !authorized.has(current.workspaceId);
-    if (!removed.length && !unauthorizedRoot && !unauthorizedQueue && !unauthorizedPreferred) return false;
+    if (!removed.length && !unauthorizedQueue && !unauthorizedPreferred) return false;
     const retainedClones = current.clones.filter(clone => clone.workspaceId == null || authorized.has(clone.workspaceId));
     const retainedPaths = new Set(retainedClones.map(clone => clone.path));
     const paths = new Set(removed.map(clone => clone.path).filter(clonePath => !retainedPaths.has(clonePath)));
@@ -98,8 +97,6 @@ export function reconcileAuthorizedWorkspaces(config: Config, workspaceIds: numb
       try { uninstallHooks(repoPath); } catch {}
     }
     current.clones = retainedClones;
-    current.watchedRoots = (current.watchedRoots || []).filter(root => authorized.has(root.workspaceId));
-    current.watchedPaths = [...new Set((current.watchedRoots || []).map(root => root.path))];
     if (current.workspaceId && !authorized.has(current.workspaceId)) current.workspaceId = workspaceIds[0];
     removedCount = removed.length;
     changed = true;
@@ -112,9 +109,8 @@ export function reconcileAuthorizedWorkspaces(config: Config, workspaceIds: numb
   return removedCount;
 }
 
-export function watchedPathsForWorkspace(config: Config, workspaceId = config.workspaceId) {
-  if (!workspaceId || !config.watchedRoots?.length) return config.watchedPaths || [];
-  return config.watchedRoots.filter(root => root.workspaceId === workspaceId).map(root => root.path);
+export function watchedPathsForWorkspace(config: Config, _workspaceId = config.workspaceId) {
+  return config.watchedPaths || [];
 }
 
 export async function traceRepository(config: Config, repoPath: string, workspaceId = config.workspaceId) {
@@ -167,11 +163,7 @@ export async function scanWatchedRoots(config: Config, roots = config.watchedPat
   const found = new Set(watchedRoots.flatMap(root => { try { return discover(root); } catch { return []; } }));
   const persisted = mutateCurrentBinding(config, current => {
     current.watchedPaths = [...new Set([...current.watchedPaths, ...config.watchedPaths, ...watchedRoots])];
-    if (config.workspaceId) {
-      const scoped = new Map((current.watchedRoots || []).map(root => [`${root.workspaceId}\0${root.path}`, root]));
-      for (const root of watchedRoots) scoped.set(`${config.workspaceId}\0${root}`, {path: root, workspaceId: config.workspaceId});
-      current.watchedRoots = [...scoped.values()];
-    }
+    current.watchedRoots = [];
   });
   if (!persisted) return 0;
   await publishRepositoryCandidates(config);

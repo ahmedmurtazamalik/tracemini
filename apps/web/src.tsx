@@ -444,9 +444,12 @@ function Install({ workspaceId, agents, userId, onAgentsChecked }: { workspaceId
             <Copy label="Find the command" command="command -v tracemini" />
             <Copy label="Check device status" command="tracemini status" />
             <Copy
-              label="Register repository folders"
+              label="Register an absolute repository folder (repeat for multiple paths)"
               command={'tracemini watch "$HOME/path-to-repositories"'}
             />
+            <p className="muted">
+              You can run <code>tracemini watch</code> multiple times. Watch paths are absolute, device-wide, and available when scanning any workspace.
+            </p>
             <Copy
               label="Import existing Git history when convenient"
               command="tracemini sync-history --days 90"

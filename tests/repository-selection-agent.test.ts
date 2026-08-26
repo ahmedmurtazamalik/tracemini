@@ -45,11 +45,11 @@ describe('device repository selection', () => {
     reconcileAuthorizedWorkspaces(config, [2], new Map());
 
     expect(loadConfig().clones).toEqual([expect.objectContaining({workspaceId: 2, repositoryId: 8})]);
-    expect(loadConfig()).toMatchObject({workspaceId: 2, watchedPaths: ['/root/two'], watchedRoots: [{path: '/root/two', workspaceId: 2}]});
+    expect(loadConfig()).toMatchObject({workspaceId: 2, watchedPaths: ['/root/one', '/root/two'], watchedRoots: []});
     expect(loadQueue()).toEqual([expect.objectContaining({workspaceId: 2, repositoryId: 8})]);
   });
 
-  it('removes departed workspace roots and queued events even without a traced clone', () => {
+  it('keeps device watch paths while removing departed workspace events', () => {
     temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'tracemini-membership-root-cleanup-'));
     process.env.TRACEMINI_HOME = temporary;
     const config: Config = {serverUrl: 'https://trace.example', agentToken: 'device-token', agentId: 1, workspaceId: 1, watchedPaths: ['/departed'], watchedRoots: [{path: '/departed', workspaceId: 1}], clones: [], reporter: 'hermes', pollMs: 2000};
@@ -58,11 +58,11 @@ describe('device repository selection', () => {
 
     expect(reconcileAuthorizedWorkspaces(config, [2], new Map())).toBe(0);
 
-    expect(loadConfig()).toMatchObject({workspaceId: 2, watchedPaths: [], watchedRoots: [], clones: []});
+    expect(loadConfig()).toMatchObject({workspaceId: 2, watchedPaths: ['/departed'], watchedRoots: [], clones: []});
     expect(loadQueue()).toEqual([]);
   });
 
-  it('publishes only roots and clones scoped to the selected workspace', async () => {
+  it('publishes every device root but only clones scoped to the selected workspace', async () => {
     temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'tracemini-workspace-candidates-'));
     process.env.TRACEMINI_HOME = path.join(temporary, 'state');
     const projects = path.join(temporary, 'projects');
@@ -84,7 +84,7 @@ describe('device repository selection', () => {
     await publishRepositoryCandidates(loadConfig());
 
     expect(published.workspaceId).toBe(2);
-    expect(published.repositories.map((candidate: any) => candidate.localKey)).toEqual([two]);
+    expect(published.repositories.map((candidate: any) => candidate.localKey)).toEqual(expect.arrayContaining([one, two]));
   });
 
   it('reserves the bounded candidate list for configured clones before discoveries', () => {
@@ -219,7 +219,7 @@ describe('device repository selection', () => {
     release();
     await running;
 
-    expect(loadConfig()).toMatchObject({agentId: 2, agentToken: 'new-token', workspaceId: 2, watchedRoots: [{path: root, workspaceId: 2}], clones: [expect.objectContaining({path: repo, workspaceId: 2, repositoryId: 8})]});
+    expect(loadConfig()).toMatchObject({agentId: 2, agentToken: 'new-token', workspaceId: 2, watchedPaths: [root], watchedRoots: [], clones: [expect.objectContaining({path: repo, workspaceId: 2, repositoryId: 8})]});
     expect(loadQueue()).toEqual([expect.objectContaining({eventKey: 'new-binding', workspaceId: 2})]);
     expect(fs.readFileSync(path.join(repo, '.git', 'hooks', 'post-commit'), 'utf8')).toContain('TraceMini managed hook');
   });
