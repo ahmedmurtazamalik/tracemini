@@ -1286,6 +1286,7 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error, timezon
   const [pending, setPending] = useState(false);
   const [job, setJob] = useState<ReportJob>();
   const [includeDiff, setIncludeDiff] = useState(false);
+  const [notifySlack, setNotifySlack] = useState(false);
   const [actionError, setActionError] = useState("");
   const [message, setMessage] = useState("");
   const [refreshPending, setRefreshPending] = useState(false);
@@ -1402,6 +1403,7 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error, timezon
                     name,
                     timezone,
                     includeDiff,
+                    notifySlack,
                   }),
                 });
                 if (!active()) return;
@@ -1426,9 +1428,13 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error, timezon
         <label className="diff-consent">
           <input type="checkbox" checked={includeDiff} onChange={(event) => setIncludeDiff(event.target.checked)} />
           <span>
-            <strong>Analyze code changes in detail</strong>
-            <small>Includes bounded Git diff excerpts so the report can explain exact features and behavior. Selected source excerpts are sent to the configured AI generator.</small>
+            <strong>Analyze code changes</strong>
+            <small>Add bounded diff excerpts for better detail.</small>
           </span>
+        </label>
+        <label className="diff-consent">
+          <input type="checkbox" checked={notifySlack} onChange={(event) => setNotifySlack(event.target.checked)} />
+          <span><strong>Notify Slack</strong><small>Post a report link when it is ready.</small></span>
         </label>
         {message && <div className="alert success" role="status">{message}</div>}
         {actionError && <div className="alert error" role="alert">{actionError}</div>}

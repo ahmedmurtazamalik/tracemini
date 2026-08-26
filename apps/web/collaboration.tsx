@@ -113,6 +113,7 @@ export function ReportSchedule({api, workspaceId, timezone}: {api: Api; workspac
   const [reporter, setReporter] = useState('hermes');
   const [format, setFormat] = useState('summary');
   const [includeDiff, setIncludeDiff] = useState(false);
+  const [notifySlack, setNotifySlack] = useState(false);
   const [windowDays, setWindowDays] = useState(7);
   const [nextRun, setNextRun] = useState<string>();
   const [pending, setPending] = useState(false);
@@ -126,7 +127,7 @@ export function ReportSchedule({api, workspaceId, timezone}: {api: Api; workspac
     setError(''); setMessage(''); setLoading(true); setNextRun(undefined);
     api(`/workspaces/${workspaceId}/report-schedule`).then((schedule: any) => {
       if (!alive.current || generation !== loadGeneration.current || !schedule) return;
-      setEnabled(Boolean(schedule.enabled)); setFrequency(schedule.frequency); setSelectedDays(schedule.selected_days || []); setLocalTime(schedule.local_time); setZone(schedule.timezone); setReporter(schedule.reporter); setFormat(schedule.format); setIncludeDiff(Boolean(schedule.include_diff)); setWindowDays(Number(schedule.window_days)); setNextRun(schedule.next_run_at);
+      setEnabled(Boolean(schedule.enabled)); setFrequency(schedule.frequency); setSelectedDays(schedule.selected_days || []); setLocalTime(schedule.local_time); setZone(schedule.timezone); setReporter(schedule.reporter); setFormat(schedule.format); setIncludeDiff(Boolean(schedule.include_diff)); setNotifySlack(Boolean(schedule.notify_slack)); setWindowDays(Number(schedule.window_days)); setNextRun(schedule.next_run_at);
     }).catch((caught: any) => { if (alive.current && generation === loadGeneration.current) setError(caught.message); })
       .finally(() => { if (alive.current && generation === loadGeneration.current) setLoading(false); });
     return () => { loadGeneration.current += 1; };
@@ -136,7 +137,7 @@ export function ReportSchedule({api, workspaceId, timezone}: {api: Api; workspac
     const generation = loadGeneration.current;
     event.preventDefault(); setPending(true); setError(''); setMessage('');
     try {
-      const schedule = await api(`/workspaces/${workspaceId}/report-schedule`, {method: 'PUT', body: JSON.stringify({enabled, frequency, selectedDays, localTime, timezone: zone, reporter, format, includeDiff, windowDays})});
+      const schedule = await api(`/workspaces/${workspaceId}/report-schedule`, {method: 'PUT', body: JSON.stringify({enabled, frequency, selectedDays, localTime, timezone: zone, reporter, format, includeDiff, notifySlack, windowDays})});
       if (!alive.current || generation !== loadGeneration.current) return; setNextRun(schedule.next_run_at); setMessage(enabled ? 'Schedule saved.' : 'Schedule paused.');
     } catch (caught: any) { if (alive.current && generation === loadGeneration.current) setError(caught.message); }
     finally { if (alive.current && generation === loadGeneration.current) setPending(false); }
@@ -153,7 +154,8 @@ export function ReportSchedule({api, workspaceId, timezone}: {api: Api; workspac
       <label>Evidence window<select value={windowDays} onChange={event => setWindowDays(Number(event.target.value))}><option value={1}>Previous day</option><option value={7}>Previous 7 days</option><option value={14}>Previous 14 days</option><option value={30}>Previous 30 days</option></select></label>
       <label>Generator<select value={reporter} onChange={event => setReporter(event.target.value)}><option value="hermes">Hermes</option><option value="codex">Codex</option></select></label>
       <label>Writing style<select value={format} onChange={event => setFormat(event.target.value)}><option value="summary">Bullet-point summary</option><option value="detailed">Detailed report</option></select></label>
-      <label className="diff-consent"><input type="checkbox" checked={includeDiff} onChange={event => setIncludeDiff(event.target.checked)} /><span><strong>Share bounded source-code diff excerpts with the selected AI generator</strong><small>Off by default. When enabled, redacted excerpts are provided to the selected generator on your connected device for implementation-level evidence.</small></span></label>
+      <label className="diff-consent"><input type="checkbox" checked={includeDiff} onChange={event => setIncludeDiff(event.target.checked)} /><span><strong>Share bounded diff excerpts</strong><small>Add redacted code excerpts for better detail.</small></span></label>
+      <label className="diff-consent"><input type="checkbox" checked={notifySlack} onChange={event => setNotifySlack(event.target.checked)} /><span><strong>Notify Slack</strong><small>Post a report link when it is ready.</small></span></label>
       <button className="button primary" disabled={pending || (frequency === 'SELECTED_DAYS' && !selectedDays.length)} type="submit">{pending ? 'Saving…' : 'Save schedule'}</button>
     </form>}
     {nextLabel && enabled && <div className="alert progress" role="status">Next report: {nextLabel} ({zone})</div>}

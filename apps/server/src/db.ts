@@ -238,6 +238,11 @@ CREATE UNIQUE INDEX report_jobs_schedule_occurrence_idx ON report_jobs(schedule_
 CREATE INDEX report_schedules_due_idx ON report_schedules(configured_by,enabled,next_run_at);
 `;
 
+const slackReportNotificationMigrationSql = `
+ALTER TABLE report_schedules ADD COLUMN IF NOT EXISTS notify_slack BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE report_jobs ADD COLUMN IF NOT EXISTS notify_slack BOOLEAN NOT NULL DEFAULT FALSE;
+`;
+
 export function normalizePostgresConnectionString(connectionString: string) {
   const url = new URL(connectionString);
   const isSupabasePooler = url.hostname === 'pooler.supabase.com' || url.hostname.endsWith('.pooler.supabase.com');
@@ -356,6 +361,7 @@ export class DB {
         {version: 17, name: 'recipient invitation inbox and Developer role', sql: compatibilityMigrations ? invitationInboxMigrationSql : freshInvitationInboxMigrationSql},
         {version: 18, name: 'report presentation format and scope', sql: reportFormatMigrationSql},
         {version: 19, name: 'workspace report schedules', sql: reportScheduleMigrationSql},
+        {version: 20, name: 'optional Slack report notifications', sql: slackReportNotificationMigrationSql},
       ];
       for (const migration of migrations) {
         const checksum = crypto.createHash('sha256').update(migration.sql).digest('hex');

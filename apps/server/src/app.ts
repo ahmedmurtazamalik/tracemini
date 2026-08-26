@@ -8,6 +8,7 @@ import type {DB} from './db.js';
 import {linuxInstallCommand, linuxInstaller, linuxSyncCommand} from './linux-installer.js';
 import {dateKeyInTimezone, dateRangeUtc, normalizeTimezone} from './timezone.js';
 import {materializeDueReportSchedules, nextScheduledRun, normalizeReportFormat, validateScheduleRule} from './report-schedule.js';
+import {sendSlackReport} from './slack.js';
 
 const now = () => new Date().toISOString();
 const expired = (value: string | Date) => new Date(value).getTime() <= Date.now();
@@ -63,7 +64,7 @@ export function requestOrigin(req: Request, hosted = Boolean(process.env.VERCEL)
   return `${hosted ? 'https' : req.protocol}://${req.get('host')}`;
 }
 
-export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
+export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slackNotifier = sendSlackReport) {
   const app = express();
   app.set('trust proxy', 1);
   app.use(express.json({limit: '512kb'}));
@@ -791,9 +792,9 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
     const outcome: any = await db.transaction(async () => {
       await db.prepare('SELECT id FROM workspaces WHERE id=? FOR UPDATE').get(req.params.id);
       if (!(await hasLockedManagerAuthority(+req.params.id, req.user.id))) return undefined;
-      return await db.prepare(`INSERT INTO report_schedules(workspace_id,configured_by,enabled,frequency,selected_days,local_time,timezone,reporter,format,include_diff,window_days,next_run_at,created_at,updated_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(workspace_id) DO UPDATE SET configured_by=EXCLUDED.configured_by,enabled=EXCLUDED.enabled,frequency=EXCLUDED.frequency,selected_days=EXCLUDED.selected_days,local_time=EXCLUDED.local_time,timezone=EXCLUDED.timezone,reporter=EXCLUDED.reporter,format=EXCLUDED.format,include_diff=EXCLUDED.include_diff,window_days=EXCLUDED.window_days,next_run_at=EXCLUDED.next_run_at,updated_at=EXCLUDED.updated_at RETURNING *`)
-        .get(req.params.id, req.user.id, enabled, rule.frequency, JSON.stringify(rule.selectedDays), rule.localTime, rule.timezone, req.body.reporter, normalizeReportFormat(req.body.format), req.body.includeDiff === true, windowDays, nextRunAt, configuredAt.toISOString(), configuredAt.toISOString());
+      return await db.prepare(`INSERT INTO report_schedules(workspace_id,configured_by,enabled,frequency,selected_days,local_time,timezone,reporter,format,include_diff,notify_slack,window_days,next_run_at,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(workspace_id) DO UPDATE SET configured_by=EXCLUDED.configured_by,enabled=EXCLUDED.enabled,frequency=EXCLUDED.frequency,selected_days=EXCLUDED.selected_days,local_time=EXCLUDED.local_time,timezone=EXCLUDED.timezone,reporter=EXCLUDED.reporter,format=EXCLUDED.format,include_diff=EXCLUDED.include_diff,notify_slack=EXCLUDED.notify_slack,window_days=EXCLUDED.window_days,next_run_at=EXCLUDED.next_run_at,updated_at=EXCLUDED.updated_at RETURNING *`)
+        .get(req.params.id, req.user.id, enabled, rule.frequency, JSON.stringify(rule.selectedDays), rule.localTime, rule.timezone, req.body.reporter, normalizeReportFormat(req.body.format), req.body.includeDiff === true, req.body.notifySlack === true, windowDays, nextRunAt, configuredAt.toISOString(), configuredAt.toISOString());
     });
     if (!outcome) return res.status(403).json({error: 'Manager required'});
     res.json({...outcome, selected_days: eventData(outcome.selected_days)});
@@ -823,7 +824,7 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
       if (active) return {job: active, created: false};
       const timezone = normalizeTimezone(req.body.timezone);
       const includeDiff = req.body.includeDiff === true;
-      const result = await db.prepare("INSERT INTO report_jobs(workspace_id,user_id,reporter,start_date,end_date,timezone,include_diff,status,report_name,format,report_scope,created_at) VALUES(?,?,?,?,?,?,?,'pending',?,?,'personal',?) RETURNING id").run(workspaceId, req.user.id, req.body.reporter, req.body.startDate, req.body.endDate, timezone, includeDiff, reportName, normalizeReportFormat(req.body.format), now());
+      const result = await db.prepare("INSERT INTO report_jobs(workspace_id,user_id,reporter,start_date,end_date,timezone,include_diff,notify_slack,status,report_name,format,report_scope,created_at) VALUES(?,?,?,?,?,?,?,?,'pending',?,?,'personal',?) RETURNING id").run(workspaceId, req.user.id, req.body.reporter, req.body.startDate, req.body.endDate, timezone, includeDiff, req.body.notifySlack === true, reportName, normalizeReportFormat(req.body.format), now());
       return {job: {id: Number(result.lastInsertRowid), status: 'pending'}, created: true};
     });
     if (!outcome) return res.status(403).json({error: 'forbidden'});
@@ -895,17 +896,23 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
   app.post('/api/agents/jobs/:id/complete', agentAuth, required(['markdown']), async (req: Authed, res) => {
     const completed = await db.transaction(async () => {
       const job: any = await db.prepare("SELECT j.* FROM report_jobs j JOIN workspace_members wm ON wm.workspace_id=j.workspace_id AND wm.user_id=? WHERE j.id=? AND j.user_id=? AND j.status='running' AND j.agent_id=? AND (j.report_scope<>'workspace' OR wm.role='Manager') FOR UPDATE").get(req.agent.user_id, req.params.id, req.agent.user_id, req.agent.id);
-      if (!job) return false;
+      if (!job) return undefined;
+      let reportId = job.target_report_id;
       if (job.target_report_id) {
         const updated = await db.prepare('UPDATE reports SET job_id=?,markdown=?,format=?,report_scope=?,created_at=? WHERE id=? AND workspace_id=? AND user_id=?').run(job.id, req.body.markdown, job.format, job.report_scope, now(), job.target_report_id, job.workspace_id, job.user_id);
-        if (updated.changes !== 1) return false;
+        if (updated.changes !== 1) return undefined;
       } else {
-        await db.prepare('INSERT INTO reports(job_id,workspace_id,user_id,start_date,end_date,timezone,include_diff,name,format,report_scope,schedule_id,scheduled_for,coalesced_runs,markdown,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(job.id, job.workspace_id, job.user_id, job.start_date, job.end_date, job.timezone, job.include_diff, job.report_name || defaultReportName(job.start_date, job.end_date), job.format, job.report_scope, job.schedule_id, job.scheduled_for, job.coalesced_runs, req.body.markdown, now());
+        const inserted = await db.prepare('INSERT INTO reports(job_id,workspace_id,user_id,start_date,end_date,timezone,include_diff,name,format,report_scope,schedule_id,scheduled_for,coalesced_runs,markdown,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id').run(job.id, job.workspace_id, job.user_id, job.start_date, job.end_date, job.timezone, job.include_diff, job.report_name || defaultReportName(job.start_date, job.end_date), job.format, job.report_scope, job.schedule_id, job.scheduled_for, job.coalesced_runs, req.body.markdown, now());
+        reportId = inserted.lastInsertRowid;
       }
       await db.prepare("UPDATE report_jobs SET status='completed',completed_at=? WHERE id=?").run(now(), job.id);
-      return true;
+      return {id: Number(reportId), workspaceId: Number(job.workspace_id), name: job.report_name || defaultReportName(job.start_date, job.end_date), startDate: isoDate(job.start_date), endDate: isoDate(job.end_date), scope: job.report_scope, notifySlack: Boolean(job.notify_slack)};
     });
     if (!completed) return res.status(409).json({error: 'job not claimed'});
+    if (completed.notifySlack && process.env.SLACK_WEBHOOK_URL) {
+      try { await slackNotifier(process.env.SLACK_WEBHOOK_URL, completed, requestOrigin(req)); }
+      catch (error) { console.error('Slack report notification failed:', error); }
+    }
     res.status(201).json({ok: true});
   });
   app.post('/api/agents/jobs/:id/fail', agentAuth, required(['error']), async (req: Authed, res) => { const result = await db.prepare("UPDATE report_jobs SET status='failed',error=?,completed_at=? WHERE id=? AND user_id=? AND agent_id=? AND status='running' AND workspace_id IN (SELECT workspace_id FROM workspace_members WHERE user_id=?) AND (report_scope<>'workspace' OR workspace_id IN (SELECT workspace_id FROM workspace_members WHERE user_id=? AND role='Manager'))").run(req.body.error, now(), req.params.id, req.agent.user_id, req.agent.id, req.agent.user_id, req.agent.user_id); res.status(result.changes ? 200 : 409).json({ok: Boolean(result.changes)}); });
