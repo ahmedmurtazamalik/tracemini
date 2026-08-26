@@ -97,12 +97,19 @@ describe('workspace report schedules', () => {
     const manager = await register(app, 'scheduler');
     const workspaceId = manager.workspaceId;
 
+    const rule = {enabled: true, frequency: 'DAILY', selectedDays: [], localTime: '00:00', timezone: 'UTC', reporter: 'hermes', format: 'summary', includeDiff: false, notifySlack: true, windowDays: 7};
     const schedule = (await request(app)
       .put(`/api/workspaces/${workspaceId}/report-schedule`)
       .set(auth(manager.token))
-      .send({enabled: true, frequency: 'DAILY', selectedDays: [], localTime: '00:00', timezone: 'UTC', reporter: 'hermes', format: 'summary', includeDiff: false, notifySlack: true, windowDays: 7})
+      .send({...rule, name: 'Daily delivery'})
       .expect(200)).body;
-    expect(schedule).toMatchObject({workspace_id: workspaceId, format: 'summary', frequency: 'DAILY', local_time: '00:00', notify_slack: true});
+    expect(schedule).toMatchObject({workspace_id: workspaceId, name: 'Daily delivery', format: 'summary', frequency: 'DAILY', local_time: '00:00', notify_slack: true});
+    const renamedSchedule = (await request(app)
+      .put(`/api/workspaces/${workspaceId}/report-schedule`)
+      .set(auth(manager.token))
+      .send({...rule, name: 'Leadership delivery brief'})
+      .expect(200)).body;
+    expect(renamedSchedule).toMatchObject({id: schedule.id, name: 'Leadership delivery brief'});
 
     const agent = (await request(app).post('/api/agents/register').set(auth(manager.token)).send({machineName: 'manager-box'}).expect(201)).body;
     const firstMissedDate = new Date(Date.now() - 3 * 86_400_000).toISOString().slice(0, 10);
@@ -114,7 +121,7 @@ describe('workspace report schedules', () => {
     await request(app).post(`/api/agents/jobs/${firstList[0].id}/claim`).set(auth(agent.token)).expect(200);
     const jobs = await db.prepare('SELECT * FROM report_jobs WHERE schedule_id=? ORDER BY id').all(schedule.id);
     expect(jobs).toHaveLength(1);
-    expect(jobs[0]).toMatchObject({format: 'summary', report_scope: 'workspace', status: 'running', notify_slack: true, coalesced_runs: 3});
+    expect(jobs[0]).toMatchObject({report_name: expect.stringContaining('Leadership delivery brief'), format: 'summary', report_scope: 'workspace', status: 'running', notify_slack: true, coalesced_runs: 3});
     expect(jobs[0].end_date.toISOString().slice(0, 10)).toBe(new Date(Date.now() - 86_400_000).toISOString().slice(0, 10));
     expect(firstList[0].id).toBe(jobs[0].id);
 

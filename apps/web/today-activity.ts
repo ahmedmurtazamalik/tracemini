@@ -4,11 +4,19 @@ type ActivityUser = {name: string; totals: {commit: number; push: number; pull: 
 export function activityGraphPath(points: ActivityPoint[], width: number, height: number, maximum: number) {
   if (!points.length) return '';
   const safeMaximum = Math.max(1, maximum);
-  return points.map((point, index) => {
-    const x = points.length === 1 ? 0 : index * width / (points.length - 1);
-    const y = height - point.total / safeMaximum * height;
-    return `${index ? 'L' : 'M'}${Number(x.toFixed(2))} ${Number(y.toFixed(2))}`;
-  }).join(' ');
+  const coordinates = points.map((point, index) => ({
+    x: points.length === 1 ? 0 : index * width / (points.length - 1),
+    y: height - point.total / safeMaximum * height,
+  }));
+  const number = (value: number) => Number(value.toFixed(2));
+  let path = `M${number(coordinates[0].x)} ${number(coordinates[0].y)}`;
+  for (let index = 1; index < coordinates.length; index++) {
+    const previous = coordinates[index - 1];
+    const current = coordinates[index];
+    const third = (current.x - previous.x) / 3;
+    path += ` C${number(previous.x + third)} ${number(previous.y)} ${number(current.x - third)} ${number(current.y)} ${number(current.x)} ${number(current.y)}`;
+  }
+  return path;
 }
 
 export function activityGraphTicks(maximum: number, tickCount = 4) {
@@ -23,6 +31,6 @@ export function activityGraphTicks(maximum: number, tickCount = 4) {
 }
 
 export function activityUserSummary(user: ActivityUser) {
-  const count = (value: number, singular: string) => `${value} ${singular}${value === 1 ? '' : 's'}`;
-  return `${user.name}: ${count(user.totals.commit, 'commit')}, ${count(user.totals.push, 'push')}, ${count(user.totals.pull, 'pull')}, ${count(user.totals.stage, 'stage')}`;
+  const count = (value: number, singular: string, plural = `${singular}s`) => `${value} ${value === 1 ? singular : plural}`;
+  return `${user.name}: ${count(user.totals.commit, 'commit')}, ${count(user.totals.push, 'push', 'pushes')}, ${count(user.totals.pull, 'pull')}, ${count(user.totals.stage, 'stage')}`;
 }

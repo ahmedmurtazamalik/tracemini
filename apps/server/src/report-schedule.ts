@@ -147,7 +147,7 @@ export async function materializeDueReportSchedules(db: DB, userId: number, at =
       const endDate = subtractDays(localDateKey(scheduledFor, schedule.timezone), 1);
       const startDate = subtractDays(endDate, Number(schedule.window_days) - 1);
       const result = await db.prepare("INSERT INTO report_jobs(workspace_id,user_id,reporter,start_date,end_date,timezone,include_diff,notify_slack,status,report_name,format,report_scope,schedule_id,scheduled_for,coalesced_runs,created_at) VALUES(?,?,?,?,?,?,?,?,'pending',? ,?,'workspace',?,?,?,?) ON CONFLICT (schedule_id,scheduled_for) DO NOTHING RETURNING id")
-        .run(schedule.workspace_id, schedule.configured_by, schedule.reporter, startDate, endDate, schedule.timezone, schedule.include_diff, schedule.notify_slack, `Scheduled workspace report · ${startDate} — ${endDate}`, schedule.format, schedule.id, scheduledFor.toISOString(), coalescedRuns, at.toISOString());
+        .run(schedule.workspace_id, schedule.configured_by, schedule.reporter, startDate, endDate, schedule.timezone, schedule.include_diff, schedule.notify_slack, `${schedule.name || 'Scheduled workspace report'} · ${startDate} — ${endDate}`, schedule.format, schedule.id, scheduledFor.toISOString(), coalescedRuns, at.toISOString());
       const nextRun = nextScheduledRun(rule, scheduledFor);
       await db.prepare('UPDATE report_schedules SET next_run_at=?,updated_at=? WHERE id=?').run(nextRun.toISOString(), at.toISOString(), schedule.id);
       return result.changes ? 1 : 0;
