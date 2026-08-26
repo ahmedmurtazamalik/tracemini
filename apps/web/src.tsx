@@ -65,7 +65,7 @@ function Brand() {
   return (
     <span className="brand-lockup">
       <span className="brand-mark" aria-hidden="true">
-        T
+        <img src="/brand/tracemini-mark.png" alt="" />
       </span>
       <span>
         TraceMini<small>Developer activity</small>
