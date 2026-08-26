@@ -125,7 +125,7 @@ async function main() {
         let firstError: unknown;
         for (const clone of clones) {
           try {
-            await api(config, '/api/pushes/pending', {method: 'POST', body: JSON.stringify({...intent, repositoryId: clone.repositoryId, localKey: clone.path, identityFingerprint, occurredAt, eventKey: eventKey(['push', clone.repositoryId, intent.ref, intent.expectedSha, occurredAt])})});
+            await api(config, '/api/pushes/pending', {method: 'POST', body: JSON.stringify({...intent, repositoryId: clone.repositoryId, localKey: clone.path, identityFingerprint, occurredAt, eventKey: eventKey(['push', config.agentId, identityFingerprint, intent.ref, intent.expectedSha, occurredAt])})});
             sent++;
           } catch (error) {
             firstError ??= error;
@@ -144,7 +144,7 @@ async function main() {
     if (repositoryFingerprint(repoPath) !== identityFingerprint) throw new Error(`repository identity changed: ${repoPath}`);
     const occurredAt = new Date().toISOString();
     for (const clone of clones) {
-      enqueue(config, {eventKey: eventKey([type, clone.repositoryId, data.commitSha || '', data.oldCommit || '', data.newCommit || '', occurredAt.slice(0, 16), data]), workspaceId: clone.workspaceId, repositoryId: clone.repositoryId, localKey: clone.path, identityFingerprint, type, occurredAt, data, attempts: 0, nextAttempt: 0});
+      enqueue(config, {eventKey: eventKey([type, config.agentId, identityFingerprint, data.commitSha || '', data.oldCommit || '', data.newCommit || '', occurredAt.slice(0, 16), data]), workspaceId: clone.workspaceId, repositoryId: clone.repositoryId, localKey: clone.path, identityFingerprint, type, occurredAt, data, attempts: 0, nextAttempt: 0});
     }
     await flush(config);
     return;

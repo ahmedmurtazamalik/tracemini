@@ -136,7 +136,7 @@ export async function traceRepository(config: Config, repoPath: string, workspac
     for (const data of history) {
       assertIdentity();
       await api(config, '/api/activity', {method: 'POST', body: JSON.stringify({
-        eventKey: eventKey(['commit-history', repository.id, data.commitSha]), repositoryId: repository.id, localKey: info.path, identityFingerprint: fingerprint, type: 'commit', occurredAt: data.commitTimestamp, data: {...data, importedFromHistory: true},
+        eventKey: eventKey(['commit-history', config.agentId, fingerprint, data.commitSha]), repositoryId: repository.id, localKey: info.path, identityFingerprint: fingerprint, type: 'commit', occurredAt: data.commitTimestamp, data: {...data, importedFromHistory: true},
       })});
       assertIdentity();
     }
@@ -491,11 +491,15 @@ export function contextPrompt(context: any, clones: Config['clones']) {
   const timezone = context.job.timezone || 'Asia/Karachi';
   const includeDiff = Boolean(context.job.include_diff);
   const format = context.job.format === 'summary' ? 'summary' : 'detailed';
-  let text = `Generate a factual Markdown report about engineering contributions for ${context.job.start_date} through ${context.job.end_date} (${timezone}). Use only the supplied Git evidence. Do not modify files.\n\n`;
+  const workspaceReport = context.job.report_scope === 'workspace';
+  const contributors = [...new Set(context.events.map((event: any) => event.user_name).filter(Boolean))];
+  let text = `Generate a factual Markdown ${workspaceReport ? 'whole-workspace' : 'individual'} report about engineering contributions for ${context.job.start_date} through ${context.job.end_date} (${timezone}). Use only the supplied Git evidence. Do not modify files.\n\n`;
+  if (workspaceReport) text += `This report covers the whole workspace. Contributors with qualifying evidence: ${contributors.join(', ') || 'none'}. Include every listed contributor and attribute their work accurately. Organize the result with a workspace overview followed by a clearly labeled section for each contributor; do not collapse the report into the job owner's contributions.\n\n`;
   text += format === 'summary'
     ? `Write a brief summary with concise bullet points. Lead with the most important delivered outcomes, keep each bullet evidence-backed, and avoid long narrative sections.\n\n`
     : `Write a detailed narrative organized by outcomes and projects. Explain supported technical decisions, implementation work, problems solved, testing, reliability, and ownership without becoming a commit-by-commit log.\n\n`;
   text += `Synthesize related work into meaningful contributions: delivered capabilities and outcomes, technical decisions, architecture or implementation work, problems solved, testing and reliability improvements, and demonstrated ownership. Explain engineering significance only where the evidence supports it. Do not structure the report as a commit-by-commit chronology, do not use hashes or line counts as the main narrative, and do not invent impact, collaboration, intent, or test results not supported by evidence. Keep provider and internal pipeline jargon out of the user-facing report.\n\n`;
+  text += `Discuss only supplied evidence inside the requested reporting window. Do not mention excluded, absent, future, or out-of-window work, and do not add "no qualifying contribution" commentary. Use the requested calendar dates in the report heading; do not invent clock-time boundaries.\n\n`;
   text += includeDiff
     ? `Detailed diff excerpts were explicitly enabled. Use the bounded, redacted excerpts to explain implementation behavior while preserving factual grounding.\n\n`
     : `Diff excerpts were not enabled. Do not invent implementation details beyond commit metadata and file statistics.\n\n`;
@@ -567,7 +571,7 @@ export async function tick(config: Config, indexState: Map<string, {mtime: numbe
       if (clone.headSha && clone.branch) {
         const observation = observeRepositoryState({branch: clone.branch, headSha: clone.headSha, remoteHeadSha: clone.remoteHeadSha}, current);
         if (observation.event) {
-          enqueue(config, {eventKey: eventKey(['pull', clone.repositoryId, current.headSha]), workspaceId: clone.workspaceId, repositoryId: clone.repositoryId, localKey: clone.path, identityFingerprint: afterReadFingerprint, type: 'pull', occurredAt: new Date().toISOString(), data: current, attempts: 0, nextAttempt: 0});
+          enqueue(config, {eventKey: eventKey(['pull', config.agentId, afterReadFingerprint, current.headSha]), workspaceId: clone.workspaceId, repositoryId: clone.repositoryId, localKey: clone.path, identityFingerprint: afterReadFingerprint, type: 'pull', occurredAt: new Date().toISOString(), data: current, attempts: 0, nextAttempt: 0});
         }
       }
       Object.assign(clone, current);
@@ -595,7 +599,7 @@ export async function tick(config: Config, indexState: Map<string, {mtime: numbe
             if (identityFingerprint !== beforeRead) return;
             for (const registration of registrations) {
               if (!registration.repositoryFingerprint || registration.repositoryFingerprint !== identityFingerprint) continue;
-              const event = {eventKey: eventKey(['stage', registration.repositoryId, mtime, data]), workspaceId: registration.workspaceId, repositoryId: registration.repositoryId, localKey: registration.path, identityFingerprint, type: 'stage', occurredAt: new Date().toISOString(), data, attempts: 0, nextAttempt: 0};
+              const event = {eventKey: eventKey(['stage', config.agentId, identityFingerprint, mtime, data]), workspaceId: registration.workspaceId, repositoryId: registration.repositoryId, localKey: registration.path, identityFingerprint, type: 'stage', occurredAt: new Date().toISOString(), data, attempts: 0, nextAttempt: 0};
               if (!queue.some(current => current.eventKey === event.eventKey)) queue.push(event);
             }
           });

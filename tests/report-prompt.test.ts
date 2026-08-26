@@ -39,4 +39,20 @@ describe('engineering report prompt', () => {
     expect(detailed).toContain('technical decisions');
     expect(detailed).toContain('Contributor: Ali');
   });
+
+  it('requires workspace reports to cover every contributor without out-of-window commentary', () => {
+    const prompt = contextPrompt({
+      job: {user_id: 1, report_scope: 'workspace', start_date: '2026-08-25', end_date: '2026-08-26', timezone: 'Asia/Karachi', format: 'summary'},
+      events: [
+        {user_id: 1, user_name: 'Manager', repository_name: 'tracemini', type: 'commit', occurred_at: '2026-08-25T10:00:00Z', data: {message: 'Manage release'}},
+        {user_id: 2, user_name: 'Developer', repository_name: 'tracemini', type: 'commit', occurred_at: '2026-08-25T11:00:00Z', data: {message: 'Ship feature'}},
+      ],
+    }, []);
+
+    expect(prompt).toContain('whole-workspace');
+    expect(prompt).toContain('Contributors with qualifying evidence: Manager, Developer');
+    expect(prompt).toContain('section for each contributor');
+    expect(prompt).toContain('do not add "no qualifying contribution" commentary');
+    expect(prompt).toContain('do not invent clock-time boundaries');
+  });
 });

@@ -418,6 +418,9 @@ else if(command==='status'){console.log(JSON.stringify(JSON.parse(fs.readFileSyn
 
     expect((await request(app).get(`/api/reports/${originalReport.id}`).set(auth(user.token)).expect(200)).body).toMatchObject({id: originalReport.id, job_id: regeneration.id, name: 'August Engineering Review', markdown: '# Regenerated\n\nEngineering outcomes.', report_scope: 'personal', user_name: 'Report Owner'});
     expect((await request(app).get(`/api/workspaces/${workspace.id}/reports`).set(auth(user.token)).expect(200)).body).toHaveLength(1);
+    const workspaceJob = (await request(app).post('/api/reports/jobs').set(auth(user.token)).send({workspaceId: String(workspace.id), startDate: '2026-08-21', endDate: '2026-08-21', reporter: 'codex', reportScope: 'workspace'}).expect(201)).body;
+    expect((await request(app).get(`/api/reports/jobs/${workspaceJob.id}`).set(auth(user.token)).expect(200)).body).toMatchObject({report_scope: 'workspace'});
+    await db.prepare('DELETE FROM report_jobs WHERE id=?').run(workspaceJob.id);
 
     const manager = (await request(app).post('/api/auth/register').send({name: 'Report Manager', email: 'report-manager@test.local', password: 'password123'}).expect(201)).body;
     await inviteAndAccept(app, user.token, workspace.id, manager);
@@ -573,6 +576,10 @@ else if(command==='status'){console.log(JSON.stringify(JSON.parse(fs.readFileSyn
       await request(app).post('/api/activity').set(auth(agent.agentToken)).send({eventKey: `before-${workspace.id}`, repositoryId: repository.id, localKey: sharedLocalKey, identityFingerprint: testFingerprint, type: 'commit', occurredAt: new Date().toISOString()}).expect(201);
     }
     expect((await db.prepare('SELECT COUNT(*)::INTEGER count FROM local_clones WHERE agent_id=? AND local_key=?').get(agent.agentId, sharedLocalKey) as any).count).toBe(2);
+    expect((await db.prepare('SELECT COUNT(*)::INTEGER count FROM activity_events WHERE agent_id=?').get(agent.agentId) as any).count).toBe(2);
+    expect((await db.prepare('SELECT COUNT(*)::INTEGER count FROM activity_event_repositories').get() as any).count).toBe(4);
+    expect((await request(app).get(`/api/workspaces/${workspaceA.id}/dashboard`).set(auth(member.token)).expect(200)).body.events).toHaveLength(2);
+    expect((await request(app).get(`/api/workspaces/${workspaceB.id}/dashboard`).set(auth(member.token)).expect(200)).body.events).toHaveLength(2);
 
     const jobA = (await request(app).post('/api/reports/jobs').set(auth(member.token)).send({workspaceId: String(workspaceA.id), startDate: '2026-08-21', endDate: '2026-08-21', reporter: 'codex'}).expect(201)).body;
     const jobB = (await request(app).post('/api/reports/jobs').set(auth(member.token)).send({workspaceId: String(workspaceB.id), startDate: '2026-08-21', endDate: '2026-08-21', reporter: 'codex'}).expect(201)).body;

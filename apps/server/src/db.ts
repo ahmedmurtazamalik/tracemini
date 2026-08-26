@@ -164,6 +164,17 @@ ALTER TABLE local_clones DROP CONSTRAINT IF EXISTS local_clones_agent_id_local_k
 ALTER TABLE local_clones ADD CONSTRAINT local_clones_agent_repository_local_key_key UNIQUE(agent_id,repository_id,local_key);
 `;
 
+export const sharedActivityMigrationSql = `
+CREATE TABLE activity_event_repositories(
+  event_id BIGINT NOT NULL REFERENCES activity_events(id) ON DELETE CASCADE,
+  repository_id BIGINT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+  PRIMARY KEY(event_id,repository_id)
+);
+CREATE INDEX activity_event_repositories_repository_idx ON activity_event_repositories(repository_id,event_id);
+INSERT INTO activity_event_repositories(event_id,repository_id)
+SELECT id,repository_id FROM activity_events ON CONFLICT DO NOTHING;
+`;
+
 // pg-mem cannot reliably drop an existing unique constraint. Fresh test databases
 // start with the current constraints; hosted PostgreSQL follows the legacy schema
 // plus migration 16 above so existing migration checksums remain stable.
@@ -362,6 +373,7 @@ export class DB {
         {version: 18, name: 'report presentation format and scope', sql: reportFormatMigrationSql},
         {version: 19, name: 'workspace report schedules', sql: reportScheduleMigrationSql},
         {version: 20, name: 'optional Slack report notifications', sql: slackReportNotificationMigrationSql},
+        {version: 21, name: 'shared activity observations', sql: sharedActivityMigrationSql},
       ];
       for (const migration of migrations) {
         const checksum = crypto.createHash('sha256').update(migration.sql).digest('hex');
@@ -371,6 +383,25 @@ export class DB {
         }
         await this.query(migration.sql);
         await this.query('INSERT INTO schema_migrations(version,name,checksum) VALUES($1,$2,$3)', [migration.version, migration.name, checksum]);
+      }
+      const observations = await this.prepare(`SELECT DISTINCT e.id,e.agent_id,e.type,e.occurred_at,e.data,c.local_key,c.repository_fingerprint
+        FROM activity_events e JOIN activity_event_repositories aer ON aer.event_id=e.id
+        JOIN repository_candidates c ON c.repository_id=aer.repository_id
+        WHERE c.repository_fingerprint IS NOT NULL ORDER BY e.id`).all();
+      const keepers = new Map<string, number>();
+      const removed = new Set<number>();
+      for (const observation of observations as any[]) {
+        const key = JSON.stringify([observation.agent_id, observation.local_key, observation.repository_fingerprint, observation.type, observation.occurred_at, observation.data]);
+        const keeper = keepers.get(key) || Number(observation.id);
+        keepers.set(key, keeper);
+        await this.prepare(`INSERT INTO activity_event_repositories(event_id,repository_id)
+          SELECT ?,repository_id FROM repository_candidates WHERE agent_id=? AND local_key=? AND repository_fingerprint=? AND desired_traced=TRUE AND repository_id IS NOT NULL
+          ON CONFLICT DO NOTHING`).run(keeper, observation.agent_id, observation.local_key, observation.repository_fingerprint);
+        if (keeper !== Number(observation.id) && !removed.has(Number(observation.id))) {
+          await this.prepare('INSERT INTO activity_event_repositories(event_id,repository_id) SELECT ?,repository_id FROM activity_event_repositories WHERE event_id=? ON CONFLICT DO NOTHING').run(keeper, observation.id);
+          await this.prepare('DELETE FROM activity_events WHERE id=?').run(observation.id);
+          removed.add(Number(observation.id));
+        }
       }
     });
   }

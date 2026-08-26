@@ -119,6 +119,13 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
   const membership = async (userId: number, workspaceId: number) => await db.prepare('SELECT * FROM workspace_members WHERE user_id=? AND workspace_id=?').get(userId, workspaceId) as any;
   const agentWorkspaceIds = async (userId: number) => (await db.prepare('SELECT workspace_id FROM workspace_members WHERE user_id=? ORDER BY workspace_id').all(userId)).map((row: any) => Number(row.workspace_id));
   const agentStatus = async (agent: any) => ({id: agent.id, userId: agent.user_id, workspaceId: agent.workspace_id, workspaceIds: await agentWorkspaceIds(agent.user_id), machineName: agent.machine_name, lastSeen: agent.last_seen});
+  const repositoriesForObservation = (agentId: number, localKey: string, fingerprint: string) => db.prepare(`SELECT DISTINCT r.id,r.workspace_id FROM repository_candidates c
+    JOIN repositories r ON r.id=c.repository_id JOIN workspace_members wm ON wm.workspace_id=c.workspace_id
+    JOIN agents a ON a.id=c.agent_id AND a.user_id=wm.user_id
+    WHERE c.agent_id=? AND c.local_key=? AND c.repository_fingerprint=? AND c.desired_traced=TRUE AND a.revoked_at IS NULL`).all(agentId, localKey, fingerprint);
+  const associateEvent = async (eventId: number, repositories: any[]) => {
+    for (const repository of repositories) await db.prepare('INSERT INTO activity_event_repositories(event_id,repository_id) VALUES(?,?) ON CONFLICT DO NOTHING').run(eventId, repository.id);
+  };
   const requireMember = async (req: Authed, res: Response, next: NextFunction) => {
     const workspaceId = Number(req.params.id || req.params.workspaceId || req.body?.workspaceId);
     if (!(await membership(req.user.id, workspaceId))) return res.status(403).json({error: 'forbidden'});
@@ -393,6 +400,10 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
       const workspace = await db.prepare('SELECT id FROM workspaces WHERE id=? FOR UPDATE').get(req.params.id);
       if (!workspace || !(await hasLockedManagerAuthority(+req.params.id, req.user.id))) return false;
       await db.prepare('DELETE FROM pending_pushes WHERE repository_id IN (SELECT id FROM repositories WHERE workspace_id=?)').run(req.params.id);
+      const sharedEvents = await db.prepare(`SELECT e.id,MIN(aer.repository_id)::INTEGER repository_id FROM activity_events e
+        JOIN activity_event_repositories aer ON aer.event_id=e.id JOIN repositories retained ON retained.id=aer.repository_id AND retained.workspace_id<>?
+        WHERE e.repository_id IN (SELECT id FROM repositories WHERE workspace_id=?) GROUP BY e.id`).all(req.params.id, req.params.id);
+      for (const event of sharedEvents as any[]) await db.prepare('UPDATE activity_events SET repository_id=? WHERE id=?').run(event.repository_id, event.id);
       await db.prepare('DELETE FROM activity_events WHERE repository_id IN (SELECT id FROM repositories WHERE workspace_id=?)').run(req.params.id);
       await db.prepare('DELETE FROM local_clones WHERE repository_id IN (SELECT id FROM repositories WHERE workspace_id=?)').run(req.params.id);
       await db.prepare('DELETE FROM reports WHERE workspace_id=?').run(req.params.id);
@@ -675,6 +686,14 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
       const selected: any = await db.prepare('SELECT * FROM repositories WHERE workspace_id=? AND normalized_remote=?').get(workspaceId, normalized);
       await db.prepare('INSERT INTO local_clones(agent_id,repository_id,local_key,branch,last_seen,head_sha,remote_head_sha) VALUES(?,?,?,?,?,?,?) ON CONFLICT(agent_id,repository_id,local_key) DO UPDATE SET branch=excluded.branch,last_seen=excluded.last_seen,head_sha=excluded.head_sha,remote_head_sha=excluded.remote_head_sha').run(req.agent.id, selected.id, req.body.localKey, req.body.branch || null, now(), req.body.headSha || null, req.body.remoteHeadSha || null);
       await db.prepare('UPDATE repository_candidates SET workspace_id=?,repository_id=?,repository_fingerprint=?,last_seen=?,error=NULL WHERE id=?').run(workspaceId, selected.id, fingerprint, now(), candidate.id);
+      const observed = await db.prepare(`SELECT DISTINCT e.id,e.agent_id,e.type,e.occurred_at,e.data FROM activity_events e
+        JOIN activity_event_repositories aer ON aer.event_id=e.id JOIN repository_candidates c ON c.repository_id=aer.repository_id
+        WHERE c.agent_id=? AND c.local_key=? AND c.repository_fingerprint=? AND c.desired_traced=TRUE`).all(req.agent.id, req.body.localKey, fingerprint);
+      for (const event of observed as any[]) {
+        const duplicate = await db.prepare(`SELECT 1 FROM activity_event_repositories aer JOIN activity_events e ON e.id=aer.event_id
+          WHERE aer.repository_id=? AND e.agent_id=? AND e.type=? AND e.occurred_at=? AND e.data=CAST(? AS JSONB)`).get(selected.id, event.agent_id, event.type, event.occurred_at, JSON.stringify(eventData(event.data)));
+        if (!duplicate) await db.prepare('INSERT INTO activity_event_repositories(event_id,repository_id) VALUES(?,?) ON CONFLICT DO NOTHING').run(event.id, selected.id);
+      }
       return selected;
     });
     if (!repository) return res.status(409).json({error: 'repository must be selected before registration'});
@@ -728,6 +747,8 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
       const observedSha = req.body.observedSha || null;
       await db.prepare("UPDATE pending_pushes SET status=?,observed_sha=?,completed_at=? WHERE id=? AND status='pending'").run(req.body.status, observedSha, now(), push.id);
       await db.prepare('INSERT INTO activity_events(event_key,user_id,agent_id,repository_id,type,occurred_at,data,created_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING').run(push.event_key, push.user_id, push.agent_id, push.repository_id, 'push', push.occurred_at, JSON.stringify({remote: push.remote_name, remoteUrl: push.remote_url, ref: push.ref, expectedSha: push.expected_sha, observedSha, confirmation: req.body.status}), now());
+      const event: any = await db.prepare('SELECT id FROM activity_events WHERE event_key=?').get(push.event_key);
+      await associateEvent(event.id, await repositoriesForObservation(push.agent_id, push.local_key, fingerprint));
       return {kind: 'completed'} as const;
     });
     if (outcome.kind === 'unavailable') return res.status(409).json({error: 'push unavailable'});
@@ -742,18 +763,23 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
     const fingerprint = typeof req.body.identityFingerprint === 'string' && /^[a-f0-9]{64}$/.test(req.body.identityFingerprint) ? req.body.identityFingerprint : null;
     if (!fingerprint) return res.status(403).json({error: 'repository fingerprint required'});
     const accepted = await db.transaction(async () => {
-      const repository: any = await db.prepare('SELECT r.* FROM repositories r JOIN repository_candidates c ON c.repository_id=r.id AND c.agent_id=? AND c.local_key=? AND c.desired_traced=TRUE AND c.repository_fingerprint=? JOIN agents a ON a.id=c.agent_id AND a.revoked_at IS NULL JOIN workspace_members wm ON wm.workspace_id=c.workspace_id AND wm.user_id=a.user_id WHERE r.id=? FOR UPDATE').get(req.agent.id, req.body.localKey, fingerprint, repositoryId);
+      const repositories = await repositoriesForObservation(req.agent.id, req.body.localKey, fingerprint);
+      const repository: any = repositories.find((item: any) => Number(item.id) === repositoryId);
       if (!repository) return undefined;
-      await db.prepare('SELECT id FROM workspaces WHERE id=? FOR UPDATE').get(repository.workspace_id);
-      if (!(await membership(req.agent.user_id, repository.workspace_id))) return undefined;
-      const result = await db.prepare('INSERT INTO activity_events(event_key,user_id,agent_id,repository_id,type,occurred_at,data,created_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING').run(req.body.eventKey, req.agent.user_id, req.agent.id, repository.id, req.body.type, occurredAt, JSON.stringify(req.body.data || {}), now());
+      const data = JSON.stringify(req.body.data || {});
+      let event: any = await db.prepare(`SELECT e.id FROM activity_events e JOIN activity_event_repositories aer ON aer.event_id=e.id
+        JOIN repository_candidates c ON c.repository_id=aer.repository_id
+        WHERE c.agent_id=? AND c.local_key=? AND c.repository_fingerprint=? AND e.agent_id=? AND e.type=? AND e.occurred_at=? AND e.data=CAST(? AS JSONB) LIMIT 1`).get(req.agent.id, req.body.localKey, fingerprint, req.agent.id, req.body.type, occurredAt, data);
+      const result = event ? {changes: 0} : await db.prepare('INSERT INTO activity_events(event_key,user_id,agent_id,repository_id,type,occurred_at,data,created_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING').run(req.body.eventKey, req.agent.user_id, req.agent.id, repository.id, req.body.type, occurredAt, data, now());
+      event ||= await db.prepare('SELECT id FROM activity_events WHERE event_key=?').get(req.body.eventKey);
+      await associateEvent(event.id, repositories);
       return Boolean(result.changes);
     });
     if (accepted == null) return res.status(403).json({error: 'repository not available'});
     res.status(accepted ? 201 : 200).json({accepted});
   });
   const activityForWorkspace = async (workspaceId: number, query: Request['query'], extra = '', args: any[] = []) => {
-    let sql = 'SELECT e.*,u.name user_name,r.name repository_name FROM activity_events e JOIN users u ON u.id=e.user_id JOIN repositories r ON r.id=e.repository_id WHERE r.workspace_id=?' + extra;
+    let sql = 'SELECT e.*,r.id repository_id,u.name user_name,r.name repository_name FROM activity_events e JOIN activity_event_repositories aer ON aer.event_id=e.id JOIN users u ON u.id=e.user_id JOIN repositories r ON r.id=aer.repository_id WHERE r.workspace_id=?' + extra;
     const values: any[] = [workspaceId, ...args];
     const timezone = normalizeTimezone(query.timezone);
     if (query.from) { sql += ' AND e.occurred_at>=?'; values.push(dateRangeUtc(String(query.from), String(query.from), timezone).from); }
@@ -766,12 +792,12 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
     const filters: string[] = ["r.workspace_id=?", "e.type='commit'"];
     const values: any[] = [workspaceId];
     if (query.userId) { filters.push('e.user_id=?'); values.push(query.userId); }
-    if (query.repositoryId) { filters.push('e.repository_id=?'); values.push(query.repositoryId); }
+    if (query.repositoryId) { filters.push('r.id=?'); values.push(query.repositoryId); }
     if (query.from) { filters.push('e.occurred_at>=?'); values.push(dateRangeUtc(String(query.from), String(query.from), timezone).from); }
     if (query.to) { filters.push('e.occurred_at<=?'); values.push(dateRangeUtc(String(query.to), String(query.to), timezone).to); }
     const where = filters.join(' AND ');
-    const totals: any = await db.prepare(`SELECT COUNT(*)::INTEGER commits,COALESCE(SUM(CAST(e.data::JSONB->>'filesChanged' AS INTEGER)),0)::INTEGER "filesChanged",COALESCE(SUM(CAST(e.data::JSONB->>'insertions' AS INTEGER)),0)::INTEGER insertions,COALESCE(SUM(CAST(e.data::JSONB->>'deletions' AS INTEGER)),0)::INTEGER deletions FROM activity_events e JOIN repositories r ON r.id=e.repository_id WHERE ${where}`).get(...values);
-    const dailyEvents = await db.prepare(`SELECT e.occurred_at,e.data FROM activity_events e JOIN repositories r ON r.id=e.repository_id WHERE ${where} ORDER BY e.occurred_at`).all(...values);
+    const totals: any = await db.prepare(`SELECT COUNT(*)::INTEGER commits,COALESCE(SUM(CAST(e.data::JSONB->>'filesChanged' AS INTEGER)),0)::INTEGER "filesChanged",COALESCE(SUM(CAST(e.data::JSONB->>'insertions' AS INTEGER)),0)::INTEGER insertions,COALESCE(SUM(CAST(e.data::JSONB->>'deletions' AS INTEGER)),0)::INTEGER deletions FROM activity_events e JOIN activity_event_repositories aer ON aer.event_id=e.id JOIN repositories r ON r.id=aer.repository_id WHERE ${where}`).get(...values);
+    const dailyEvents = await db.prepare(`SELECT e.occurred_at,e.data FROM activity_events e JOIN activity_event_repositories aer ON aer.event_id=e.id JOIN repositories r ON r.id=aer.repository_id WHERE ${where} ORDER BY e.occurred_at`).all(...values);
     const dailyByDate = new Map<string, any>();
     for (const event of dailyEvents) {
       const date = dateKeyInTimezone(event.occurred_at, timezone);
@@ -792,7 +818,7 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
     const bounds = dateRangeUtc(date, date, timezone);
     const [members, events] = await Promise.all([
       membersForWorkspace(workspaceId),
-      db.prepare(`SELECT e.user_id,e.type,e.occurred_at FROM activity_events e JOIN repositories r ON r.id=e.repository_id WHERE r.workspace_id=? AND e.occurred_at>=? AND e.occurred_at<=? AND e.type IN ('commit','push','pull','stage') ORDER BY e.occurred_at`).all(workspaceId, bounds.from, bounds.to),
+      db.prepare(`SELECT e.user_id,e.type,e.occurred_at FROM activity_events e JOIN activity_event_repositories aer ON aer.event_id=e.id JOIN repositories r ON r.id=aer.repository_id WHERE r.workspace_id=? AND e.occurred_at>=? AND e.occurred_at<=? AND e.type IN ('commit','push','pull','stage') ORDER BY e.occurred_at`).all(workspaceId, bounds.from, bounds.to),
     ]);
     const users = members.map((member: any) => ({
       userId: Number(member.id), name: member.name,
@@ -818,7 +844,7 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
   const scopedActivity = (query: Request['query']) => query.userId
     ? {extra: ' AND e.user_id=?', args: [Number(query.userId)]}
     : query.repositoryId
-      ? {extra: ' AND e.repository_id=?', args: [Number(query.repositoryId)]}
+      ? {extra: ' AND r.id=?', args: [Number(query.repositoryId)]}
       : {extra: '', args: []};
   const queryActivity = async (req: Authed, res: Response, extra: string, args: any[]) => {
     const workspaceId = Number(req.params.workspaceId || req.query.workspaceId || 0);
@@ -826,7 +852,7 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
     res.json(await activityForWorkspace(workspaceId, req.query, extra, args));
   };
   app.get('/api/workspaces/:workspaceId/activity', userAuth, async (req: Authed, res) => await queryActivity(req, res, '', []));
-  app.get('/api/repositories/:id/activity', userAuth, async (req: Authed, res) => await queryActivity(req, res, ' AND e.repository_id=?', [+req.params.id]));
+  app.get('/api/repositories/:id/activity', userAuth, async (req: Authed, res) => await queryActivity(req, res, ' AND r.id=?', [+req.params.id]));
   app.get('/api/users/:id/activity', userAuth, async (req: Authed, res) => await queryActivity(req, res, ' AND e.user_id=?', [+req.params.id]));
   app.get('/api/workspaces/:id/stats', userAuth, requireMember, async (req, res) => {
     res.json(await statsForWorkspace(req.params.id, req.query));
@@ -897,17 +923,20 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
     if (req.body.format !== undefined && !['summary', 'detailed'].includes(req.body.format)) return res.status(400).json({error: 'invalid report format'});
     if (!dateOnly(req.body.startDate) || !dateOnly(req.body.endDate) || req.body.startDate > req.body.endDate) return res.status(400).json({error: 'invalid report date range'});
     if (req.body.name !== undefined && typeof req.body.name !== 'string') return res.status(400).json({error: 'invalid report name'});
+    const reportScope = req.body.reportScope === undefined ? 'personal' : req.body.reportScope;
+    if (!['personal', 'workspace'].includes(reportScope)) return res.status(400).json({error: 'invalid report scope'});
     const reportName = req.body.name?.trim() || defaultReportName(req.body.startDate, req.body.endDate);
     if (reportName.length > 120) return res.status(400).json({error: 'report name must be 120 characters or fewer'});
     const outcome = await db.transaction(async () => {
       const workspaceId = +req.body.workspaceId;
       const workspace = await db.prepare('SELECT id FROM workspaces WHERE id=? FOR UPDATE').get(workspaceId);
-      if (!workspace || !(await db.prepare('SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=?').get(workspaceId, req.user.id))) return undefined;
+      const member: any = workspace && await db.prepare('SELECT role FROM workspace_members WHERE workspace_id=? AND user_id=?').get(workspaceId, req.user.id);
+      if (!workspace || !member || (reportScope === 'workspace' && member.role !== 'Manager')) return undefined;
       const active: any = await db.prepare("SELECT * FROM report_jobs WHERE workspace_id=? AND user_id=? AND status IN ('pending','running') ORDER BY id DESC LIMIT 1 FOR UPDATE").get(workspaceId, req.user.id);
       if (active) return {job: active, created: false};
       const timezone = normalizeTimezone(req.body.timezone);
       const includeDiff = req.body.includeDiff === true;
-      const result = await db.prepare("INSERT INTO report_jobs(workspace_id,user_id,reporter,start_date,end_date,timezone,include_diff,notify_slack,status,report_name,format,report_scope,created_at) VALUES(?,?,?,?,?,?,?,?,'pending',?,?,'personal',?) RETURNING id").run(workspaceId, req.user.id, req.body.reporter, req.body.startDate, req.body.endDate, timezone, includeDiff, req.body.notifySlack === true, reportName, normalizeReportFormat(req.body.format), now());
+      const result = await db.prepare("INSERT INTO report_jobs(workspace_id,user_id,reporter,start_date,end_date,timezone,include_diff,notify_slack,status,report_name,format,report_scope,created_at) VALUES(?,?,?,?,?,?,?,?,'pending',?,?,?,?) RETURNING id").run(workspaceId, req.user.id, req.body.reporter, req.body.startDate, req.body.endDate, timezone, includeDiff, req.body.notifySlack === true, reportName, normalizeReportFormat(req.body.format), reportScope, now());
       return {job: {id: Number(result.lastInsertRowid), status: 'pending'}, created: true};
     });
     if (!outcome) return res.status(403).json({error: 'forbidden'});
@@ -971,7 +1000,7 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
     const bounds = dateRangeUtc(isoDate(job.start_date), isoDate(job.end_date), normalizeTimezone(job.timezone));
     const events = (await db.prepare(`SELECT e.*,u.name user_name,r.name repository_name,r.remote_url repository_remote_url,r.normalized_remote
       FROM report_jobs j JOIN workspace_members wm ON wm.workspace_id=j.workspace_id AND wm.user_id=j.user_id
-      JOIN repositories r ON r.workspace_id=j.workspace_id JOIN activity_events e ON e.repository_id=r.id JOIN users u ON u.id=e.user_id
+      JOIN repositories r ON r.workspace_id=j.workspace_id JOIN activity_event_repositories aer ON aer.repository_id=r.id JOIN activity_events e ON e.id=aer.event_id JOIN users u ON u.id=e.user_id
       WHERE j.id=? AND j.user_id=? AND j.agent_id=? AND j.status='running' AND (j.report_scope<>'workspace' OR wm.role='Manager')
         AND (j.report_scope='workspace' OR e.user_id=j.user_id) AND e.occurred_at>=? AND e.occurred_at<=? ORDER BY e.occurred_at`).all(job.id, req.agent.user_id, req.agent.id, bounds.from, bounds.to)).map((row: any) => {
           const {repository_remote_url: repositoryRemoteUrl, ...event} = row;

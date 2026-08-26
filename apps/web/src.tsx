@@ -1311,6 +1311,7 @@ function ReportDetail({ report, workspaceId, currentUserId, reload }: any) {
 function Reports({ workspaceId, dates, setDates, reports, reload, error, timezone, role }: any) {
   const [reporter, setReporter] = useState("hermes");
   const [format, setFormat] = useState("summary");
+  const [reportScope, setReportScope] = useState("workspace");
   const [name, setName] = useState("");
   const [pending, setPending] = useState(false);
   const [job, setJob] = useState<ReportJob>();
@@ -1411,6 +1412,13 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error, timezon
               <option value="detailed">Detailed report</option>
             </select>
           </label>
+          {role === "Manager" && <label>
+            Report scope
+            <select value={reportScope} onChange={(event) => setReportScope(event.target.value)}>
+              <option value="workspace">Whole workspace</option>
+              <option value="personal">My contributions</option>
+            </select>
+          </label>}
           <button
             className="button primary"
             disabled={pending || Boolean(progress?.active)}
@@ -1429,6 +1437,7 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error, timezon
                     endDate: dates.to,
                     reporter,
                     format,
+                    reportScope: role === "Manager" ? reportScope : "personal",
                     name,
                     timezone,
                     includeDiff,

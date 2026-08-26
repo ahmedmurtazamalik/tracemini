@@ -272,7 +272,7 @@ describe('device repository selection', () => {
     expect(loadQueue()).toEqual([expect.objectContaining({eventKey: 'legacy-one', workspaceId: 1})]);
   });
 
-  it('fans one physical staged-index change out to every workspace clone partition', async () => {
+  it('queues one physical staged-index observation across workspace clone partitions', async () => {
     temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'tracemini-stage-fanout-'));
     process.env.TRACEMINI_HOME = path.join(temporary, 'state');
     const repo = createRepo(path.join(temporary, 'root'), 'shared');
@@ -288,7 +288,7 @@ describe('device repository selection', () => {
     updateConfig(current => { current.clones.push(clones[1]); });
     await new Promise(resolve => setTimeout(resolve, 1400));
 
-    expect(loadQueue().map(event => [event.workspaceId, event.repositoryId])).toEqual([[1, 71], [2, 72]]);
+    expect(loadQueue().map(event => [event.workspaceId, event.repositoryId])).toEqual([[1, 71]]);
   });
 
   it('notifies every workspace partition when push verification detects a shared-path identity change', async () => {
