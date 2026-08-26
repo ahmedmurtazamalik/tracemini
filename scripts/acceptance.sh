@@ -32,11 +32,16 @@ BT=$(printf '%s' "$B" | json token)
 BID=$(printf '%s' "$B" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).user.id))")
 W=$(api -X POST "$BASE/api/workspaces" -H "authorization: Bearer $AT" -d '{"name":"Acceptance"}')
 WID=$(printf '%s' "$W" | json id)
-CODE=$(printf '%s' "$W" | json inviteCode)
-api -X POST "$BASE/api/workspaces/join" -H "authorization: Bearer $BT" -d "{\"inviteCode\":\"$CODE\"}" >/dev/null
-test "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/workspaces/$WID/invite/regenerate" -H "authorization: Bearer $BT")" = 403
+INVITATION=$(api -X POST "$BASE/api/workspaces/$WID/invitations" -H "authorization: Bearer $AT" -d '{"email":"bob@example.test","role":"Developer"}')
+INVITATION_ID=$(printf '%s' "$INVITATION" | json id)
+if api "$BASE/api/workspaces" -H "authorization: Bearer $BT" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>process.exit(JSON.parse(s).some(w=>w.id===Number(process.argv[1]))?0:1))" "$WID"; then
+  echo 'recipient received workspace access before accepting invitation' >&2
+  exit 1
+fi
+api -X POST "$BASE/api/invitations/$INVITATION_ID/accept" -H "authorization: Bearer $BT" >/dev/null
+test "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/workspaces/join" -H "authorization: Bearer $BT" -H 'content-type: application/json' -d '{"inviteCode":"RETIRED"}')" = 410
+test "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/workspaces/$WID/invite/regenerate" -H "authorization: Bearer $BT")" = 410
 api -X PATCH "$BASE/api/workspaces/$WID/members/$BID" -H "authorization: Bearer $AT" -d '{"role":"Manager"}' >/dev/null
-api -X POST "$BASE/api/workspaces/$WID/invite/regenerate" -H "authorization: Bearer $BT" >/dev/null
 
 mkdir -p "$TMP/home-a" "$TMP/home-b" "$TMP/repos/a-root" "$TMP/repos/b-root"
 git init --bare "$TMP/remote.git" >/dev/null

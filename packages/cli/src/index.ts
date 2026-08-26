@@ -86,14 +86,6 @@ async function main() {
     console.log(`Device ${agent.agentId} registered`);
     return;
   }
-  if (command === 'join') {
-    if (!args[0]) throw new Error('join requires invite code');
-    const workspace = await api<any>(config, '/api/workspaces/join', {method: 'POST', body: JSON.stringify({inviteCode: args[0]})}, false);
-    await api(config, '/api/agents/workspace', {method: 'POST', body: JSON.stringify({workspaceId: String(workspace.id)})});
-    bindWorkspace(workspace.id);
-    console.log(`Joined ${workspace.name} (${workspace.id})`);
-    return;
-  }
   if (command === 'use-workspace') {
     const workspaceId = Number(args[0]);
     if (!workspaceId) throw new Error('use-workspace requires a workspace id');

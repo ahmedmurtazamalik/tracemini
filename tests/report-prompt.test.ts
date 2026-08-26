@@ -7,6 +7,7 @@ describe('engineering report prompt', () => {
       job: {
         start_date: '2026-08-01',
         end_date: '2026-08-25',
+        coalesced_runs: 2,
         custom_prompt: 'Use an executive summary followed by project outcomes.',
       },
       events: [{
@@ -23,5 +24,19 @@ describe('engineering report prompt', () => {
     expect(prompt).toContain('technical decisions');
     expect(prompt).toContain('Use an executive summary followed by project outcomes.');
     expect(prompt).toContain('Use only the supplied Git evidence');
+    expect(prompt).toContain('2 older scheduled occurrence(s) were coalesced');
+  });
+
+  it('uses visibly different structures for summary and detailed reports', () => {
+    const base = {start_date: '2026-08-01', end_date: '2026-08-25', timezone: 'UTC'};
+    const events = [{normalized_remote: 'github.com/team/product', repository_name: 'product', user_name: 'Ali', type: 'commit', occurred_at: '2026-08-25T10:00:00Z', data: {message: 'Ship feature'}}];
+    const summary = contextPrompt({job: {...base, format: 'summary'}, events}, []);
+    const detailed = contextPrompt({job: {...base, format: 'detailed'}, events}, []);
+
+    expect(summary).toContain('concise bullet points');
+    expect(summary).toContain('brief summary');
+    expect(detailed).toContain('detailed narrative');
+    expect(detailed).toContain('technical decisions');
+    expect(detailed).toContain('Contributor: Ali');
   });
 });

@@ -30,6 +30,11 @@ const approveRepository = async (app: any, userToken: string, agentToken: string
   await request(app).patch(`/api/workspaces/${workspaceId}/repository-candidates/${selected.id}`).set(auth(userToken)).send({traced: true}).expect(200);
   return selected;
 };
+const inviteAndAccept = async (app: any, managerToken: string, workspaceId: number, recipient: any, role = 'Developer') => {
+  const invitation = (await request(app).post(`/api/workspaces/${workspaceId}/invitations`).set(auth(managerToken)).send({email: recipient.user.email, role}).expect(201)).body;
+  await request(app).post(`/api/invitations/${invitation.id}/accept`).set(auth(recipient.token)).expect(200);
+  return invitation;
+};
 
 class SerializedTransactionsDb {
   private tail: Promise<void> = Promise.resolve();
@@ -146,7 +151,7 @@ describe('approved server workflows', () => {
     expect(installerSource).not.toContain('Description=TraceMini local Git agent');
   });
 
-  it('creates a personal Manager workspace with a random invite when a user registers', async () => {
+  it('creates a personal Manager workspace without exposing retired invite codes', async () => {
     db = await openTestDb();
     const app = createApp(db);
     expect((await request(app).get('/api/agents/status').set(auth('invalid-device-token')).expect(401)).body).toEqual({error: 'unauthorized device'});
@@ -157,12 +162,13 @@ describe('approved server workflows', () => {
     const workspaces = (await request(app).get('/api/workspaces').set(auth(joey.token)).expect(200)).body;
 
     expect(workspaces).toHaveLength(1);
-    expect(workspaces[0]).toMatchObject({name: "Joey's workspace", role: 'Manager', invite_enabled: true});
-    expect(workspaces[0].invite_code).toMatch(/^[A-F0-9]{10}$/);
+    expect(workspaces[0]).toMatchObject({name: "Joey's workspace", role: 'Manager'});
+    expect(workspaces[0]).not.toHaveProperty('invite_code');
+    expect(workspaces[0]).not.toHaveProperty('invite_enabled');
 
     const jane = (await request(app).post('/api/auth/register').send({name: 'Jane', email: 'jane@test.local', password: 'password123'}).expect(201)).body;
     const janeWorkspace = (await request(app).get('/api/workspaces').set(auth(jane.token)).expect(200)).body[0];
-    expect(janeWorkspace.invite_code).not.toBe(workspaces[0].invite_code);
+    expect(janeWorkspace).not.toHaveProperty('invite_code');
   });
 
   it('retries invite-code collisions without misreporting them as duplicate email', async () => {
@@ -179,35 +185,20 @@ describe('approved server workflows', () => {
 
     const newcomer = (await request(app).post('/api/auth/register').send({name: 'Collision', email: 'collision@test.local', password: 'password123'}).expect(201)).body;
     const newcomerWorkspace = (await request(app).get('/api/workspaces').set(auth(newcomer.token)).expect(200)).body[0];
-    expect(newcomerWorkspace.invite_code).toBe('BBBBBBBBBB');
-
-    const refreshed = await request(app).post(`/api/workspaces/${newcomerWorkspace.id}/invite/regenerate`).set(auth(newcomer.token)).expect(200);
-    expect(refreshed.body.inviteCode).toBe('CCCCCCCCCC');
+    expect((await db.prepare('SELECT invite_code,invite_enabled FROM workspaces WHERE id=?').get(newcomerWorkspace.id) as any)).toMatchObject({invite_code: 'BBBBBBBBBB', invite_enabled: false});
+    await request(app).post(`/api/workspaces/${newcomerWorkspace.id}/invite/regenerate`).set(auth(newcomer.token)).expect(410);
   });
 
-  it('serializes invite refreshes and permits only one new code per minute', async () => {
+  it('retires shared invite-code joins and management endpoints', async () => {
     db = await openTestDb();
     const app = createApp(db);
     const user = (await request(app).post('/api/auth/register').send({name: 'Invite', email: 'invite@test.local', password: 'password123'}).expect(201)).body;
     const workspace = (await request(app).get('/api/workspaces').set(auth(user.token)).expect(200)).body[0];
 
-    const responses = await Promise.all([
-      request(app).post(`/api/workspaces/${workspace.id}/invite/regenerate`).set(auth(user.token)),
-      request(app).post(`/api/workspaces/${workspace.id}/invite/regenerate`).set(auth(user.token)),
-    ]);
-
-    expect(responses.map(response => response.status).sort()).toEqual([200, 429]);
-    const refreshed = responses.find(response => response.status === 200)!.body.inviteCode;
-    expect(refreshed).toMatch(/^[A-F0-9]{10}$/);
-    expect(refreshed).not.toBe(workspace.invite_code);
-    const limited = responses.find(response => response.status === 429)!;
-    expect(limited.body).toMatchObject({error: expect.stringContaining('once per minute'), retryAfter: expect.any(Number)});
-    expect(limited.headers['retry-after']).toBe(String(limited.body.retryAfter));
-    expect((await db.prepare('SELECT invite_code FROM workspaces WHERE id=?').get(workspace.id) as any).invite_code).toBe(refreshed);
-
-    await db.prepare('UPDATE workspaces SET invite_refreshed_at=? WHERE id=?').run(new Date(Date.now() - 61_000).toISOString(), workspace.id);
-    const afterBoundary = await request(app).post(`/api/workspaces/${workspace.id}/invite/regenerate`).set(auth(user.token)).expect(200);
-    expect(afterBoundary.body.inviteCode).not.toBe(refreshed);
+    await request(app).post('/api/workspaces/join').set(auth(user.token)).send({inviteCode: 'AAAAAAAAAA'}).expect(410);
+    await request(app).post(`/api/workspaces/${workspace.id}/invite/regenerate`).set(auth(user.token)).expect(410);
+    await request(app).post(`/api/workspaces/${workspace.id}/invite/disable`).set(auth(user.token)).expect(410);
+    expect((await db.prepare('SELECT invite_enabled FROM workspaces WHERE id=?').get(workspace.id) as any).invite_enabled).toBe(false);
   });
 
   it('rejects invalid registration email and password values at the API boundary', async () => {
@@ -228,7 +219,7 @@ describe('approved server workflows', () => {
     const memberUser = await register('member');
     const workspace = (await request(app).post('/api/workspaces').set(auth(manager.token)).send({name: 'Managed'}).expect(201)).body;
     expect((await request(app).get('/api/workspaces').set(auth(manager.token))).body[0].role).toBe('Manager');
-    await request(app).post('/api/workspaces/join').set(auth(memberUser.token)).send({inviteCode: workspace.inviteCode}).expect(200);
+    await inviteAndAccept(app, manager.token, workspace.id, memberUser);
     const visibleMembers = (await request(app).get(`/api/workspaces/${workspace.id}/members`).set(auth(memberUser.token)).expect(200)).body;
     expect(visibleMembers.map((member: any) => member.name)).toEqual(expect.arrayContaining(['manager', 'member']));
     await request(app).get(`/api/workspaces/${workspace.id}/repositories`).set(auth(memberUser.token)).expect(200);
@@ -265,7 +256,7 @@ describe('approved server workflows', () => {
     expect((await request(app).get(`/api/workspaces/${workspace.id}/agents`).set(auth(memberUser.token)).expect(200)).body.filter((device: any) => device.user_id === memberUser.user.id)).toHaveLength(1);
 
     const parallel = (await request(app).post('/api/auth/register').send({name: 'Parallel device', email: 'parallel-device@example.test', password: 'password123'}).expect(201)).body;
-    await request(app).post('/api/workspaces/join').set(auth(parallel.token)).send({inviteCode: workspace.inviteCode}).expect(200);
+    await inviteAndAccept(app, manager.token, workspace.id, parallel);
     const parallelSetups = await Promise.all([1, 2].map(async () => (await request(app).post('/api/agents/installations').set(auth(parallel.token)).send({workspaceId: workspace.id}).expect(201)).body));
     const parallelIdentity = 'd'.repeat(64);
     const parallelExchanges = await Promise.all(parallelSetups.map(setup => request(app).post('/api/agents/install/exchange').send({installToken: installToken(setup), machineName: 'parallel-box', installationId: parallelIdentity}).expect(201).then(response => response.body)));
@@ -277,10 +268,10 @@ describe('approved server workflows', () => {
     const memberId = memberUser.user.id;
     await request(app).patch(`/api/workspaces/${workspace.id}/members/${memberId}`).set(auth(memberUser.token)).send({role: 'Manager'}).expect(403);
     await request(app).patch(`/api/workspaces/${workspace.id}/members/${memberId}`).set(auth(manager.token)).send({role: 'Manager'}).expect(200);
-    await request(app).patch(`/api/workspaces/${workspace.id}/members/${manager.user.id}`).set(auth(manager.token)).send({role: 'Member'}).expect(200);
-    await request(app).patch(`/api/workspaces/${workspace.id}/members/${memberId}`).set(auth(memberUser.token)).send({role: 'Member'}).expect(409);
+    await request(app).patch(`/api/workspaces/${workspace.id}/members/${manager.user.id}`).set(auth(manager.token)).send({role: 'Developer'}).expect(200);
+    await request(app).patch(`/api/workspaces/${workspace.id}/members/${memberId}`).set(auth(memberUser.token)).send({role: 'Developer'}).expect(409);
     await request(app).delete(`/api/workspaces/${workspace.id}/members/${memberId}`).set(auth(memberUser.token)).expect(409);
-    await request(app).post(`/api/workspaces/${workspace.id}/invite/regenerate`).set(auth(manager.token)).expect(403);
+    await request(app).post(`/api/workspaces/${workspace.id}/invite/regenerate`).set(auth(manager.token)).expect(410);
   });
 
   it('serves and runs the Linux CLI bundle in an isolated home', async () => {
@@ -413,11 +404,11 @@ else if(command==='status'){console.log(JSON.stringify(JSON.parse(fs.readFileSyn
     expect(context.job).toMatchObject({target_report_id: originalReport.id, custom_prompt: 'Lead with outcomes and group work by capability.'});
     await request(app).post(`/api/agents/jobs/${regeneration.id}/complete`).set(auth(agent.agentToken)).send({markdown: '# Regenerated\n\nEngineering outcomes.'}).expect(201);
 
-    expect((await request(app).get(`/api/reports/${originalReport.id}`).set(auth(user.token)).expect(200)).body).toMatchObject({id: originalReport.id, job_id: regeneration.id, name: 'August Engineering Review', markdown: '# Regenerated\n\nEngineering outcomes.'});
+    expect((await request(app).get(`/api/reports/${originalReport.id}`).set(auth(user.token)).expect(200)).body).toMatchObject({id: originalReport.id, job_id: regeneration.id, name: 'August Engineering Review', markdown: '# Regenerated\n\nEngineering outcomes.', report_scope: 'personal', user_name: 'Report Owner'});
     expect((await request(app).get(`/api/workspaces/${workspace.id}/reports`).set(auth(user.token)).expect(200)).body).toHaveLength(1);
 
     const manager = (await request(app).post('/api/auth/register').send({name: 'Report Manager', email: 'report-manager@test.local', password: 'password123'}).expect(201)).body;
-    await request(app).post('/api/workspaces/join').set(auth(manager.token)).send({inviteCode: workspace.inviteCode}).expect(200);
+    await inviteAndAccept(app, user.token, workspace.id, manager);
     await request(app).patch(`/api/reports/${originalReport.id}`).set(auth(manager.token)).send({name: 'Manager override'}).expect(404);
     await request(app).patch(`/api/reports/${originalReport.id}`).set(auth(user.token)).send({name: '   '}).expect(400);
     expect((await request(app).patch(`/api/reports/${originalReport.id}`).set(auth(user.token)).send({name: '  Platform Delivery Review  '}).expect(200)).body).toMatchObject({id: originalReport.id, name: 'Platform Delivery Review'});
@@ -481,19 +472,19 @@ else if(command==='status'){console.log(JSON.stringify(JSON.parse(fs.readFileSyn
     const backup = await register('backup-manager');
     const target = await register('promotion-target');
     const workspace = (await request(setupApp).post('/api/workspaces').set(auth(actor.token)).send({name: 'Authority Race'}).expect(201)).body;
-    for (const user of [backup, target]) await request(setupApp).post('/api/workspaces/join').set(auth(user.token)).send({inviteCode: workspace.inviteCode}).expect(200);
+    for (const user of [backup, target]) await inviteAndAccept(setupApp, actor.token, workspace.id, user);
     await request(setupApp).patch(`/api/workspaces/${workspace.id}/members/${backup.user.id}`).set(auth(actor.token)).send({role: 'Manager'}).expect(200);
 
     const gated = new ManagerPreflightGateDb(db);
     const app = createApp(gated as unknown as DB);
     const responsePromise = request(app).patch(`/api/workspaces/${workspace.id}/members/${target.user.id}`).set(auth(actor.token)).send({role: 'Manager'}).then(response => response);
     await gated.reached;
-    await db.prepare("UPDATE workspace_members SET role='Member' WHERE workspace_id=? AND user_id=?").run(workspace.id, actor.user.id);
+    await db.prepare("UPDATE workspace_members SET role='Developer' WHERE workspace_id=? AND user_id=?").run(workspace.id, actor.user.id);
     gated.release();
 
     const response = await responsePromise;
     expect(response.status).toBe(403);
-    expect((await db.prepare('SELECT role FROM workspace_members WHERE workspace_id=? AND user_id=?').get(workspace.id, target.user.id) as any).role).toBe('Member');
+    expect((await db.prepare('SELECT role FROM workspace_members WHERE workspace_id=? AND user_id=?').get(workspace.id, target.user.id) as any).role).toBe('Developer');
   });
 
   it('keeps lifecycle authority and target selection inside workspace transactions', async () => {
@@ -504,7 +495,7 @@ else if(command==='status'){console.log(JSON.stringify(JSON.parse(fs.readFileSyn
     const manager = await register('locking-manager');
     const member = await register('locking-member');
     const workspace = (await request(app).post('/api/workspaces').set(auth(manager.token)).send({name: 'Locked'}).expect(201)).body;
-    await request(app).post('/api/workspaces/join').set(auth(member.token)).send({inviteCode: workspace.inviteCode}).expect(200);
+    await inviteAndAccept(app, manager.token, workspace.id, member);
     const installation = (await request(app).post('/api/agents/installations').set(auth(member.token)).send({workspaceId: workspace.id}).expect(201)).body;
 
     recording.reset();
@@ -548,7 +539,7 @@ else if(command==='status'){console.log(JSON.stringify(JSON.parse(fs.readFileSyn
     const manager = await createUser('account-device-manager');
     const workspaceA = (await request(app).post('/api/workspaces').set(auth(member.token)).send({name: 'Workspace A'}).expect(201)).body;
     const workspaceB = (await request(app).post('/api/workspaces').set(auth(member.token)).send({name: 'Workspace B'}).expect(201)).body;
-    await request(app).post('/api/workspaces/join').set(auth(manager.token)).send({inviteCode: workspaceA.inviteCode}).expect(200);
+    await inviteAndAccept(app, member.token, workspaceA.id, manager);
     await request(app).patch(`/api/workspaces/${workspaceA.id}/members/${manager.user.id}`).set(auth(member.token)).send({role: 'Manager'}).expect(200);
 
     const installation = (await request(app).post('/api/agents/installations').set(auth(member.token)).send({workspaceId: workspaceA.id}).expect(201)).body;

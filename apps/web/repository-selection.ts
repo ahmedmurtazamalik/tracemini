@@ -1,8 +1,10 @@
 export type RepositoryCandidate = {
   id: number;
   agent_id: number;
+  owner_user_id?: number;
+  owner_name?: string;
   machine_name: string;
-  local_key: string;
+  local_key?: string;
   name: string;
   normalized_remote: string;
   branch?: string;
