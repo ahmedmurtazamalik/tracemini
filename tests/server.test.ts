@@ -334,6 +334,8 @@ else if(command==='status'){console.log(JSON.stringify(JSON.parse(fs.readFileSyn
     db = await openTestDb();
     const app = createApp(db);
     const user = (await request(app).post('/api/auth/register').send({name: 'Ada', email: 'ada@test.local', password: 'password123'}).expect(201)).body;
+    const bootstrap = (await request(app).get('/api/bootstrap').set(auth(user.token)).expect(200)).body;
+    expect(bootstrap).toMatchObject({user: {id: user.user.id, name: 'Ada'}, workspaces: [{name: "Ada's workspace", role: 'Manager'}]});
     const workspace = (await request(app).post('/api/workspaces').set(auth(user.token)).send({name: 'Mini'}).expect(201)).body;
     const installation = (await request(app).post('/api/agents/installations').set(auth(user.token)).send({workspaceId: workspace.id}).expect(201)).body;
     const agent = (await request(app).post('/api/agents/install/exchange').send({installToken: installToken(installation), machineName: 'ada-box'}).expect(201)).body;
@@ -362,6 +364,14 @@ else if(command==='status'){console.log(JSON.stringify(JSON.parse(fs.readFileSyn
     const stats = (await request(app).get(`/api/workspaces/${workspace.id}/stats`).set(auth(user.token)).expect(200)).body;
     expect(stats.totals).toEqual({commits: 1, filesChanged: 3, insertions: 12, deletions: 4});
     expect(stats.daily[0]).toMatchObject({date: '2026-08-21', commits: 1});
+    const dashboard = (await request(app).get(`/api/workspaces/${workspace.id}/dashboard`).set(auth(user.token)).expect(200)).body;
+    expect(dashboard.stats.totals).toEqual(stats.totals);
+    expect(dashboard.events).toHaveLength(3);
+    expect(dashboard.repositories[0]).toMatchObject({id: repo.id, clone_count: 1});
+    const settings = (await request(app).get(`/api/workspaces/${workspace.id}/settings`).set(auth(user.token)).expect(200)).body;
+    expect(settings).toMatchObject({members: [{id: user.user.id, role: 'Manager'}]});
+    expect(settings.repositoryCandidates).toHaveLength(2);
+    expect(settings.agents[0]).toMatchObject({id: agent.agentId, status: 'online'});
 
     await request(app).patch(`/api/workspaces/${workspace.id}/repositories/${repo.id}`).set(auth(user.token)).send({archived: true}).expect(200);
     expect((await request(app).get(`/api/workspaces/${workspace.id}/repositories?includeArchived=true`).set(auth(user.token))).body[0].archived).toBe(1);
