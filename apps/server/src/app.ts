@@ -819,32 +819,44 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
     const daily = [...dailyByDate.values()];
     return {totals, daily};
   };
-  const todayForWorkspace = async (workspaceId: unknown, query: Request['query']) => {
+  const timelineForWorkspace = async (workspaceId: unknown, query: Request['query']) => {
     const timezone = normalizeTimezone(query.timezone);
-    const date = dateKeyInTimezone(now(), timezone);
-    const bounds = dateRangeUtc(date, date, timezone);
-    const [members, events] = await Promise.all([
+    const defaultDate = dateKeyInTimezone(now(), timezone);
+    const from = String(query.from || defaultDate);
+    const to = String(query.to || defaultDate);
+    const bounds = dateRangeUtc(from, to, timezone);
+    const span = Math.floor((Date.parse(`${to}T00:00:00.000Z`) - Date.parse(`${from}T00:00:00.000Z`)) / 86_400_000) + 1;
+    const granularity = span === 1 ? 'hour' : 'day';
+    const filters = ["r.workspace_id=?", "e.occurred_at>=?", "e.occurred_at<=?", "e.type IN ('commit','push','pull','stage','branch','merge','rewrite')"];
+    const values: any[] = [workspaceId, bounds.from, bounds.to];
+    if (query.userId) { filters.push('e.user_id=?'); values.push(Number(query.userId)); }
+    if (query.repositoryId) { filters.push('r.id=?'); values.push(Number(query.repositoryId)); }
+    const [workspaceMembers, events] = await Promise.all([
       membersForWorkspace(workspaceId),
-      db.prepare(`SELECT e.user_id,e.type,e.occurred_at FROM activity_events e JOIN activity_event_repositories aer ON aer.event_id=e.id JOIN repositories r ON r.id=aer.repository_id WHERE r.workspace_id=? AND e.occurred_at>=? AND e.occurred_at<=? AND e.type IN ('commit','push','pull','stage') ORDER BY e.occurred_at`).all(workspaceId, bounds.from, bounds.to),
+      db.prepare(`SELECT DISTINCT e.id,e.user_id,e.type,e.occurred_at FROM activity_events e JOIN activity_event_repositories aer ON aer.event_id=e.id JOIN repositories r ON r.id=aer.repository_id WHERE ${filters.join(' AND ')} ORDER BY e.occurred_at`).all(...values),
     ]);
+    const members = query.userId ? workspaceMembers.filter((member: any) => Number(member.id) === Number(query.userId)) : workspaceMembers;
+    const emptyCounts = () => ({commit: 0, push: 0, pull: 0, stage: 0, branch: 0, merge: 0, rewrite: 0});
+    const labels = granularity === 'hour'
+      ? Array.from({length: 24}, (_, hour) => `${String(hour).padStart(2, '0')}:00`)
+      : Array.from({length: span}, (_, offset) => new Date(Date.parse(`${from}T00:00:00.000Z`) + offset * 86_400_000).toISOString().slice(0, 10));
     const users = members.map((member: any) => ({
       userId: Number(member.id), name: member.name,
-      totals: {commit: 0, push: 0, pull: 0, stage: 0},
-      hourly: Array.from({length: 24}, (_, hour) => ({hour, commit: 0, push: 0, pull: 0, stage: 0, total: 0})),
+      totals: emptyCounts(),
+      points: labels.map((label, index) => ({label, ...(granularity === 'hour' ? {hour: index} : {date: label}), ...emptyCounts(), total: 0})),
     }));
     const byUser = new Map(users.map((user: any) => [user.userId, user]));
     for (const event of events as any[]) {
       const user: any = byUser.get(Number(event.user_id));
       if (!user || !(event.type in user.totals)) continue;
+      const index = granularity === 'hour' ? hourInTimezone(event.occurred_at, timezone) : labels.indexOf(dateKeyInTimezone(event.occurred_at, timezone));
+      if (index < 0) continue;
       user.totals[event.type] += 1;
-      user.hourly[hourInTimezone(event.occurred_at, timezone)][event.type] += 1;
+      user.points[index][event.type] += 1;
+      user.points[index].total += 1;
     }
-    for (const user of users as any[]) {
-      for (const point of user.hourly) {
-        point.total = point.commit + point.push + point.pull + point.stage;
-      }
-    }
-    return {date, timezone, users};
+    for (const user of users as any[]) if (granularity === 'hour') user.hourly = user.points;
+    return {from, to, ...(span === 1 ? {date: from} : {}), timezone, granularity, users};
   };
   const scopedActivity = (query: Request['query']) => query.userId
     ? {extra: ' AND e.user_id=?', args: [Number(query.userId)]}
@@ -863,14 +875,19 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
     res.json(await statsForWorkspace(req.params.id, req.query));
   });
   app.get('/api/workspaces/:id/dashboard', userAuth, requireMember, async (req, res) => {
+    const from = req.query.from === undefined ? undefined : String(req.query.from);
+    const to = req.query.to === undefined ? undefined : String(req.query.to);
+    if (Boolean(from) !== Boolean(to) || (from && !dateOnly(from)) || (to && !dateOnly(to)) || (from && to && (from > to || (Date.parse(`${to}T00:00:00.000Z`) - Date.parse(`${from}T00:00:00.000Z`)) / 86_400_000 >= 90))) {
+      return res.status(400).json({error: 'activity timeline must be a valid range of 90 days or fewer'});
+    }
     const scope = scopedActivity(req.query);
-    const [events, repositories, stats, today] = await Promise.all([
+    const [events, repositories, stats, timeline] = await Promise.all([
       activityForWorkspace(Number(req.params.id), req.query, scope.extra, scope.args),
       repositoriesForWorkspace(req.params.id, true),
       statsForWorkspace(req.params.id, req.query),
-      todayForWorkspace(req.params.id, req.query),
+      timelineForWorkspace(req.params.id, req.query),
     ]);
-    res.json({events, repositories, stats, today});
+    res.json({events, repositories, stats, timeline, today: timeline});
   });
   app.get('/api/workspaces/:id/settings', userAuth, requireMember, async (req: Authed, res) => {
     const [members, repositories, repositoryCandidates, agents] = await Promise.all([
@@ -898,17 +915,29 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
     catch (error: any) { return res.status(422).json({error: error.message}); }
     if (!['codex', 'hermes'].includes(req.body.reporter)) return res.status(400).json({error: 'invalid reporter'});
     if (req.body.format !== undefined && !['summary', 'detailed'].includes(req.body.format)) return res.status(400).json({error: 'invalid report format'});
+    if (req.body.name !== undefined && typeof req.body.name !== 'string') return res.status(400).json({error: 'invalid schedule name'});
+    const scheduleName = req.body.name?.trim() || 'Scheduled workspace report';
+    if (scheduleName.length > 120) return res.status(400).json({error: 'schedule name must be 120 characters or fewer'});
     const windowDays = Number(req.body.windowDays);
     if (!Number.isInteger(windowDays) || windowDays < 1 || windowDays > 90) return res.status(400).json({error: 'windowDays must be between 1 and 90'});
     const configuredAt = new Date();
     const enabled = req.body.enabled !== false;
-    const nextRunAt = enabled ? nextScheduledRun(rule, configuredAt).toISOString() : null;
     const outcome: any = await db.transaction(async () => {
       await db.prepare('SELECT id FROM workspaces WHERE id=? FOR UPDATE').get(req.params.id);
       if (!(await hasLockedManagerAuthority(+req.params.id, req.user.id))) return undefined;
-      return await db.prepare(`INSERT INTO report_schedules(workspace_id,configured_by,enabled,frequency,selected_days,local_time,timezone,reporter,format,include_diff,notify_slack,window_days,next_run_at,created_at,updated_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(workspace_id) DO UPDATE SET configured_by=EXCLUDED.configured_by,enabled=EXCLUDED.enabled,frequency=EXCLUDED.frequency,selected_days=EXCLUDED.selected_days,local_time=EXCLUDED.local_time,timezone=EXCLUDED.timezone,reporter=EXCLUDED.reporter,format=EXCLUDED.format,include_diff=EXCLUDED.include_diff,notify_slack=EXCLUDED.notify_slack,window_days=EXCLUDED.window_days,next_run_at=EXCLUDED.next_run_at,updated_at=EXCLUDED.updated_at RETURNING *`)
-        .get(req.params.id, req.user.id, enabled, rule.frequency, JSON.stringify(rule.selectedDays), rule.localTime, rule.timezone, req.body.reporter, normalizeReportFormat(req.body.format), req.body.includeDiff === true, req.body.notifySlack === true, windowDays, nextRunAt, configuredAt.toISOString(), configuredAt.toISOString());
+      const existing: any = await db.prepare('SELECT * FROM report_schedules WHERE workspace_id=? FOR UPDATE').get(req.params.id);
+      let nextRunAt = enabled ? nextScheduledRun(rule, configuredAt).toISOString() : null;
+      if (enabled && existing?.enabled && existing.next_run_at) {
+        const existingNextRun = existing.next_run_at instanceof Date ? existing.next_run_at.toISOString() : String(existing.next_run_at);
+        const sameTiming = existing.frequency === rule.frequency
+          && existing.local_time === rule.localTime
+          && existing.timezone === rule.timezone
+          && JSON.stringify(eventData(existing.selected_days)) === JSON.stringify(rule.selectedDays);
+        if (sameTiming || new Date(existingNextRun) <= configuredAt) nextRunAt = existingNextRun;
+      }
+      return await db.prepare(`INSERT INTO report_schedules(workspace_id,configured_by,name,enabled,frequency,selected_days,local_time,timezone,reporter,format,include_diff,notify_slack,window_days,next_run_at,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(workspace_id) DO UPDATE SET configured_by=EXCLUDED.configured_by,name=EXCLUDED.name,enabled=EXCLUDED.enabled,frequency=EXCLUDED.frequency,selected_days=EXCLUDED.selected_days,local_time=EXCLUDED.local_time,timezone=EXCLUDED.timezone,reporter=EXCLUDED.reporter,format=EXCLUDED.format,include_diff=EXCLUDED.include_diff,notify_slack=EXCLUDED.notify_slack,window_days=EXCLUDED.window_days,next_run_at=EXCLUDED.next_run_at,updated_at=EXCLUDED.updated_at RETURNING *`)
+        .get(req.params.id, req.user.id, scheduleName, enabled, rule.frequency, JSON.stringify(rule.selectedDays), rule.localTime, rule.timezone, req.body.reporter, normalizeReportFormat(req.body.format), req.body.includeDiff === true, req.body.notifySlack === true, windowDays, nextRunAt, configuredAt.toISOString(), configuredAt.toISOString());
     });
     if (!outcome) return res.status(403).json({error: 'Manager required'});
     res.json({...outcome, selected_days: eventData(outcome.selected_days)});

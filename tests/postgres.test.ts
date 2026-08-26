@@ -40,12 +40,14 @@ describe('PostgreSQL database', () => {
     const db = await openTestDb();
     try {
       const migrations = await db.query('SELECT version,name,checksum FROM schema_migrations ORDER BY version');
-      expect(migrations.rows.map((row: any) => row.version)).toEqual([1, 3, 4, 5, 6, 9, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]);
+      expect(migrations.rows.map((row: any) => row.version)).toEqual([1, 3, 4, 5, 6, 9, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]);
       for (const migration of migrations.rows) expect(migration.checksum).toMatch(/^[a-f0-9]{64}$/);
       const reportJobColumns = await db.query("SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='report_jobs'");
       expect(reportJobColumns.rows.map((row: any) => row.column_name)).toEqual(expect.arrayContaining(['custom_prompt', 'target_report_id', 'report_name', 'format', 'report_scope', 'schedule_id', 'scheduled_for', 'coalesced_runs', 'notify_slack']));
       const reportColumns = await db.query("SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='reports'");
       expect(reportColumns.rows.map((row: any) => row.column_name)).toEqual(expect.arrayContaining(['name', 'format', 'report_scope', 'schedule_id', 'scheduled_for', 'coalesced_runs']));
+      const scheduleColumns = await db.query("SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='report_schedules'");
+      expect(scheduleColumns.rows.map((row: any) => row.column_name)).toContain('name');
       const agentColumns = await db.query("SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='agents'");
       expect(agentColumns.rows.map((row: any) => row.column_name)).toEqual(expect.arrayContaining(['removed_at', 'installation_id']));
       const candidateWorkspace = await db.query("SELECT is_nullable FROM information_schema.columns WHERE table_schema='public' AND table_name='repository_candidates' AND column_name='workspace_id'");

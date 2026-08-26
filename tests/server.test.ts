@@ -359,6 +359,16 @@ else if(command==='status'){console.log(JSON.stringify(JSON.parse(fs.readFileSyn
 
     await request(app).post('/api/activity').set(auth(agent.agentToken)).send({eventKey: 'commit-stat', repositoryId: repo.id, localKey: '/clone', identityFingerprint: testFingerprint, type: 'commit', occurredAt: '2026-08-21T10:00:00.000Z', data: {filesChanged: 3, insertions: 12, deletions: 4}}).expect(201);
     await request(app).post('/api/activity').set(auth(agent.agentToken)).send({eventKey: 'stage-stat', repositoryId: repo.id, localKey: '/clone', identityFingerprint: testFingerprint, type: 'stage', occurredAt: '2026-08-21T11:00:00.000Z', data: {filesChanged: 99, insertions: 99, deletions: 99}}).expect(201);
+    await request(app).post('/api/activity').set(auth(agent.agentToken)).send({eventKey: 'merge-stat', repositoryId: repo.id, localKey: '/clone', identityFingerprint: testFingerprint, type: 'merge', occurredAt: '2026-08-22T12:00:00.000Z', data: {}}).expect(201);
+    const rangeDashboard = (await request(app).get(`/api/workspaces/${workspace.id}/dashboard?timezone=UTC&from=2026-08-21&to=2026-08-23`).set(auth(user.token)).expect(200)).body;
+    expect(rangeDashboard.timeline).toMatchObject({from: '2026-08-21', to: '2026-08-23', granularity: 'day', users: [expect.objectContaining({userId: user.user.id, name: 'Ada'})]});
+    expect(rangeDashboard.timeline.users[0].points).toHaveLength(3);
+    expect(rangeDashboard.timeline.users[0].points.map((point: any) => ({label: point.label, total: point.total}))).toEqual([
+      {label: '2026-08-21', total: 2},
+      {label: '2026-08-22', total: 1},
+      {label: '2026-08-23', total: 0},
+    ]);
+    expect(rangeDashboard.timeline.users[0].totals).toMatchObject({commit: 1, stage: 1, merge: 1});
     const stats = (await request(app).get(`/api/workspaces/${workspace.id}/stats`).set(auth(user.token)).expect(200)).body;
     expect(stats.totals).toEqual({commits: 1, filesChanged: 3, insertions: 12, deletions: 4});
     expect(stats.daily[0]).toMatchObject({date: '2026-08-21', commits: 1});
@@ -367,11 +377,11 @@ else if(command==='status'){console.log(JSON.stringify(JSON.parse(fs.readFileSyn
     await db.prepare('UPDATE repositories SET name=?,remote_url=?,normalized_remote=? WHERE id=?').run('/opaque/QZ7M4N8891/private-project', '/home/ada/private/project', 'home/ada/private/project', repo.id);
     const dashboard = (await request(app).get(`/api/workspaces/${workspace.id}/dashboard?timezone=UTC`).set(auth(user.token)).expect(200)).body;
     expect(dashboard.stats.totals.commits).toBe(2);
-    expect(dashboard.today).toMatchObject({date: today.slice(0, 10), users: [expect.objectContaining({userId: user.user.id, name: 'Ada', totals: {commit: 1, push: 1, pull: 0, stage: 0}})]});
+    expect(dashboard.today).toMatchObject({date: today.slice(0, 10), users: [expect.objectContaining({userId: user.user.id, name: 'Ada', totals: expect.objectContaining({commit: 1, push: 1, pull: 0, stage: 0})})]});
     expect(dashboard.today.users[0].hourly).toHaveLength(24);
     expect(dashboard.today.users[0].hourly.reduce((sum: number, point: any) => sum + point.total, 0)).toBe(2);
-    expect(dashboard.today.users[0].hourly.every((point: any) => point.total === point.commit + point.push + point.pull + point.stage)).toBe(true);
-    expect(dashboard.events).toHaveLength(4);
+    expect(dashboard.today.users[0].hourly.every((point: any) => point.total === point.commit + point.push + point.pull + point.stage + point.branch + point.merge + point.rewrite)).toBe(true);
+    expect(dashboard.events).toHaveLength(5);
     expect(dashboard.events.every((event: any) => event.local_key === null)).toBe(true);
     expect(JSON.stringify(dashboard.events)).not.toContain('/home/ada');
     expect(JSON.stringify(dashboard.events)).not.toContain('/opaque/');

@@ -487,43 +487,19 @@ function PageHeading({
   );
 }
 
-function Trend({ daily }: { daily: any[] }) {
-  const max = Math.max(1, ...daily.map((day) => day.commits));
-  return (
-    <div className="trend" aria-label="Daily commit trend" role="list">
-      {daily.length ? (
-        daily.map((day) => (
-          <div
-            role="listitem"
-            aria-label={`${day.date}: ${day.commits} commits`}
-            title={`${day.date}: ${day.commits} commits`}
-            key={day.date}
-          >
-            <i
-              aria-hidden="true"
-              style={{ height: `${Math.max(8, (day.commits / max) * 100)}%` }}
-            />
-            <small>{day.date.slice(5)}</small>
-          </div>
-        ))
-      ) : (
-        <p className="empty-inline">Commit activity will appear here.</p>
-      )}
-    </div>
-  );
-}
-
-function TodayActivityGraph({today}: {today: any}) {
-  const users = today?.users || [];
-  const observedMaximum = Math.max(0, ...users.flatMap((user: any) => user.hourly.map((point: any) => point.total)));
+function ActivityTimelineGraph({timeline}: {timeline: any}) {
+  const users = timeline?.users || [];
+  const points = users[0]?.points || [];
+  const observedMaximum = Math.max(0, ...users.flatMap((user: any) => user.points.map((point: any) => point.total)));
   const scale = activityGraphTicks(observedMaximum);
   const colors = ["#19df91", "#6ea8fe", "#f5c451", "#f07cac", "#9b8cff", "#ff8c66"];
-  const plot = {left: 44, top: 18, width: 656, height: 154};
-  const hourLabels = [0, 6, 12, 18, 23];
-  return <section className="card today-activity" aria-labelledby="today-activity-title">
-    <div className="section-heading"><div><span>Hourly Git activity</span><h2 id="today-activity-title">Today by member</h2></div><small>{today?.date || "Today"}</small></div>
-    <p className="chart-description">Commits, pushes, pulls, and staging events in each hour. Hours without activity remain at zero.</p>
-    <svg viewBox="0 0 720 212" role="img" aria-label="Hourly commits, pushes, pulls, and staging events today for each workspace member">
+  const plot = {left: 56, top: 18, width: 644, height: 154};
+  const labelIndexes = [...new Set(Array.from({length: Math.min(5, points.length)}, (_, index) => points.length === 1 ? 0 : Math.round(index * (points.length - 1) / Math.max(1, Math.min(5, points.length) - 1))))];
+  const rangeLabel = timeline?.from === timeline?.to ? timeline?.from : `${timeline?.from || ""} — ${timeline?.to || ""}`;
+  return <section className="card today-activity" aria-labelledby="activity-timeline-title">
+    <div className="section-heading"><div><span>Git activity timeline</span><h2 id="activity-timeline-title">Activity by member</h2></div><small>{rangeLabel}</small></div>
+    <p className="chart-description">Commits, pushes, pulls, staging, branches, merges, and rewrites. The chart refreshes while this page is visible.</p>
+    <svg viewBox="0 0 720 212" role="img" aria-label={`Git activities by member from ${timeline?.from || "the selected start"} to ${timeline?.to || "the selected end"}`}>
       {scale.ticks.map(tick => {
         const y = plot.top + plot.height - tick / scale.maximum * plot.height;
         return <g key={tick}>
@@ -531,23 +507,27 @@ function TodayActivityGraph({today}: {today: any}) {
           <text x={plot.left - 12} y={y + 4} textAnchor="end" className="chart-axis-label">{tick}</text>
         </g>;
       })}
-      {hourLabels.map(hour => {
-        const x = plot.left + hour / 23 * plot.width;
-        return <g key={hour}>
+      {labelIndexes.map(index => {
+        const point = points[index];
+        const x = plot.left + (points.length === 1 ? 0 : index / (points.length - 1) * plot.width);
+        return <g key={`${point?.label}-${index}`}>
           <line x1={x} x2={x} y1={plot.top} y2={plot.top + plot.height} className="chart-grid chart-grid-vertical" />
-          <text x={x} y="199" textAnchor={hour === 0 ? "start" : hour === 23 ? "end" : "middle"} className="chart-axis-label">{String(hour).padStart(2, "0")}:00</text>
+          <text x={x} y="199" textAnchor={index === 0 ? "start" : index === points.length - 1 ? "end" : "middle"} className="chart-axis-label">{timeline?.granularity === "hour" ? point?.label : point?.label?.slice(5)}</text>
         </g>;
       })}
       {users.map((user: any, index: number) => {
         const color = colors[index % colors.length];
         return <g key={user.userId}>
-          <path d={activityGraphPath(user.hourly, plot.width, plot.height, scale.maximum)} transform={`translate(${plot.left} ${plot.top})`} fill="none" stroke={color} strokeWidth="3" strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke"><title>{activityUserSummary(user)}</title></path>
-          {user.hourly.map((point: any, hour: number) => point.total > 0 && <circle key={hour} cx={plot.left + hour / 23 * plot.width} cy={plot.top + plot.height - point.total / scale.maximum * plot.height} r="4" fill={color} stroke="var(--surface)" strokeWidth="2"><title>{user.name}, {String(hour).padStart(2, "0")}:00: {point.total} {point.total === 1 ? "activity" : "activities"}</title></circle>)}
+          <path d={activityGraphPath(user.points, plot.width, plot.height, scale.maximum)} transform={`translate(${plot.left} ${plot.top})`} fill="none" stroke={color} strokeWidth="3" strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke"><title>{activityUserSummary(user)}</title></path>
+          {user.points.map((point: any, pointIndex: number) => point.total > 0 && <circle key={point.label} cx={plot.left + (user.points.length === 1 ? 0 : pointIndex / (user.points.length - 1) * plot.width)} cy={plot.top + plot.height - point.total / scale.maximum * plot.height} r="4" fill={color} stroke="var(--surface)" strokeWidth="2"><title>{user.name}, {point.label}: {point.total} {point.total === 1 ? "activity" : "activities"}</title></circle>)}
         </g>;
       })}
     </svg>
     <div className="activity-legend">
-      {users.map((user: any, index: number) => <div key={user.userId}><i style={{background: colors[index % colors.length]}} /><strong>{user.name}</strong><small>{user.totals.commit} commits · {user.totals.push} pushes · {user.totals.pull} pulls · {user.totals.stage} stages</small></div>)}
+      {users.map((user: any, index: number) => {
+        const total = Object.values(user.totals || {}).reduce((sum: number, count: any) => sum + Number(count || 0), 0);
+        return <div key={user.userId}><i style={{background: colors[index % colors.length]}} /><strong>{user.name}</strong><small>{total} total · {user.totals.commit} commits · {user.totals.push} pushes · {user.totals.pull} pulls · {user.totals.merge} merges</small></div>;
+      })}
     </div>
   </section>;
 }
@@ -1077,7 +1057,7 @@ function Dashboard({
   const activeView = useActiveView();
   useEffect(() => {
     const refresh = () => { if (activeView.current && document.visibilityState === "visible") void reload(); };
-    const timer = setInterval(refresh, 60_000);
+    const timer = setInterval(refresh, 15_000);
     document.addEventListener("visibilitychange", refresh);
     return () => { clearInterval(timer); document.removeEventListener("visibilitychange", refresh); };
   }, [reload]);
@@ -1128,8 +1108,7 @@ function Dashboard({
           </article>
         ))}
       </div>
-      <Trend daily={stats.daily} />
-      <TodayActivityGraph today={today} />
+      <ActivityTimelineGraph timeline={today} />
       <div className="dashboard-grid">
         <Activity events={events} workspaceId={workspaceId} timezone={timezone} />
         <aside className="card insight-card">
@@ -1699,7 +1678,7 @@ function App() {
           setEvents(value.events);
           setRepositories(value.repositories);
           setStats(value.stats);
-          setToday(value.today);
+          setToday(value.timeline);
         },
         settings: (value) => {
           setMembers(value.members);
@@ -1839,7 +1818,7 @@ function App() {
             {logoutError && <span className="topbar-error" role="alert">{logoutError}</span>}
             <button className="button secondary inbox-button" onClick={() => setInboxOpen(true)}>
               Invitations
-              {invitations.some((item) => item.status === "PENDING") && <span className="count-badge">{invitations.filter((item) => item.status === "PENDING").length}</span>}
+              {invitations.some((item) => item.status === "PENDING") && <span className="count-badge invitation-notification">{invitations.filter((item) => item.status === "PENDING").length}</span>}
             </button>
             <ThemeToggle theme={theme} onToggle={() => setTheme(nextTheme(theme))} />
             <button

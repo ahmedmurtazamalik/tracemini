@@ -254,6 +254,10 @@ ALTER TABLE report_schedules ADD COLUMN IF NOT EXISTS notify_slack BOOLEAN NOT N
 ALTER TABLE report_jobs ADD COLUMN IF NOT EXISTS notify_slack BOOLEAN NOT NULL DEFAULT FALSE;
 `;
 
+const reportScheduleNamingMigrationSql = `
+ALTER TABLE report_schedules ADD COLUMN IF NOT EXISTS name TEXT NOT NULL DEFAULT 'Scheduled workspace report';
+`;
+
 export function normalizePostgresConnectionString(connectionString: string) {
   const url = new URL(connectionString);
   const isSupabasePooler = url.hostname === 'pooler.supabase.com' || url.hostname.endsWith('.pooler.supabase.com');
@@ -374,6 +378,7 @@ export class DB {
         {version: 19, name: 'workspace report schedules', sql: reportScheduleMigrationSql},
         {version: 20, name: 'optional Slack report notifications', sql: slackReportNotificationMigrationSql},
         {version: 21, name: 'shared activity observations', sql: sharedActivityMigrationSql},
+        {version: 22, name: 'scheduled report naming', sql: reportScheduleNamingMigrationSql},
       ];
       for (const migration of migrations) {
         const checksum = crypto.createHash('sha256').update(migration.sql).digest('hex');
