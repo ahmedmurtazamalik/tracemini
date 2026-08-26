@@ -8,7 +8,7 @@ import type {DB} from './db.js';
 import {linuxInstallCommand, linuxInstaller, linuxSyncCommand} from './linux-installer.js';
 import {dateKeyInTimezone, dateRangeUtc, normalizeTimezone} from './timezone.js';
 import {materializeDueReportSchedules, nextScheduledRun, normalizeReportFormat, validateScheduleRule} from './report-schedule.js';
-import {sendSlackReport} from './slack.js';
+import {sendSlackReport, slackReportSummary} from './slack.js';
 
 const now = () => new Date().toISOString();
 const expired = (value: string | Date) => new Date(value).getTime() <= Date.now();
@@ -906,7 +906,7 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
         reportId = inserted.lastInsertRowid;
       }
       await db.prepare("UPDATE report_jobs SET status='completed',completed_at=? WHERE id=?").run(now(), job.id);
-      return {id: Number(reportId), workspaceId: Number(job.workspace_id), name: job.report_name || defaultReportName(job.start_date, job.end_date), startDate: isoDate(job.start_date), endDate: isoDate(job.end_date), scope: job.report_scope, notifySlack: Boolean(job.notify_slack)};
+      return {id: Number(reportId), workspaceId: Number(job.workspace_id), name: job.report_name || defaultReportName(job.start_date, job.end_date), startDate: isoDate(job.start_date), endDate: isoDate(job.end_date), scope: job.report_scope, summary: slackReportSummary(req.body.markdown), notifySlack: Boolean(job.notify_slack)};
     });
     if (!completed) return res.status(409).json({error: 'job not claimed'});
     if (completed.notifySlack) {
