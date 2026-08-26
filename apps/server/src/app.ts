@@ -107,6 +107,24 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
     }
     throw new Error('could not allocate workspace invite code');
   };
+  const workspacesForUser = (userId: number) => db.prepare('SELECT w.*,wm.role FROM workspaces w JOIN workspace_members wm ON wm.workspace_id=w.id WHERE wm.user_id=? ORDER BY w.id').all(userId);
+  const repositoriesForWorkspace = async (workspaceId: unknown, includeArchived = false) => {
+    const archived = includeArchived ? '' : ' AND r.archived=FALSE';
+    const rows = await db.prepare(`SELECT r.* FROM repositories r WHERE r.workspace_id=?${archived} ORDER BY r.name`).all(workspaceId);
+    return Promise.all(rows.map(async (row: any) => ({
+      ...row,
+      archived: row.archived ? 1 : 0,
+      clone_count: (await db.prepare('SELECT COUNT(*)::INTEGER count FROM local_clones WHERE repository_id=?').get(row.id)).count,
+    })));
+  };
+  const membersForWorkspace = (workspaceId: unknown) => db.prepare('SELECT u.id,u.name,u.email,wm.role FROM workspace_members wm JOIN users u ON u.id=wm.user_id WHERE wm.workspace_id=? ORDER BY u.name').all(workspaceId);
+  const candidatesForWorkspace = (workspaceId: unknown, userId: number) => db.prepare(`SELECT c.id,c.local_key,c.name,c.normalized_remote,c.branch,c.traced,c.desired_traced,c.revision,c.last_seen,c.error,c.repository_id,a.id agent_id,a.machine_name
+    FROM repository_candidates c JOIN agents a ON a.id=c.agent_id JOIN workspace_members wm ON wm.workspace_id=c.workspace_id AND wm.user_id=?
+    WHERE c.workspace_id=? AND a.user_id=? AND a.revoked_at IS NULL ORDER BY a.machine_name,c.name,c.local_key`).all(userId, workspaceId, userId);
+  const agentsForWorkspace = (workspaceId: unknown) => {
+    const cutoff = new Date(Date.now() - 60_000).toISOString();
+    return db.prepare("SELECT a.id,a.user_id,a.machine_name,a.last_seen,a.revoked_at,u.name user_name,CASE WHEN a.revoked_at IS NOT NULL THEN 'revoked' WHEN a.last_seen>=? THEN 'online' ELSE 'offline' END status FROM agents a JOIN users u ON u.id=a.user_id JOIN workspace_members wm ON wm.user_id=a.user_id AND wm.workspace_id=? WHERE a.removed_at IS NULL ORDER BY a.id").all(cutoff, workspaceId);
+  };
 
   app.get('/api/health', async (_req, res, next) => {
     try {
@@ -161,6 +179,10 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
     res.status(204).end();
   });
   app.get('/api/auth/me', userAuth, async (req: Authed, res) => res.json({id: req.user.id, name: req.user.name, email: req.user.email}));
+  app.get('/api/bootstrap', userAuth, async (req: Authed, res) => res.json({
+    user: {id: req.user.id, name: req.user.name, email: req.user.email},
+    workspaces: await workspacesForUser(req.user.id),
+  }));
 
 
   app.post('/api/workspaces', userAuth, required(['name']), async (req: Authed, res) => {
@@ -182,8 +204,8 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
     if (!workspace) return res.status(404).json({error: 'invalid or disabled invite code'});
     res.json(workspace);
   });
-  app.get('/api/workspaces', userAuth, async (req: Authed, res) => res.json(await db.prepare('SELECT w.*,wm.role FROM workspaces w JOIN workspace_members wm ON wm.workspace_id=w.id WHERE wm.user_id=? ORDER BY w.id').all(req.user.id)));
-  app.get('/api/workspaces/:id/members', userAuth, requireMember, async (req, res) => res.json(await db.prepare('SELECT u.id,u.name,u.email,wm.role FROM workspace_members wm JOIN users u ON u.id=wm.user_id WHERE wm.workspace_id=? ORDER BY u.name').all(req.params.id)));
+  app.get('/api/workspaces', userAuth, async (req: Authed, res) => res.json(await workspacesForUser(req.user.id)));
+  app.get('/api/workspaces/:id/members', userAuth, requireMember, async (req, res) => res.json(await membersForWorkspace(req.params.id)));
   app.patch('/api/workspaces/:id/members/:userId', userAuth, requireManager, async (req: Authed, res) => {
     if (!['Manager', 'Member'].includes(req.body.role)) return res.status(400).json({error: 'role must be Manager or Member'});
     const outcome = await db.transaction(async () => {
@@ -408,10 +430,7 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
     res.json({ok: true, count: repositories.length});
   });
   app.get('/api/workspaces/:id/repository-candidates', userAuth, requireMember, async (req: Authed, res) => {
-    const rows = await db.prepare(`SELECT c.id,c.local_key,c.name,c.normalized_remote,c.branch,c.traced,c.desired_traced,c.revision,c.last_seen,c.error,c.repository_id,a.id agent_id,a.machine_name
-      FROM repository_candidates c JOIN agents a ON a.id=c.agent_id JOIN workspace_members wm ON wm.workspace_id=c.workspace_id AND wm.user_id=?
-      WHERE c.workspace_id=? AND a.user_id=? AND a.revoked_at IS NULL ORDER BY a.machine_name,c.name,c.local_key`).all(req.user.id, req.params.id, req.user.id);
-    res.json(rows);
+    res.json(await candidatesForWorkspace(req.params.id, req.user.id));
   });
   app.patch('/api/workspaces/:id/repository-candidates/:candidateId', userAuth, requireMember, async (req: Authed, res) => {
     if (typeof req.body.traced !== 'boolean') return res.status(400).json({error: 'traced boolean required'});
@@ -448,9 +467,7 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
     res.json({ok: true});
   });
   app.get('/api/workspaces/:id/agents', userAuth, requireMember, async (req, res) => {
-    const cutoff = new Date(Date.now() - 60_000).toISOString();
-    const rows = await db.prepare("SELECT a.id,a.user_id,a.machine_name,a.last_seen,a.revoked_at,u.name user_name,CASE WHEN a.revoked_at IS NOT NULL THEN 'revoked' WHEN a.last_seen>=? THEN 'online' ELSE 'offline' END status FROM agents a JOIN users u ON u.id=a.user_id JOIN workspace_members wm ON wm.user_id=a.user_id AND wm.workspace_id=? WHERE a.removed_at IS NULL ORDER BY a.id").all(cutoff, req.params.id);
-    res.json(rows);
+    res.json(await agentsForWorkspace(req.params.id));
   });
   app.post('/api/workspaces/:id/agents/:agentId/revoke', userAuth, requireMember, async (req: Authed, res) => {
     const outcome = await db.transaction(async () => {
@@ -506,10 +523,7 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
     res.json(repository);
   });
   app.get('/api/workspaces/:id/repositories', userAuth, requireMember, async (req, res) => {
-    const archived = req.query.includeArchived === 'true' ? '' : ' AND r.archived=FALSE';
-    const rows = await db.prepare(`SELECT r.* FROM repositories r WHERE r.workspace_id=?${archived} ORDER BY r.name`).all(req.params.id);
-    const result = await Promise.all(rows.map(async (row: any) => ({...row, archived: row.archived ? 1 : 0, clone_count: (await db.prepare('SELECT COUNT(*)::INTEGER count FROM local_clones WHERE repository_id=?').get(row.id)).count})));
-    res.json(result);
+    res.json(await repositoriesForWorkspace(req.params.id, req.query.includeArchived === 'true'));
   });
   app.patch('/api/workspaces/:id/repositories/:repositoryId', userAuth, requireManager, async (req, res) => {
     if (typeof req.body.archived !== 'boolean') return res.status(400).json({error: 'archived boolean required'});
@@ -580,28 +594,23 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
     if (accepted == null) return res.status(403).json({error: 'repository not available'});
     res.status(accepted ? 201 : 200).json({accepted});
   });
-  const queryActivity = async (req: Authed, res: Response, extra: string, args: any[]) => {
-    const workspaceId = Number(req.params.workspaceId || req.query.workspaceId || 0);
-    if (!workspaceId || !(await membership(req.user.id, workspaceId))) return res.status(403).json({error: 'forbidden'});
+  const activityForWorkspace = async (workspaceId: number, query: Request['query'], extra = '', args: any[] = []) => {
     let sql = 'SELECT e.*,u.name user_name,r.name repository_name FROM activity_events e JOIN users u ON u.id=e.user_id JOIN repositories r ON r.id=e.repository_id WHERE r.workspace_id=?' + extra;
     const values: any[] = [workspaceId, ...args];
-    const timezone = normalizeTimezone(req.query.timezone);
-    if (req.query.from) { sql += ' AND e.occurred_at>=?'; values.push(dateRangeUtc(String(req.query.from), String(req.query.from), timezone).from); }
-    if (req.query.to) { sql += ' AND e.occurred_at<=?'; values.push(dateRangeUtc(String(req.query.to), String(req.query.to), timezone).to); }
+    const timezone = normalizeTimezone(query.timezone);
+    if (query.from) { sql += ' AND e.occurred_at>=?'; values.push(dateRangeUtc(String(query.from), String(query.from), timezone).from); }
+    if (query.to) { sql += ' AND e.occurred_at<=?'; values.push(dateRangeUtc(String(query.to), String(query.to), timezone).to); }
     sql += ' ORDER BY e.occurred_at DESC LIMIT 500';
-    res.json((await db.prepare(sql).all(...values)).map((row: any) => ({...row, data: eventData(row.data)})));
+    return (await db.prepare(sql).all(...values)).map((row: any) => ({...row, data: eventData(row.data)}));
   };
-  app.get('/api/workspaces/:workspaceId/activity', userAuth, async (req: Authed, res) => await queryActivity(req, res, '', []));
-  app.get('/api/repositories/:id/activity', userAuth, async (req: Authed, res) => await queryActivity(req, res, ' AND e.repository_id=?', [+req.params.id]));
-  app.get('/api/users/:id/activity', userAuth, async (req: Authed, res) => await queryActivity(req, res, ' AND e.user_id=?', [+req.params.id]));
-  app.get('/api/workspaces/:id/stats', userAuth, requireMember, async (req, res) => {
-    const timezone = normalizeTimezone(req.query.timezone);
+  const statsForWorkspace = async (workspaceId: unknown, query: Request['query']) => {
+    const timezone = normalizeTimezone(query.timezone);
     const filters: string[] = ["r.workspace_id=?", "e.type='commit'"];
-    const values: any[] = [req.params.id];
-    if (req.query.userId) { filters.push('e.user_id=?'); values.push(req.query.userId); }
-    if (req.query.repositoryId) { filters.push('e.repository_id=?'); values.push(req.query.repositoryId); }
-    if (req.query.from) { filters.push('e.occurred_at>=?'); values.push(dateRangeUtc(String(req.query.from), String(req.query.from), timezone).from); }
-    if (req.query.to) { filters.push('e.occurred_at<=?'); values.push(dateRangeUtc(String(req.query.to), String(req.query.to), timezone).to); }
+    const values: any[] = [workspaceId];
+    if (query.userId) { filters.push('e.user_id=?'); values.push(query.userId); }
+    if (query.repositoryId) { filters.push('e.repository_id=?'); values.push(query.repositoryId); }
+    if (query.from) { filters.push('e.occurred_at>=?'); values.push(dateRangeUtc(String(query.from), String(query.from), timezone).from); }
+    if (query.to) { filters.push('e.occurred_at<=?'); values.push(dateRangeUtc(String(query.to), String(query.to), timezone).to); }
     const where = filters.join(' AND ');
     const totals: any = await db.prepare(`SELECT COUNT(*)::INTEGER commits,COALESCE(SUM(CAST(e.data::JSONB->>'filesChanged' AS INTEGER)),0)::INTEGER "filesChanged",COALESCE(SUM(CAST(e.data::JSONB->>'insertions' AS INTEGER)),0)::INTEGER insertions,COALESCE(SUM(CAST(e.data::JSONB->>'deletions' AS INTEGER)),0)::INTEGER deletions FROM activity_events e JOIN repositories r ON r.id=e.repository_id WHERE ${where}`).get(...values);
     const dailyEvents = await db.prepare(`SELECT e.occurred_at,e.data FROM activity_events e JOIN repositories r ON r.id=e.repository_id WHERE ${where} ORDER BY e.occurred_at`).all(...values);
@@ -617,7 +626,41 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir) {
       dailyByDate.set(date, current);
     }
     const daily = [...dailyByDate.values()];
-    res.json({totals, daily});
+    return {totals, daily};
+  };
+  const scopedActivity = (query: Request['query']) => query.userId
+    ? {extra: ' AND e.user_id=?', args: [Number(query.userId)]}
+    : query.repositoryId
+      ? {extra: ' AND e.repository_id=?', args: [Number(query.repositoryId)]}
+      : {extra: '', args: []};
+  const queryActivity = async (req: Authed, res: Response, extra: string, args: any[]) => {
+    const workspaceId = Number(req.params.workspaceId || req.query.workspaceId || 0);
+    if (!workspaceId || !(await membership(req.user.id, workspaceId))) return res.status(403).json({error: 'forbidden'});
+    res.json(await activityForWorkspace(workspaceId, req.query, extra, args));
+  };
+  app.get('/api/workspaces/:workspaceId/activity', userAuth, async (req: Authed, res) => await queryActivity(req, res, '', []));
+  app.get('/api/repositories/:id/activity', userAuth, async (req: Authed, res) => await queryActivity(req, res, ' AND e.repository_id=?', [+req.params.id]));
+  app.get('/api/users/:id/activity', userAuth, async (req: Authed, res) => await queryActivity(req, res, ' AND e.user_id=?', [+req.params.id]));
+  app.get('/api/workspaces/:id/stats', userAuth, requireMember, async (req, res) => {
+    res.json(await statsForWorkspace(req.params.id, req.query));
+  });
+  app.get('/api/workspaces/:id/dashboard', userAuth, requireMember, async (req, res) => {
+    const scope = scopedActivity(req.query);
+    const [events, repositories, stats] = await Promise.all([
+      activityForWorkspace(Number(req.params.id), req.query, scope.extra, scope.args),
+      repositoriesForWorkspace(req.params.id, true),
+      statsForWorkspace(req.params.id, req.query),
+    ]);
+    res.json({events, repositories, stats});
+  });
+  app.get('/api/workspaces/:id/settings', userAuth, requireMember, async (req: Authed, res) => {
+    const [members, repositories, repositoryCandidates, agents] = await Promise.all([
+      membersForWorkspace(req.params.id),
+      repositoriesForWorkspace(req.params.id, true),
+      candidatesForWorkspace(req.params.id, req.user.id),
+      agentsForWorkspace(req.params.id),
+    ]);
+    res.json({members, repositories, repositoryCandidates, agents});
   });
 
   app.post('/api/reports/jobs', userAuth, required(['workspaceId', 'startDate', 'endDate', 'reporter']), async (req: Authed, res) => {

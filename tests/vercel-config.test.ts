@@ -11,6 +11,11 @@ describe('Vercel deployment configuration', () => {
     expect(entrypoint).toContain("import('../apps/server/src/vercel.js')");
     expect(config.buildCommand).toBe('npm run build');
     expect(config.outputDirectory).toBe('apps/web/dist');
+    expect(config.regions).toEqual(['sin1']);
+    expect(config.headers).toContainEqual({
+      source: '/assets/(.*)',
+      headers: [{key: 'Cache-Control', value: 'public, max-age=31536000, immutable'}],
+    });
     expect(config.rewrites).toEqual([
       {source: '/api/(.*)', destination: '/api/index'},
       {source: '/((?!api/).*)', destination: '/index.html'},

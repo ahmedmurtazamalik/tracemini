@@ -8,15 +8,12 @@ import React, {
   type ReactNode,
 } from "react";
 import { createRoot } from "react-dom/client";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import {
   getRouteContext,
   getRouteView,
   reportMatchesRoute,
   workspacePath,
 } from "./routes.js";
-import { downloadReport } from "./report-download.js";
 import { checkCliConnection, deviceManagementAction } from "./device-connection.js";
 import { reportJobProgress, type ReportJob } from "./report-progress.js";
 import { TIMEZONE_OPTIONS, formatInTimezone, normalizeTimezone, todayInTimezone } from "./timezone.js";
@@ -47,6 +44,15 @@ const request = async (path: string, init: RequestInit = {}) => {
     );
   return result;
 };
+const ReportMarkdown = React.lazy(async () => {
+  const [{default: ReactMarkdown}, {default: remarkGfm}] = await Promise.all([
+    import("react-markdown"),
+    import("remark-gfm"),
+  ]);
+  return {default: ({markdown}: {markdown: string}) => (
+    <ReactMarkdown remarkPlugins={[remarkGfm]}>{markdown}</ReactMarkdown>
+  )};
+});
 const navigate = (path: string) => {
   history.pushState({}, "", path);
   dispatchEvent(new PopStateEvent("popstate"));
@@ -226,6 +232,28 @@ function BusyIndicator({ label }: { label: string }) {
       <i className="spinner" aria-hidden="true" />
       <span>{label}</span>
     </span>
+  );
+}
+
+function ProgressTrack({ label }: { label: string }) {
+  return (
+    <span className="progress-track" role="progressbar" aria-label={label} aria-valuetext={label}>
+      <i aria-hidden="true" />
+    </span>
+  );
+}
+
+function LoadingSurface({label, detail, fullScreen = false}: {label: string; detail: string; fullScreen?: boolean}) {
+  return (
+    <div className={fullScreen ? "loading-surface full-screen" : "loading-surface"} role="status" aria-live="polite" aria-busy="true">
+      <Brand />
+      <span className="loading-spinner" aria-hidden="true" />
+      <div>
+        <strong>{label}</strong>
+        <p>{detail}</p>
+      </div>
+      <ProgressTrack label={label} />
+    </div>
   );
 }
 
@@ -572,7 +600,13 @@ function RepositorySelection({workspaceId, candidates, reload}: {workspaceId: nu
       const state = repositorySelectionState(candidate);
       return <label className="repository-choice" key={candidate.id}>
         <span><strong>{candidate.name}</strong><small>{candidate.machine_name} · {candidate.branch || "detached"}</small><code>{candidate.local_key}</code>{candidate.error && <small className="error-text">{candidate.error}</small>}</span>
-        <span className={`selection-state ${state.tone}`}>{state.label}</span>
+        <span className={`selection-state ${state.tone}`}>
+          {changing === candidate.id
+            ? <><BusyIndicator label="Saving selection…" /><ProgressTrack label={`Saving ${candidate.name} selection`} /></>
+            : state.pending
+              ? <><BusyIndicator label={state.label} /><ProgressTrack label={`${state.label} ${candidate.name}`} /></>
+              : state.label}
+        </span>
         <input type="checkbox" role="switch" aria-label={`Trace ${candidate.name} on ${candidate.machine_name}`} checked={state.checked} disabled={state.pending || changing === candidate.id} onChange={async event => {
           setChanging(candidate.id); setError("");
           try { await request(`/workspaces/${workspaceId}/repository-candidates/${candidate.id}`, {method: "PATCH", body: JSON.stringify({traced: event.target.checked})}); await reload(); }
@@ -1074,10 +1108,17 @@ function Dashboard({
               try { await reload(); } finally { if (activeView.current) setRefreshPending(false); }
             }}
           >
-            {refreshPending ? "Refreshing…" : "Refresh dashboard"}
+            {refreshPending ? <BusyIndicator label="Refreshing…" /> : "Refresh dashboard"}
           </button>
         </aside>
       </div>
+      {refreshPending && (
+        <div className="alert progress action-progress" role="status" aria-live="polite">
+          <BusyIndicator label="Refreshing dashboard data…" />
+          <span>Fetching activity, repository signals, and updated totals.</span>
+          <ProgressTrack label="Refreshing dashboard data" />
+        </div>
+      )}
       {error && (
         <div className="alert error" role="alert">
           {error}
@@ -1094,6 +1135,8 @@ function ReportDetail({ report, workspaceId, currentUserId, reload }: any) {
   const [reporter, setReporter] = useState("codex");
   const [prompt, setPrompt] = useState("");
   const [pending, setPending] = useState(false);
+  const [refreshPending, setRefreshPending] = useState(false);
+  const [regenerationStatus, setRegenerationStatus] = useState("");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const operationScope = useRef({identity: `${workspaceId}:${report.id}`, generation: 0});
@@ -1127,6 +1170,7 @@ function ReportDetail({ report, workspaceId, currentUserId, reload }: any) {
     const operation = ++operationScope.current.generation;
     const active = () => operation === operationScope.current.generation;
     setPending(true);
+    setRegenerationStatus("Queueing regeneration request…");
     setMessage("");
     setError("");
     try {
@@ -1136,10 +1180,16 @@ function ReportDetail({ report, workspaceId, currentUserId, reload }: any) {
       });
       if (!active()) return;
       setMessage("Regeneration queued. Waiting for the connected device…");
+      setRegenerationStatus("Waiting for a connected device to claim the report…");
       const status = await waitForReportJob(
         job.id,
         (jobId) => request(`/reports/jobs/${jobId}`),
-        {isActive: active},
+        {isActive: active, onStatus: (latest) => {
+          if (!active()) return;
+          setRegenerationStatus(latest.status === "running"
+            ? "Generating the report on your connected device…"
+            : "Waiting for a connected device to claim the report…");
+        }},
       );
       if (!status) return;
       if (status.status === "completed") {
@@ -1155,7 +1205,7 @@ function ReportDetail({ report, workspaceId, currentUserId, reload }: any) {
     } catch (caught: any) {
       if (active()) setError(caught.message);
     } finally {
-      if (active()) setPending(false);
+      if (active()) { setPending(false); setRegenerationStatus(""); }
     }
   };
   return (
@@ -1167,8 +1217,11 @@ function ReportDetail({ report, workspaceId, currentUserId, reload }: any) {
         <button className="button secondary" onClick={() => navigate(workspacePath(workspaceId, "reports"))}>
           ← Report history
         </button>
-        <button className="button secondary" onClick={() => void reload()}>
-          Refresh report
+        <button className="button secondary" disabled={refreshPending} onClick={async () => {
+          setRefreshPending(true);
+          try { await reload(); } finally { setRefreshPending(false); }
+        }}>
+          {refreshPending ? <BusyIndicator label="Refreshing…" /> : "Refresh report"}
         </button>
         {report.user_id === currentUserId && (
           <>
@@ -1180,7 +1233,7 @@ function ReportDetail({ report, workspaceId, currentUserId, reload }: any) {
             </button>
           </>
         )}
-        <button className="button primary" onClick={() => downloadReport(report)}>
+        <button className="button primary" onClick={async () => (await import("./report-download.js")).downloadReport(report)}>
           Download .md
         </button>
       </div>
@@ -1221,8 +1274,22 @@ function ReportDetail({ report, workspaceId, currentUserId, reload }: any) {
         </form>
       )}
       {message && <div className="alert success" role="status">{message}</div>}
+      {regenerationStatus && (
+        <div className="alert progress action-progress" role="status" aria-live="polite">
+          <BusyIndicator label={regenerationStatus} />
+          <ProgressTrack label={regenerationStatus} />
+        </div>
+      )}
+      {refreshPending && (
+        <div className="alert progress action-progress" role="status" aria-live="polite">
+          <BusyIndicator label="Loading the latest report content…" />
+          <ProgressTrack label="Loading the latest report content" />
+        </div>
+      )}
       {error && <div className="alert error" role="alert">{error}</div>}
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{report.markdown}</ReactMarkdown>
+      <React.Suspense fallback={<BusyIndicator label="Rendering report…" />}>
+        <ReportMarkdown markdown={report.markdown} />
+      </React.Suspense>
     </section>
   );
 }
@@ -1235,6 +1302,7 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error, timezon
   const [includeDiff, setIncludeDiff] = useState(false);
   const [actionError, setActionError] = useState("");
   const [message, setMessage] = useState("");
+  const [refreshPending, setRefreshPending] = useState(false);
   const operationScope = useRef({workspaceId, generation: 0});
   const pollingGeneration = useRef(0);
   const restorationGeneration = useRef(0);
@@ -1356,8 +1424,8 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error, timezon
           </button>
         </div>
         {progress && (
-          <div className={`alert ${progress.tone}`} role={progress.tone === "error" ? "alert" : "status"} aria-live="polite">
-            {progress.active ? <BusyIndicator label={progress.label} /> : progress.label}
+          <div className={`alert ${progress.tone} action-progress`} role={progress.tone === "error" ? "alert" : "status"} aria-live="polite">
+            {progress.active ? <><BusyIndicator label={progress.label} /><ProgressTrack label={progress.label} /></> : progress.label}
           </div>
         )}
         <label className="diff-consent">
@@ -1378,11 +1446,15 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error, timezon
           </div>
           <div className="actions">
             <span className="count-badge">{reports.length}</span>
-            <button className="button secondary" onClick={() => void reload()}>
-              Refresh reports
+            <button className="button secondary" disabled={refreshPending} onClick={async () => {
+              setRefreshPending(true);
+              try { await reload(); } finally { setRefreshPending(false); }
+            }}>
+              {refreshPending ? <BusyIndicator label="Refreshing…" /> : "Refresh reports"}
             </button>
           </div>
         </div>
+        {refreshPending && <ProgressTrack label="Refreshing report history" />}
         {reports.length ? reports.map((item: any) => (
           <button
             className="repo"
@@ -1401,6 +1473,8 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error, timezon
 
 function App() {
   const [token, setToken] = useState(localStorage.token || "");
+  const [identityPending, setIdentityPending] = useState(Boolean(localStorage.token));
+  const [workspacePending, setWorkspacePending] = useState(false);
   const [route, setRoute] = useState(location.pathname);
   const [user, setUser] = useState<any>();
   const [workspaces, setWorkspaces] = useState<any[]>([]);
@@ -1424,6 +1498,7 @@ function App() {
   const [logoutPending, setLogoutPending] = useState(false);
   const [logoutError, setLogoutError] = useState("");
   const loadGeneration = useRef(0);
+  const loadedContexts = useRef(new Set<string>());
   const dataWorkspaceId = useRef(workspaceId);
   useLayoutEffect(() => {
     applyTheme(theme);
@@ -1459,11 +1534,9 @@ function App() {
     [workspaces, workspaceId],
   );
   const loadIdentity = async (preferredId?: number, active: () => boolean = () => true) => {
+    setIdentityPending(true);
     try {
-      const [me, list] = await Promise.all([
-        request("/auth/me"),
-        request("/workspaces"),
-      ]);
+      const {user: me, workspaces: list} = await request("/bootstrap");
       if (!active()) return 0;
       setUser(me);
       setWorkspaces(list);
@@ -1481,12 +1554,18 @@ function App() {
       localStorage.removeItem("token");
       setToken("");
       return 0;
+    } finally {
+      if (active()) setIdentityPending(false);
     }
   };
-  const loadWorkspace = async () => {
+  const loadWorkspace = async (blocking = false) => {
     const generation = ++loadGeneration.current;
     const selectedWorkspace = workspaceId;
     const selectedRoute = route;
+    const selectedView = getRouteView(selectedRoute, selectedWorkspace);
+    const context = `${selectedWorkspace}:${selectedView === "report" ? selectedRoute : selectedView}`;
+    const shouldBlock = blocking && !loadedContexts.current.has(context);
+    if (shouldBlock) setWorkspacePending(true);
     if (!selectedWorkspace) {
       setEvents([]);
       setRepositories([]);
@@ -1495,6 +1574,7 @@ function App() {
       setReports([]);
       setAgents([]);
       setStats({ totals: {}, daily: [] });
+      if (shouldBlock) setWorkspacePending(false);
       return;
     }
     try {
@@ -1506,13 +1586,19 @@ function App() {
 
       if (generation !== loadGeneration.current) return;
       const apply: Record<WorkspaceLoadKey, (value: any) => void> = {
-        events: setEvents,
-        repositories: setRepositories,
-        repositoryCandidates: setRepositoryCandidates,
-        members: setMembers,
+        dashboard: (value) => {
+          setEvents(value.events);
+          setRepositories(value.repositories);
+          setStats(value.stats);
+        },
+        settings: (value) => {
+          setMembers(value.members);
+          setRepositories(value.repositories);
+          setRepositoryCandidates(value.repositoryCandidates);
+          setAgents(value.agents);
+        },
         reports: setReports,
         agents: setAgents,
-        stats: setStats,
         report: (detail) => {
           if (!reportMatchesRoute(detail, selectedRoute))
             throw new Error("Report does not belong to this workspace.");
@@ -1520,25 +1606,35 @@ function App() {
         },
       };
       for (const [key, value] of loaded) apply[key](value);
+      loadedContexts.current.add(context);
     } catch (caught: any) {
       if (generation === loadGeneration.current) {
         if (getRouteView(selectedRoute, selectedWorkspace) === "report")
           setReport(undefined);
         setError(caught.message);
       }
+    } finally {
+      if (shouldBlock && generation === loadGeneration.current) setWorkspacePending(false);
     }
   };
   useEffect(() => {
     if (token) void loadIdentity();
   }, [token]);
   useEffect(() => {
-    void loadWorkspace();
+    void loadWorkspace(true);
   }, [workspaceId, route, dates.from, dates.to, timezone]);
   if (!token) return (
     <>
       <ThemeToggle theme={theme} onToggle={() => setTheme(nextTheme(theme))} floating />
       <Auth onLogin={setToken} route={route} />
     </>
+  );
+  if (identityPending) return (
+    <LoadingSurface
+      fullScreen
+      label="Verifying your session…"
+      detail="Loading your account and available workspaces securely."
+    />
   );
   const view = getRouteView(route, workspaceId);
   const openWorkspace = async (preferredId?: number) => {
@@ -1667,7 +1763,14 @@ function App() {
           </div>
         </header>
         <main id="main-content">
-          {view === "workspace-required" || !workspaceId ? (
+          {workspacePending && workspaceId ? (
+            <LoadingSurface
+              label={view === "report" ? "Loading report…" : "Loading workspace…"}
+              detail={view === "report"
+                ? "Retrieving the report content and its latest status."
+                : "Fetching the information needed for this view."}
+            />
+          ) : view === "workspace-required" || !workspaceId ? (
             <WorkspaceRequired openDialog={setDialog} />
           ) : view === "install" ? (
             <Install key={workspaceId} workspaceId={workspaceId} agents={agents} userId={user?.id} onAgentsChecked={(nextAgents) => {
@@ -1705,7 +1808,7 @@ function App() {
               <ReportDetail key={`${workspaceId}:${report.id}`} report={report} workspaceId={workspaceId} currentUserId={user?.id} reload={loadWorkspace} />
             ) : (
               <section className="card">
-                <h2>Loading report…</h2>
+                <h2>{error ? "Could not load report" : "Report unavailable"}</h2>
                 {error && (
                   <div className="alert error" role="alert">
                     {error}
