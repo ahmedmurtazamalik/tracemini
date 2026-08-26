@@ -629,41 +629,69 @@ function EmptyState({ title, text }: { title: string; text: string }) {
 }
 
 function RepositorySelection({workspaceId, candidates, agents, userId, reload}: {workspaceId: number; candidates: RepositoryCandidate[]; agents: any[]; userId: number; reload: () => Promise<void>}) {
+  type ScanRequest = {id: number; agent_id?: number; agentId?: number; status: "queued" | "running" | "completed" | "error"; repositories_found?: number | null; error?: string | null};
   const [changing, setChanging] = useState<number>();
   const [scanning, setScanning] = useState(false);
-  const [scanPolling, setScanPolling] = useState(false);
+  const [scanRequests, setScanRequests] = useState<ScanRequest[]>([]);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const mounted = useRef(true);
   const active = () => canApplyWorkspaceResult(workspaceId, workspaceId, mounted.current);
   useEffect(() => () => { mounted.current = false; }, []);
-  const hasPending = scanPolling || candidates.some(candidate => candidate.owner_user_id === userId && candidate.desired_traced !== candidate.traced && !candidate.error);
+  const scanActive = scanRequests.some(scan => scan.status === "queued" || scan.status === "running");
+  const hasPending = candidates.some(candidate => candidate.owner_user_id === userId && candidate.desired_traced !== candidate.traced && !candidate.error);
   useEffect(() => {
     if (!hasPending) return;
     const timer = setInterval(() => void reload(), 10_000);
     return () => clearInterval(timer);
   }, [hasPending, reload]);
   useEffect(() => {
-    if (!scanPolling) return;
-    const timer = setTimeout(() => setScanPolling(false), 75_000);
-    return () => clearTimeout(timer);
-  }, [scanPolling]);
+    if (!scanActive) return;
+    const poll = async () => {
+      try {
+        const updated: ScanRequest[] = await Promise.all(scanRequests.map(scan =>
+          scan.status === "queued" || scan.status === "running"
+            ? request(`/workspaces/${workspaceId}/repository-scans/${scan.id}`)
+            : scan,
+        ));
+        if (!active()) return;
+        setScanRequests(updated);
+        await reload();
+        if (!active()) return;
+        if (updated.every(scan => scan.status === "completed" || scan.status === "error")) {
+          const failed = updated.filter(scan => scan.status === "error");
+          const found = updated.reduce((total, scan) => total + Number(scan.repositories_found || 0), 0);
+          if (failed.length) setError(failed.map(scan => scan.error || "A device could not complete its scan.").join(" "));
+          else setMessage(`Scan complete on ${updated.length} device${updated.length === 1 ? "" : "s"}. Found ${found} repositor${found === 1 ? "y" : "ies"}.`);
+        }
+      } catch (caught: any) {
+        if (active()) setError(caught.message || "Could not check repository scan progress.");
+      }
+    };
+    const timer = setInterval(() => void poll(), 5_000);
+    return () => clearInterval(timer);
+  }, [scanActive, scanRequests, workspaceId, reload]);
   const ownAgents = agents.filter(agent => Number(agent.user_id) === Number(userId) && agent.status !== "revoked");
   return <section className="card settings-card repository-selection-card">
     <span>Local Git discovery</span><h2>Workspace repositories</h2>
     <p className="muted">Scan only folders you previously approved with <code>tracemini watch</code>. The device sends bounded metadata; you choose repositories from your own devices and Managers see their safe workspace identity and status.</p>
-    <button className="button secondary" disabled={scanning || ownAgents.length === 0} onClick={async () => {
+    <button className="button secondary" disabled={scanning || scanActive || ownAgents.length === 0} onClick={async () => {
       setScanning(true); setError(""); setMessage("");
       try {
-        for (const agent of ownAgents) await request(`/workspaces/${workspaceId}/repository-scans`, {method: "POST", body: JSON.stringify({agentId: agent.id})});
+        const requested: ScanRequest[] = [];
+        for (const agent of ownAgents) requested.push(await request(`/workspaces/${workspaceId}/repository-scans`, {method: "POST", body: JSON.stringify({agentId: agent.id})}));
         if (!active()) return;
-        setMessage(`Scan requested on ${ownAgents.length} device${ownAgents.length === 1 ? "" : "s"}. New repositories normally appear within one minute.`);
-        setScanPolling(true);
+        setScanRequests(requested.map(scan => ({...scan, agent_id: scan.agent_id ?? scan.agentId})));
         await reload();
       } catch (caught: any) { if (active()) setError(caught.message); }
       finally { if (active()) setScanning(false); }
-    }}>{scanning ? <BusyIndicator label="Requesting scan…" /> : "Scan repositories on my devices"}</button>
+    }}>{scanning ? <BusyIndicator label="Requesting scan…" /> : scanActive ? <BusyIndicator label="Scanning repositories…" /> : "Scan repositories on my devices"}</button>
     {ownAgents.length === 0 && <p className="muted">Install or reconnect the TraceMini device agent before scanning.</p>}
+    {scanActive && <div className="alert progress action-progress" role="status" aria-live="polite" aria-busy="true">
+      <BusyIndicator label={scanRequests.some(scan => scan.status === "running") ? "Scanning approved folders on your devices…" : "Waiting for your devices to begin scanning…"} />
+      <span>This usually finishes within one minute. Repositories will appear here automatically.</span>
+      <ProgressTrack label="Repository scan in progress" />
+    </div>}
     {message && <div className="alert success" role="status">{message}</div>}
     {error && <div className="alert error" role="alert">{error}</div>}
     {candidates.length ? candidates.map(candidate => {
@@ -675,7 +703,7 @@ function RepositorySelection({workspaceId, candidates, agents, userId, reload}: 
           {changing === candidate.id
             ? <><BusyIndicator label="Saving selection…" /><ProgressTrack label={`Saving ${candidate.name} selection`} /></>
             : state.pending
-              ? <><BusyIndicator label={state.label} /><ProgressTrack label={`${state.label} ${candidate.name}`} /></>
+              ? <><BusyIndicator label={state.label} />{state.detail && <small>{state.detail}</small>}<ProgressTrack label={`${state.label} ${candidate.name}`} /></>
               : candidate.traced || candidate.error ? state.label : canSelect ? "Not selected" : "Not selected by member"}
         </span>
         <input type="checkbox" role="switch" aria-label={`${canSelect ? "Trace" : "Member repository selection"} for ${candidate.name} on ${candidate.machine_name}`} checked={state.checked} disabled={!canSelect || state.pending || changing === candidate.id} onChange={async event => {

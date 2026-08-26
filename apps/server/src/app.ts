@@ -600,6 +600,13 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
     if (!scan) return res.status(404).json({error: 'active device not found'});
     res.status(202).json({id: Number(scan.id), agentId: Number(scan.agent_id), status: scan.status});
   });
+  app.get('/api/workspaces/:id/repository-scans/:requestId', userAuth, requireMember, async (req: Authed, res) => {
+    const scan: any = await db.prepare(`SELECT r.id,r.agent_id,r.status,r.repositories_found,r.error,r.created_at,r.claimed_at,r.completed_at
+      FROM refresh_requests r JOIN agents a ON a.id=r.agent_id
+      WHERE r.id=? AND r.workspace_id=? AND r.requested_by=? AND a.user_id=?`).get(req.params.requestId, req.params.id, req.user.id, req.user.id);
+    if (!scan) return res.status(404).json({error: 'repository scan request not found'});
+    res.json({...scan, id: Number(scan.id), agent_id: Number(scan.agent_id), repositories_found: scan.repositories_found == null ? null : Number(scan.repositories_found)});
+  });
   app.get('/api/agents/refresh-requests', agentAuth, async (req: Authed, res) => {
     res.json(await db.prepare("SELECT id,workspace_id,status,created_at FROM refresh_requests WHERE agent_id=? AND status='queued' AND workspace_id IN (SELECT workspace_id FROM workspace_members WHERE user_id=?) ORDER BY id LIMIT 1").all(req.agent.id, req.agent.user_id));
   });

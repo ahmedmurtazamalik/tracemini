@@ -25,13 +25,16 @@ export function repositorySelectionState(candidate: RepositoryCandidate) {
   }
   if (candidate.desired_traced !== candidate.traced) {
     return {
-      label: candidate.desired_traced ? 'Starting…' : 'Stopping…',
+      label: candidate.desired_traced ? 'Starting trace on device…' : 'Stopping trace on device…',
+      detail: candidate.desired_traced
+        ? 'Validating the repository and installing Git hooks. This can take up to a minute.'
+        : 'Removing TraceMini hooks and updating the local device.',
       pending: true,
       checked: candidate.desired_traced,
       tone: 'progress',
     } as const;
   }
   return candidate.traced
-    ? {label: 'Traced', pending: false, checked: true, tone: 'success'} as const
-    : {label: 'Available', pending: false, checked: false, tone: 'muted'} as const;
+    ? {label: 'Traced', detail: undefined, pending: false, checked: true, tone: 'success'} as const
+    : {label: 'Available', detail: undefined, pending: false, checked: false, tone: 'muted'} as const;
 }

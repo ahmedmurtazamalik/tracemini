@@ -332,6 +332,11 @@ else if(command==='status'){console.log(JSON.stringify(JSON.parse(fs.readFileSyn
     const agent = (await request(app).post('/api/agents/install/exchange').send({installToken: installToken(installation), machineName: 'ada-box'}).expect(201)).body;
     const detectedDevices = (await request(app).get(`/api/workspaces/${workspace.id}/agents`).set(auth(user.token)).expect(200)).body;
     expect(detectedDevices).toContainEqual(expect.objectContaining({id: agent.agentId, user_id: user.user.id, machine_name: 'ada-box'}));
+    const scan = (await request(app).post(`/api/workspaces/${workspace.id}/repository-scans`).set(auth(user.token)).send({agentId: agent.agentId}).expect(202)).body;
+    expect((await request(app).get(`/api/workspaces/${workspace.id}/repository-scans/${scan.id}`).set(auth(user.token)).expect(200)).body).toMatchObject({id: scan.id, agent_id: agent.agentId, status: 'queued'});
+    await request(app).post(`/api/agents/refresh-requests/${scan.id}/claim`).set(auth(agent.agentToken)).expect(200);
+    await request(app).post(`/api/agents/refresh-requests/${scan.id}/complete`).set(auth(agent.agentToken)).send({repositoriesFound: 2}).expect(200);
+    expect((await request(app).get(`/api/workspaces/${workspace.id}/repository-scans/${scan.id}`).set(auth(user.token)).expect(200)).body).toMatchObject({status: 'completed', repositories_found: 2});
     await request(app).post('/api/repositories/register').set(auth(agent.agentToken)).send({workspaceId: String(workspace.id), name: 'Project', remoteUrl: 'file:///tmp/remote.git', localKey: '/clone'}).expect(409);
     await approveRepository(app, user.token, agent.agentToken, workspace.id, {localKey: '/clone', name: 'Project', remoteUrl: 'file:///tmp/remote.git', branch: 'main'});
     await request(app).post('/api/repositories/register').set(auth(agent.agentToken)).send({workspaceId: String(workspace.id), name: 'Project', remoteUrl: 'file:///tmp/remote.git', localKey: '/clone'}).expect(409);
