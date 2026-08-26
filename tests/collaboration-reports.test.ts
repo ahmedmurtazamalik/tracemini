@@ -104,16 +104,17 @@ describe('workspace report schedules', () => {
       .send({...rule, name: 'Daily delivery'})
       .expect(200)).body;
     expect(schedule).toMatchObject({workspace_id: workspaceId, name: 'Daily delivery', format: 'summary', frequency: 'DAILY', local_time: '00:00', notify_slack: true});
+    const firstMissedDate = new Date(Date.now() - 3 * 86_400_000).toISOString().slice(0, 10);
+    const dueAt = `${firstMissedDate}T00:00:00.000Z`;
+    await db.prepare('UPDATE report_schedules SET next_run_at=? WHERE id=?').run(dueAt, schedule.id);
     const renamedSchedule = (await request(app)
       .put(`/api/workspaces/${workspaceId}/report-schedule`)
       .set(auth(manager.token))
       .send({...rule, name: 'Leadership delivery brief'})
       .expect(200)).body;
-    expect(renamedSchedule).toMatchObject({id: schedule.id, name: 'Leadership delivery brief'});
+    expect(renamedSchedule).toMatchObject({id: schedule.id, name: 'Leadership delivery brief', next_run_at: dueAt});
 
     const agent = (await request(app).post('/api/agents/register').set(auth(manager.token)).send({machineName: 'manager-box'}).expect(201)).body;
-    const firstMissedDate = new Date(Date.now() - 3 * 86_400_000).toISOString().slice(0, 10);
-    await db.prepare('UPDATE report_schedules SET next_run_at=? WHERE id=?').run(`${firstMissedDate}T00:00:00.000Z`, schedule.id);
     const firstList = (await request(app).get('/api/agents/jobs').set(auth(agent.token)).expect(200)).body;
     const repeatedList = (await request(app).get('/api/agents/jobs').set(auth(agent.token)).expect(200)).body;
     expect(firstList).toHaveLength(1);

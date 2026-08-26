@@ -922,10 +922,19 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
     if (!Number.isInteger(windowDays) || windowDays < 1 || windowDays > 90) return res.status(400).json({error: 'windowDays must be between 1 and 90'});
     const configuredAt = new Date();
     const enabled = req.body.enabled !== false;
-    const nextRunAt = enabled ? nextScheduledRun(rule, configuredAt).toISOString() : null;
     const outcome: any = await db.transaction(async () => {
       await db.prepare('SELECT id FROM workspaces WHERE id=? FOR UPDATE').get(req.params.id);
       if (!(await hasLockedManagerAuthority(+req.params.id, req.user.id))) return undefined;
+      const existing: any = await db.prepare('SELECT * FROM report_schedules WHERE workspace_id=? FOR UPDATE').get(req.params.id);
+      let nextRunAt = enabled ? nextScheduledRun(rule, configuredAt).toISOString() : null;
+      if (enabled && existing?.enabled && existing.next_run_at) {
+        const existingNextRun = existing.next_run_at instanceof Date ? existing.next_run_at.toISOString() : String(existing.next_run_at);
+        const sameTiming = existing.frequency === rule.frequency
+          && existing.local_time === rule.localTime
+          && existing.timezone === rule.timezone
+          && JSON.stringify(eventData(existing.selected_days)) === JSON.stringify(rule.selectedDays);
+        if (sameTiming || new Date(existingNextRun) <= configuredAt) nextRunAt = existingNextRun;
+      }
       return await db.prepare(`INSERT INTO report_schedules(workspace_id,configured_by,name,enabled,frequency,selected_days,local_time,timezone,reporter,format,include_diff,notify_slack,window_days,next_run_at,created_at,updated_at)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(workspace_id) DO UPDATE SET configured_by=EXCLUDED.configured_by,name=EXCLUDED.name,enabled=EXCLUDED.enabled,frequency=EXCLUDED.frequency,selected_days=EXCLUDED.selected_days,local_time=EXCLUDED.local_time,timezone=EXCLUDED.timezone,reporter=EXCLUDED.reporter,format=EXCLUDED.format,include_diff=EXCLUDED.include_diff,notify_slack=EXCLUDED.notify_slack,window_days=EXCLUDED.window_days,next_run_at=EXCLUDED.next_run_at,updated_at=EXCLUDED.updated_at RETURNING *`)
         .get(req.params.id, req.user.id, scheduleName, enabled, rule.frequency, JSON.stringify(rule.selectedDays), rule.localTime, rule.timezone, req.body.reporter, normalizeReportFormat(req.body.format), req.body.includeDiff === true, req.body.notifySlack === true, windowDays, nextRunAt, configuredAt.toISOString(), configuredAt.toISOString());
