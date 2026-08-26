@@ -1434,7 +1434,7 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error, timezon
         </label>
         <label className="diff-consent">
           <input type="checkbox" checked={notifySlack} onChange={(event) => setNotifySlack(event.target.checked)} />
-          <span><strong>Notify Slack</strong><small>Post a report link when it is ready.</small></span>
+          <span><strong>Notify Slack</strong><small>Post the full report when it is ready.</small></span>
         </label>
         {message && <div className="alert success" role="status">{message}</div>}
         {actionError && <div className="alert error" role="alert">{actionError}</div>}

@@ -155,7 +155,7 @@ export function ReportSchedule({api, workspaceId, timezone}: {api: Api; workspac
       <label>Generator<select value={reporter} onChange={event => setReporter(event.target.value)}><option value="hermes">Hermes</option><option value="codex">Codex</option></select></label>
       <label>Writing style<select value={format} onChange={event => setFormat(event.target.value)}><option value="summary">Bullet-point summary</option><option value="detailed">Detailed report</option></select></label>
       <label className="diff-consent"><input type="checkbox" checked={includeDiff} onChange={event => setIncludeDiff(event.target.checked)} /><span><strong>Share bounded diff excerpts</strong><small>Add redacted code excerpts for better detail.</small></span></label>
-      <label className="diff-consent"><input type="checkbox" checked={notifySlack} onChange={event => setNotifySlack(event.target.checked)} /><span><strong>Notify Slack</strong><small>Post a report link when it is ready.</small></span></label>
+      <label className="diff-consent"><input type="checkbox" checked={notifySlack} onChange={event => setNotifySlack(event.target.checked)} /><span><strong>Notify Slack</strong><small>Post the full report when it is ready.</small></span></label>
       <button className="button primary" disabled={pending || (frequency === 'SELECTED_DAYS' && !selectedDays.length)} type="submit">{pending ? 'Saving…' : 'Save schedule'}</button>
     </form>}
     {nextLabel && enabled && <div className="alert progress" role="status">Next report: {nextLabel} ({zone})</div>}
