@@ -19,8 +19,10 @@ import { reportJobProgress, type ReportJob } from "./report-progress.js";
 import { TIMEZONE_OPTIONS, formatInTimezone, normalizeTimezone, todayInTimezone } from "./timezone.js";
 import { applyTheme, nextTheme, normalizeTheme, THEME_STORAGE_KEY, themeToggleLabel, type Theme } from "./theme.js";
 import { waitForReportJob } from "./report-jobs.js";
+import { canApplyWorkspaceResult } from "./async-state.js";
 import { workspaceLoadPlan, type WorkspaceLoadKey } from "./workspace-loading.js";
 import { repositorySelectionState, type RepositoryCandidate } from "./repository-selection.js";
+import { InvitationInbox, ReportSchedule, WorkspaceInvitations } from "./collaboration.js";
 import "./style.css";
 
 const request = async (path: string, init: RequestInit = {}) => {
@@ -583,38 +585,63 @@ function EmptyState({ title, text }: { title: string; text: string }) {
   );
 }
 
-function RepositorySelection({workspaceId, candidates, reload}: {workspaceId: number; candidates: RepositoryCandidate[]; reload: () => Promise<void>}) {
+function RepositorySelection({workspaceId, candidates, agents, userId, canManage, reload}: {workspaceId: number; candidates: RepositoryCandidate[]; agents: any[]; userId: number; canManage: boolean; reload: () => Promise<void>}) {
   const [changing, setChanging] = useState<number>();
+  const [scanning, setScanning] = useState(false);
+  const [scanPolling, setScanPolling] = useState(false);
+  const [message, setMessage] = useState("");
   const [error, setError] = useState("");
-  const hasPending = candidates.some(candidate => candidate.desired_traced !== candidate.traced && !candidate.error);
+  const mounted = useRef(true);
+  const active = () => canApplyWorkspaceResult(workspaceId, workspaceId, mounted.current);
+  useEffect(() => () => { mounted.current = false; }, []);
+  const hasPending = scanPolling || candidates.some(candidate => candidate.desired_traced !== candidate.traced && !candidate.error);
   useEffect(() => {
     if (!hasPending) return;
     const timer = setInterval(() => void reload(), 2_000);
     return () => clearInterval(timer);
   }, [hasPending, reload]);
+  useEffect(() => {
+    if (!scanPolling) return;
+    const timer = setTimeout(() => setScanPolling(false), 30_000);
+    return () => clearTimeout(timer);
+  }, [scanPolling]);
+  const ownAgents = agents.filter(agent => Number(agent.user_id) === Number(userId) && agent.status !== "revoked");
   return <section className="card settings-card repository-selection-card">
-    <span>Local Git discovery</span><h2>Traceable repositories</h2>
-    <p className="muted">Repositories found on your devices appear here. Turn tracing on to import recent history and record Git activity.</p>
+    <span>Local Git discovery</span><h2>Repository proposals</h2>
+    <p className="muted">Scan only folders you previously approved with <code>tracemini watch</code>. The device sends bounded repository metadata here; no hooks or history import starts until a Manager approves tracing.</p>
+    <button className="button secondary" disabled={scanning || ownAgents.length === 0} onClick={async () => {
+      setScanning(true); setError(""); setMessage("");
+      try {
+        for (const agent of ownAgents) await request(`/workspaces/${workspaceId}/repository-scans`, {method: "POST", body: JSON.stringify({agentId: agent.id})});
+        if (!active()) return;
+        setMessage(`Scan requested on ${ownAgents.length} device${ownAgents.length === 1 ? "" : "s"}. New repositories will appear as proposals.`);
+        setScanPolling(true);
+        await reload();
+      } catch (caught: any) { if (active()) setError(caught.message); }
+      finally { if (active()) setScanning(false); }
+    }}>{scanning ? <BusyIndicator label="Requesting scan…" /> : "Scan repositories on my devices"}</button>
+    {ownAgents.length === 0 && <p className="muted">Install or reconnect the TraceMini device agent before scanning.</p>}
+    {message && <div className="alert success" role="status">{message}</div>}
     {error && <div className="alert error" role="alert">{error}</div>}
     {candidates.length ? candidates.map(candidate => {
       const state = repositorySelectionState(candidate);
       return <label className="repository-choice" key={candidate.id}>
-        <span><strong>{candidate.name}</strong><small>{candidate.machine_name} · {candidate.branch || "detached"}</small><code>{candidate.local_key}</code>{candidate.error && <small className="error-text">{candidate.error}</small>}</span>
+        <span><strong>{candidate.name}</strong><small>{candidate.owner_name ? `${candidate.owner_name} · ` : ""}{candidate.machine_name} · {candidate.branch || "detached"}</small>{candidate.local_key && <code>{candidate.local_key}</code>}{candidate.error && <small className="error-text">{candidate.error}</small>}</span>
         <span className={`selection-state ${state.tone}`}>
           {changing === candidate.id
             ? <><BusyIndicator label="Saving selection…" /><ProgressTrack label={`Saving ${candidate.name} selection`} /></>
             : state.pending
               ? <><BusyIndicator label={state.label} /><ProgressTrack label={`${state.label} ${candidate.name}`} /></>
-              : state.label}
+              : candidate.traced || candidate.error ? state.label : canManage ? "Awaiting approval" : "Awaiting Manager approval"}
         </span>
-        <input type="checkbox" role="switch" aria-label={`Trace ${candidate.name} on ${candidate.machine_name}`} checked={state.checked} disabled={state.pending || changing === candidate.id} onChange={async event => {
+        <input type="checkbox" role="switch" aria-label={`${canManage ? "Approve tracing" : "Tracing approval"} for ${candidate.name} on ${candidate.machine_name}`} checked={state.checked} disabled={!canManage || state.pending || changing === candidate.id} onChange={async event => {
           setChanging(candidate.id); setError("");
-          try { await request(`/workspaces/${workspaceId}/repository-candidates/${candidate.id}`, {method: "PATCH", body: JSON.stringify({traced: event.target.checked})}); await reload(); }
-          catch (caught: any) { setError(caught.message); }
-          finally { setChanging(undefined); }
+          try { await request(`/workspaces/${workspaceId}/repository-candidates/${candidate.id}`, {method: "PATCH", body: JSON.stringify({traced: event.target.checked})}); if (active()) await reload(); }
+          catch (caught: any) { if (active()) setError(caught.message); }
+          finally { if (active()) setChanging(undefined); }
         }} />
       </label>;
-    }) : <p className="muted">Waiting for an online device to scan this computer for Git repositories.</p>}
+    }) : <p className="muted">No proposals yet. Request a scan after configuring an approved folder on your device.</p>}
   </section>;
 }
 
@@ -650,10 +677,10 @@ function Settings({ workspace, members, repositories, agents, repositoryCandidat
           description="View the people and repositories in this workspace. Managers control changes."
         />
         <div className="alert progress" role="status">
-          You are a Member. This page is read-only.
+          Managers approve workspace tracing. You can scan approved folders on your own devices and review their proposal status here.
         </div>
         <div className="settings-grid">
-          <RepositorySelection workspaceId={workspace.id} candidates={repositoryCandidates} reload={reloadCandidates} />
+          <RepositorySelection workspaceId={workspace.id} candidates={repositoryCandidates} agents={agents} userId={userId} canManage={false} reload={reloadCandidates} />
           <section className="card settings-card">
             <span>People</span>
             <h2>Members</h2>
@@ -699,7 +726,7 @@ function Settings({ workspace, members, repositories, agents, repositoryCandidat
         </div>
       )}
       <div className="settings-grid" aria-busy={pending}>
-        <RepositorySelection workspaceId={workspace.id} candidates={repositoryCandidates} reload={reloadCandidates} />
+        <RepositorySelection workspaceId={workspace.id} candidates={repositoryCandidates} agents={agents} userId={userId} canManage={true} reload={reloadCandidates} />
         <section className="card settings-card">
           <span>People</span>
           <h2>Members</h2>
@@ -721,7 +748,7 @@ function Settings({ workspace, members, repositories, agents, repositoryCandidat
                 }
               >
                 <option>Manager</option>
-                <option>Member</option>
+                <option>Developer</option>
               </select>
               <button
                 className="button secondary"
@@ -737,32 +764,7 @@ function Settings({ workspace, members, repositories, agents, repositoryCandidat
             </div>
           ))}
         </section>
-        <section className="card settings-card">
-          <span>Access</span>
-          <h2>Workspace invite</h2>
-          <p className="muted">The code is random. It can be refreshed once per minute.</p>
-          <p className="invite-code">
-            {workspace.invite_enabled ? workspace.invite_code : "Disabled"}
-          </p>
-          <div className="actions">
-            <button
-              className="button secondary"
-              onClick={() =>
-                mutate(`/workspaces/${workspace.id}/invite/regenerate`)
-              }
-            >
-              Refresh invite code
-            </button>
-            <button
-              className="button secondary"
-              onClick={() =>
-                mutate(`/workspaces/${workspace.id}/invite/disable`)
-              }
-            >
-              Disable
-            </button>
-          </div>
-        </section>
+        <WorkspaceInvitations api={request} workspaceId={workspace.id} />
         <section className="card settings-card">
           <span>Sources</span>
           <h2>Repositories</h2>
@@ -851,38 +853,32 @@ function Settings({ workspace, members, repositories, agents, repositoryCandidat
 function WorkspaceRequired({
   openDialog,
 }: {
-  openDialog: (mode: "create" | "join") => void;
+  openDialog: () => void;
 }) {
   return (
     <div className="page-stack">
       <PageHeading
         eyebrow="Workspace setup"
         title="Connect your first workspace."
-        description="CLI installation and settings belong to a workspace. Create one or join your team before continuing."
+        description="CLI installation and settings belong to a workspace. Create one, or accept a team invitation from your inbox."
       />
       <section className="card onboarding-card">
         <div className="onboarding-icon" aria-hidden="true">
           01
         </div>
         <div>
-          <h2>Choose how to begin</h2>
+          <h2>Create your workspace</h2>
           <p>
-            Create a workspace if you manage the team, or join with an invite
-            code from a Manager.
+            If a Manager invited you to an existing workspace, use the invitation inbox in the top bar instead.
           </p>
           <div className="actions">
             <button
               className="button primary"
-              onClick={() => openDialog("create")}
+              onClick={openDialog}
             >
               Create workspace
             </button>
-            <button
-              className="button secondary"
-              onClick={() => openDialog("join")}
-            >
-              Join workspace
-            </button>
+
           </div>
         </div>
       </section>
@@ -891,11 +887,9 @@ function WorkspaceRequired({
 }
 
 function WorkspaceDialog({
-  mode,
   close,
   complete,
 }: {
-  mode: "create" | "join";
   close: () => void;
   complete: (workspaceId?: number) => Promise<void>;
 }) {
@@ -950,14 +944,8 @@ function WorkspaceDialog({
         aria-labelledby="workspace-dialog-title"
       >
         <span className="eyebrow">Workspace setup</span>
-        <h2 id="workspace-dialog-title">
-          {mode === "create" ? "Create a workspace" : "Join a workspace"}
-        </h2>
-        <p>
-          {mode === "create"
-            ? "Give your team workspace a clear name."
-            : "Enter the invite code supplied by a workspace Manager."}
-        </p>
+        <h2 id="workspace-dialog-title">Create a workspace</h2>
+        <p>Give your team workspace a clear name.</p>
         {error && (
           <div className="alert error" role="alert">
             {error}
@@ -972,10 +960,7 @@ function WorkspaceDialog({
               const values = Object.fromEntries(
                 new FormData(event.currentTarget),
               );
-              const result = await request(
-                mode === "create" ? "/workspaces" : "/workspaces/join",
-                { method: "POST", body: JSON.stringify(values) },
-              );
+              const result = await request("/workspaces", { method: "POST", body: JSON.stringify(values) });
               await complete(result.id);
               close();
             } catch (caught: any) {
@@ -986,23 +971,15 @@ function WorkspaceDialog({
           }}
         >
           <label>
-            {mode === "create" ? "Workspace name" : "Invite code"}
-            <input
-              autoFocus
-              name={mode === "create" ? "name" : "inviteCode"}
-              required
-            />
+            Workspace name
+            <input autoFocus name="name" required />
           </label>
           <div className="actions">
             <button className="button secondary" type="button" onClick={close}>
               Cancel
             </button>
             <button className="button primary" disabled={pending}>
-              {pending
-                ? <BusyIndicator label={mode === "create" ? "Creating workspace…" : "Joining workspace…"} />
-                : mode === "create"
-                  ? "Create workspace"
-                  : "Join workspace"}
+              {pending ? <BusyIndicator label="Creating workspace…" /> : "Create workspace"}
             </button>
           </div>
         </form>
@@ -1133,6 +1110,7 @@ function ReportDetail({ report, workspaceId, currentUserId, reload }: any) {
   const [showRegenerate, setShowRegenerate] = useState(false);
   const [name, setName] = useState(report.name || "");
   const [reporter, setReporter] = useState("codex");
+  const [format, setFormat] = useState(report.format || "detailed");
   const [prompt, setPrompt] = useState("");
   const [pending, setPending] = useState(false);
   const [refreshPending, setRefreshPending] = useState(false);
@@ -1176,7 +1154,7 @@ function ReportDetail({ report, workspaceId, currentUserId, reload }: any) {
     try {
       const job = await request(`/reports/${report.id}/regenerate`, {
         method: "POST",
-        body: JSON.stringify({ reporter, prompt }),
+        body: JSON.stringify({ reporter, prompt, format }),
       });
       if (!active()) return;
       setMessage("Regeneration queued. Waiting for the connected device…");
@@ -1211,7 +1189,7 @@ function ReportDetail({ report, workspaceId, currentUserId, reload }: any) {
   return (
     <section className="card report">
       <div className="section-heading report-heading">
-        <div><span>Engineering contribution report</span><h1>{report.name || `${report.start_date} — ${report.end_date}`}</h1></div>
+        <div><span>{report.report_scope === "workspace" ? "Workspace summary" : "Individual report"} · {report.user_name || "Unknown author"}</span><h1>{report.name || `${report.start_date} — ${report.end_date}`}</h1></div>
       </div>
       <div className="actions report-actions">
         <button className="button secondary" onClick={() => navigate(workspacePath(workspaceId, "reports"))}>
@@ -1263,6 +1241,13 @@ function ReportDetail({ report, workspaceId, currentUserId, reload }: any) {
                 <option value="hermes">Hermes</option>
               </select>
             </label>
+            <label>
+              Writing style
+              <select value={format} onChange={(event) => setFormat(event.target.value)}>
+                <option value="summary">Bullet-point summary</option>
+                <option value="detailed">Detailed report</option>
+              </select>
+            </label>
             <label className="span-two">
               Instructions
               <textarea required maxLength={4000} rows={4} value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="Example: Lead with an executive summary, then group contributions by project and outcome." />
@@ -1294,8 +1279,9 @@ function ReportDetail({ report, workspaceId, currentUserId, reload }: any) {
   );
 }
 
-function Reports({ workspaceId, dates, setDates, reports, reload, error, timezone }: any) {
+function Reports({ workspaceId, dates, setDates, reports, reload, error, timezone, role }: any) {
   const [reporter, setReporter] = useState("hermes");
+  const [format, setFormat] = useState("summary");
   const [name, setName] = useState("");
   const [pending, setPending] = useState(false);
   const [job, setJob] = useState<ReportJob>();
@@ -1350,8 +1336,9 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error, timezon
       <PageHeading
         eyebrow="Workspace reports"
         title="Reports"
-        description="Create and review engineering contribution reports without digging through individual commits."
+        description="Review individual reports from every workspace member alongside whole-workspace summary reports."
       />
+      {role === "Manager" && <ReportSchedule api={request} workspaceId={workspaceId} timezone={timezone} />}
       <section className="card reports-create-card">
         <div className="section-heading">
           <div>
@@ -1387,6 +1374,13 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error, timezon
               <option value="hermes">Hermes</option>
             </select>
           </label>
+          <label>
+            Writing style
+            <select value={format} onChange={(event) => setFormat(event.target.value)}>
+              <option value="summary">Bullet-point summary</option>
+              <option value="detailed">Detailed report</option>
+            </select>
+          </label>
           <button
             className="button primary"
             disabled={pending || Boolean(progress?.active)}
@@ -1404,6 +1398,7 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error, timezon
                     startDate: dates.from,
                     endDate: dates.to,
                     reporter,
+                    format,
                     name,
                     timezone,
                     includeDiff,
@@ -1442,7 +1437,7 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error, timezon
         <div className="section-heading">
           <div>
             <span>History</span>
-            <h2>Completed reports</h2>
+            <h2>Member and workspace reports</h2>
           </div>
           <div className="actions">
             <span className="count-badge">{reports.length}</span>
@@ -1462,7 +1457,7 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error, timezon
             onClick={() => navigate(`/workspaces/${workspaceId}/reports/${item.id}`)}
           >
             <strong>{item.name || `${item.start_date} — ${item.end_date}`}</strong>
-            <small>{item.start_date} — {item.end_date} · {item.user_name}</small>
+            <small>{item.report_scope === "workspace" ? "Workspace summary" : "Individual report"} · {item.start_date} — {item.end_date} · {item.user_name}</small>
           </button>
         )) : <EmptyState title="No reports yet" text="Generate the first report for this workspace." />}
       </section>
@@ -1478,6 +1473,9 @@ function App() {
   const [route, setRoute] = useState(location.pathname);
   const [user, setUser] = useState<any>();
   const [workspaces, setWorkspaces] = useState<any[]>([]);
+  const [invitations, setInvitations] = useState<any[]>([]);
+  const [invitationLoadError, setInvitationLoadError] = useState("");
+  const [inboxOpen, setInboxOpen] = useState(false);
   const [workspaceId, setWorkspaceId] = useState(0);
   const [events, setEvents] = useState<any[]>([]);
   const [repositories, setRepositories] = useState<any[]>([]);
@@ -1494,11 +1492,12 @@ function App() {
     const date = todayInTimezone(initialTimezone());
     return {from: date, to: date};
   });
-  const [dialog, setDialog] = useState<"create" | "join">();
+  const [dialog, setDialog] = useState(false);
   const [logoutPending, setLogoutPending] = useState(false);
   const [logoutError, setLogoutError] = useState("");
   const loadGeneration = useRef(0);
   const loadedContexts = useRef(new Set<string>());
+  const identityGeneration = useRef(0);
   const dataWorkspaceId = useRef(workspaceId);
   useLayoutEffect(() => {
     applyTheme(theme);
@@ -1535,11 +1534,23 @@ function App() {
   );
   const loadIdentity = async (preferredId?: number, active: () => boolean = () => true) => {
     setIdentityPending(true);
+    const generation = ++identityGeneration.current;
     try {
-      const {user: me, workspaces: list} = await request("/bootstrap");
-      if (!active()) return 0;
+      const [{user: me, workspaces: list}, inboxResult] = await Promise.all([
+        request("/bootstrap"),
+        request("/invitations")
+          .then((value) => ({ value }))
+          .catch((error) => ({ error })),
+      ]);
+      if (!active() || generation !== identityGeneration.current) return 0;
       setUser(me);
       setWorkspaces(list);
+      if ("value" in inboxResult) {
+        setInvitations(inboxResult.value);
+        setInvitationLoadError("");
+      } else {
+        setInvitationLoadError(inboxResult.error?.message || "Invitation inbox is temporarily unavailable.");
+      }
       const routeWorkspace = Number(
         location.pathname.match(/^\/workspaces\/(\d+)/)?.[1],
       );
@@ -1550,7 +1561,7 @@ function App() {
       setWorkspaceId(selected);
       return selected;
     } catch {
-      if (!active()) return 0;
+      if (!active() || generation !== identityGeneration.current) return 0;
       localStorage.removeItem("token");
       setToken("");
       return 0;
@@ -1727,16 +1738,14 @@ function App() {
           </div>
           <div className="topbar-actions">
             {logoutError && <span className="topbar-error" role="alert">{logoutError}</span>}
+            <button className="button secondary inbox-button" onClick={() => setInboxOpen(true)}>
+              Invitations
+              {invitations.some((item) => item.status === "PENDING") && <span className="count-badge">{invitations.filter((item) => item.status === "PENDING").length}</span>}
+            </button>
             <ThemeToggle theme={theme} onToggle={() => setTheme(nextTheme(theme))} />
             <button
-              className="button secondary"
-              onClick={() => setDialog("join")}
-            >
-              Join
-            </button>
-            <button
               className="button primary"
-              onClick={() => setDialog("create")}
+              onClick={() => setDialog(true)}
             >
               New workspace
             </button>
@@ -1771,7 +1780,7 @@ function App() {
                 : "Fetching the information needed for this view."}
             />
           ) : view === "workspace-required" || !workspaceId ? (
-            <WorkspaceRequired openDialog={setDialog} />
+            <WorkspaceRequired openDialog={() => setDialog(true)} />
           ) : view === "install" ? (
             <Install key={workspaceId} workspaceId={workspaceId} agents={agents} userId={user?.id} onAgentsChecked={(nextAgents) => {
               if (dataWorkspaceId.current === workspaceId) setAgents(nextAgents);
@@ -1802,6 +1811,7 @@ function App() {
               reload={loadWorkspace}
               error={error}
               timezone={timezone}
+              role={workspace?.role}
             />
           ) : view === "report" ? (
             reportMatchesRoute(report, route) ? (
@@ -1835,9 +1845,19 @@ function App() {
       </div>
       {dialog && (
         <WorkspaceDialog
-          mode={dialog}
-          close={() => setDialog(undefined)}
+          close={() => setDialog(false)}
           complete={openWorkspace}
+        />
+      )}
+      {inboxOpen && (
+        <InvitationInbox
+          api={request}
+          invitations={invitations}
+          loadError={invitationLoadError}
+          onClose={() => setInboxOpen(false)}
+          onChanged={async () => {
+            await loadIdentity();
+          }}
         />
       )}
     </div>

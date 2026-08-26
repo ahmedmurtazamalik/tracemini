@@ -265,6 +265,22 @@ export async function publishRepositoryCandidates(config: Config, root?: string)
   return repositories;
 }
 
+export async function processRepositoryRefreshRequests(config: Config) {
+  const requests = await api<any[]>(config, '/api/agents/refresh-requests');
+  const request = requests[0];
+  if (!request) return 0;
+  await api(config, `/api/agents/refresh-requests/${request.id}/claim`, {method: 'POST'});
+  const scoped = {...config, workspaceId: Number(request.workspace_id)};
+  try {
+    const repositories = await publishRepositoryCandidates(scoped);
+    await api(config, `/api/agents/refresh-requests/${request.id}/complete`, {method: 'POST', body: JSON.stringify({repositoriesFound: repositories.length})});
+    return repositories.length;
+  } catch (error: any) {
+    await api(config, `/api/agents/refresh-requests/${request.id}/complete`, {method: 'POST', body: JSON.stringify({error: String(error?.message || error).slice(0, 2000)})});
+    return 0;
+  }
+}
+
 export function verifyRepositorySelection(config: Config, selection: {local_key: string; normalized_remote: string; repository_fingerprint?: string | null}, discoveryRoot?: string, workspaceId = config.workspaceId) {
   const target = fs.realpathSync(selection.local_key);
   const approvedRoots = [...(discoveryRoot ? [discoveryRoot] : []), ...watchedPathsForWorkspace(config, workspaceId)].flatMap(candidate => { try { return [fs.realpathSync(candidate)]; } catch { return []; } });
@@ -441,11 +457,16 @@ export function contextPrompt(context: any, clones: Config['clones']) {
   for (const event of context.events) grouped.set(event.normalized_remote, [...(grouped.get(event.normalized_remote) || []), event]);
   const timezone = context.job.timezone || 'Asia/Karachi';
   const includeDiff = Boolean(context.job.include_diff);
+  const format = context.job.format === 'summary' ? 'summary' : 'detailed';
   let text = `Generate a factual Markdown report about engineering contributions for ${context.job.start_date} through ${context.job.end_date} (${timezone}). Use only the supplied Git evidence. Do not modify files.\n\n`;
+  text += format === 'summary'
+    ? `Write a brief summary with concise bullet points. Lead with the most important delivered outcomes, keep each bullet evidence-backed, and avoid long narrative sections.\n\n`
+    : `Write a detailed narrative organized by outcomes and projects. Explain supported technical decisions, implementation work, problems solved, testing, reliability, and ownership without becoming a commit-by-commit log.\n\n`;
   text += `Synthesize related work into meaningful contributions: delivered capabilities and outcomes, technical decisions, architecture or implementation work, problems solved, testing and reliability improvements, and demonstrated ownership. Explain engineering significance only where the evidence supports it. Do not structure the report as a commit-by-commit chronology, do not use hashes or line counts as the main narrative, and do not invent impact, collaboration, intent, or test results not supported by evidence. Keep provider and internal pipeline jargon out of the user-facing report.\n\n`;
   text += includeDiff
     ? `Detailed diff excerpts were explicitly enabled. Use the bounded, redacted excerpts to explain implementation behavior while preserving factual grounding.\n\n`
     : `Diff excerpts were not enabled. Do not invent implementation details beyond commit metadata and file statistics.\n\n`;
+  if (Number(context.job.coalesced_runs || 0) > 0) text += `Begin with a brief **Schedule recovery** note stating that ${Number(context.job.coalesced_runs)} older scheduled occurrence(s) were coalesced after the reporting device was unavailable; this report uses the latest due evidence window.\n\n`;
   if (context.job.custom_prompt) text += `User-requested report structure or emphasis:\n${context.job.custom_prompt}\nFollow this preference unless it conflicts with factual accuracy, supplied evidence, redaction, or read-only operation.\n\n`;
   let diffBudget = 80_000;
   for (const [remote, events] of grouped) {
@@ -454,6 +475,7 @@ export function contextPrompt(context: any, clones: Config['clones']) {
     for (const event of events) {
       const data = event.data || {};
       text += `\n### ${event.type}${data.commitSha ? ` ${String(data.commitSha).slice(0, 12)}` : ''}\n`;
+      if (event.user_name) text += `Contributor: ${event.user_name}\n`;
       text += `Timestamp: ${event.occurred_at}\nEvidence:\n${JSON.stringify(redactEvidence(data), null, 2)}\n`;
       if (clone && event.type === 'commit' && data.commitSha) {
         try {
@@ -490,6 +512,7 @@ export async function processJob(config: Config, job: any) {
 export async function tick(config: Config, indexState: Map<string, {mtime: number; timer?: NodeJS.Timeout}> = new Map()) {
   const jobs = await api<any[]>(config, '/api/agents/jobs');
   if (jobs[0]) await processJob(config, jobs[0]);
+  await processRepositoryRefreshRequests(config);
   await reconcileConfiguredCloneIdentities(config, indexState);
   await processRepositorySelections(config, indexState);
   await flush(config);

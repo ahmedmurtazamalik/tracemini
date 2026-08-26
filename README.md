@@ -23,7 +23,7 @@ The built Express process serves the API and `apps/web/dist` at `http://localhos
 
 ## Workspace and CLI onboarding
 
-Roles are only **Manager** and **Member**. A workspace creator is its first Manager. Managers can promote/demote existing members, remove members, rotate or disable the invite, archive repositories, and delete the workspace. A mutation that would leave zero Managers is rejected. Members cannot perform management mutations. A device is account-level rather than owned by one workspace, so only its owner can revoke it; revocation disconnects that device from every workspace.
+Roles are only **Manager** and **Developer**. A workspace creator is its first Manager. Managers invite an existing TraceMini account by email; the recipient receives a private inbox invitation and gets no workspace access until accepting it. Legacy shared invite codes and code-based joins are retired and are never returned by workspace APIs. Managers can revoke pending invitations, promote/demote existing developers, remove members, approve repository proposals, archive repositories, configure workspace report schedules, and delete the workspace. A mutation that would leave zero Managers is rejected. Developers can scan their own approved device folders and see their proposal status, but only Managers can authorize tracing. A device is account-level rather than owned by one workspace, so only its owner can revoke it; revocation disconnects that device from every workspace.
 
 From **Install CLI** in the authenticated web app, generate and copy the Linux install command. The command uses `curl` to download a server-generated installer file and then runs that local file; it does not pipe network content directly into a shell. The installer contains a short-lived, single-use opaque install token, installs the compiled dependency-free CLI under `~/.local/share/tracemini/cli`, creates `~/.local/bin/tracemini`, exchanges the token for a dedicated agent credential, and enables and starts `tracemini.service` with `systemd --user`. It requires Node.js 22+ but does not require npm, a package registry, sudo, or a preinstalled `tracemini` command.
 
@@ -46,7 +46,7 @@ The dashboard shows agent online/offline state. “Online” means a heartbeat w
 
 ## Discovery and refresh
 
-`watch` recursively discovers repositories only below an explicit root, requires an `origin`, publishes workspace-scoped candidates, and installs hooks after repository selection. Discovery is explicit: the agent does not broadly poll arbitrary filesystem roots. The former refresh-request API is retired; the agent does not consume refresh requests.
+`watch` recursively discovers repositories only below an explicit root and requires an `origin`. The web **Scan repositories on my devices** action queues a scan on the requesting member's own agents; each agent scans only roots that member previously approved with `tracemini watch`. It publishes bounded workspace-scoped metadata as proposals. Managers can review proposals from all workspace members, but another member's local filesystem path is hidden. No hook installation, history import, or activity tracing starts until a Manager approves the proposal. The agent never performs an unbounded device or full-disk scan.
 
 ## Git activity and push confirmation
 
@@ -66,13 +66,13 @@ The agent persists each clone’s branch, local HEAD, and upstream-tracking SHA.
 
 Dashboard cards and daily trends aggregate **commit events only** for commits, files changed, insertions, and deletions; stage events are deliberately excluded. User and repository drill-down pages have stable URLs and the same date filters/stats API. Repository archiving hides it from the active dashboard but preserves clones and all activity.
 
-Reports have URL-addressable history/detail pages and can be downloaded as portable UTF-8 Markdown files. Stored Markdown is rendered with `react-markdown` plus `remark-gfm`, including GFM tables and task lists. The polling local agent claims personal jobs, adds bounded `git show --stat` evidence for relevant local commits, and invokes the selected local Codex/Hermes executable. Tests complete reports with deterministic Markdown and do not spend model invocations.
+Reports have URL-addressable history/detail pages and can be downloaded as portable UTF-8 Markdown files. Every workspace member can review the workspace's individual member reports and whole-workspace summaries; each entry is labeled by scope and author. Users choose either a concise bullet-point summary or a detailed narrative, including when regenerating an existing report. Managers can schedule daily, weekday, or selected-day workspace reports at an IANA timezone or fixed UTC offset (`UTC-12:00` through `UTC+14:00`) with a 1–90 day evidence window. A due schedule is materialized idempotently when its configuring Manager's connected agent polls for work; no separate cron service is required. After device downtime, TraceMini recovers the latest due evidence window, records how many older occurrences were coalesced, and includes a schedule-recovery disclosure in the generated report. Stored Markdown is rendered with `react-markdown` plus `remark-gfm`, including GFM tables and task lists. The polling local agent claims jobs, adds bounded `git show --stat` evidence for relevant local commits when explicitly enabled, and invokes the selected local Codex/Hermes executable. Tests complete reports with deterministic Markdown and do not spend model invocations.
 
 ## Exact limitations and exclusions
 
 - No provider APIs/webhooks, source upload, queues, Redis, message broker, additional service, deployment automation, or browser automation.
 - No agent crash recovery or concurrent-agent coordination for one shared `TRACEMINI_HOME`; retry storage is a single local JSON file.
-- No team reports, OAuth, or broad AI/report-output testing. Account management is intentionally limited to registration, login/logout, and password recovery.
+- No OAuth or broad AI/report-output testing. Reports are workspace-scoped; there is no cross-workspace organization rollup. Account management is intentionally limited to registration, login/logout, and password recovery.
 - Install commands contain bearer-like install tokens internally. They expire after 10 minutes and are single-use, but commands can remain in shell history; protect terminal history and use HTTPS outside localhost.
 - The server must be deployed with built CLI artifacts. The installer is not a signed OS package and does not elevate privileges.
 - Linux installation depends on a working systemd user session. Windows and macOS startup installation are deferred.

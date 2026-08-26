@@ -168,6 +168,7 @@ ALTER TABLE local_clones ADD CONSTRAINT local_clones_agent_repository_local_key_
 // start with the current constraints; hosted PostgreSQL follows the legacy schema
 // plus migration 16 above so existing migration checksums remain stable.
 const freshSchemaSql = schemaSql
+  .replace("role TEXT NOT NULL CHECK(role IN ('Manager','Member'))", "role TEXT NOT NULL CHECK(role IN ('Manager','Developer'))")
   .replace('workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE', 'workspace_id INTEGER REFERENCES workspaces(id) ON DELETE SET NULL')
   .replace('UNIQUE(agent_id,local_key));\nCREATE INDEX IF NOT EXISTS idx_local_clones_repository', 'UNIQUE(agent_id,repository_id,local_key));\nCREATE INDEX IF NOT EXISTS idx_local_clones_repository');
 const freshRepositorySelectionMigrationSql = repositorySelectionMigrationSql
@@ -176,6 +177,65 @@ const freshRepositorySelectionMigrationSql = repositorySelectionMigrationSql
 const freshAccountDeviceMigrationSql = `
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS installation_id TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS agents_installation_uidx ON agents(user_id,installation_id);
+`;
+
+export const invitationInboxMigrationSql = `
+ALTER TABLE workspace_members DROP CONSTRAINT IF EXISTS workspace_members_role_check;
+UPDATE workspace_members SET role='Developer' WHERE role='Member';
+ALTER TABLE workspace_members ADD CONSTRAINT workspace_members_role_check CHECK(role IN ('Manager','Developer'));
+UPDATE workspaces SET invite_enabled=FALSE;
+CREATE TABLE workspace_invitations(
+  id BIGSERIAL PRIMARY KEY,
+  workspace_id BIGINT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  invited_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  invited_by_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  role TEXT NOT NULL CHECK(role IN ('Manager','Developer')),
+  status TEXT NOT NULL CHECK(status IN ('PENDING','ACCEPTED','DECLINED','REVOKED','EXPIRED')) DEFAULT 'PENDING',
+  expires_at TIMESTAMPTZ NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL,
+  responded_at TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX workspace_invitations_one_pending_idx ON workspace_invitations(workspace_id,invited_user_id) WHERE status='PENDING';
+CREATE INDEX workspace_invitations_recipient_idx ON workspace_invitations(invited_user_id,status,created_at DESC);
+`;
+const freshInvitationInboxMigrationSql = invitationInboxMigrationSql.replace(
+  "ALTER TABLE workspace_members DROP CONSTRAINT IF EXISTS workspace_members_role_check;\nUPDATE workspace_members SET role='Developer' WHERE role='Member';\nALTER TABLE workspace_members ADD CONSTRAINT workspace_members_role_check CHECK(role IN ('Manager','Developer'));\n",
+  '',
+);
+
+const reportFormatMigrationSql = `
+ALTER TABLE report_jobs ADD COLUMN IF NOT EXISTS format TEXT NOT NULL DEFAULT 'detailed' CHECK(format IN ('summary','detailed'));
+ALTER TABLE report_jobs ADD COLUMN IF NOT EXISTS report_scope TEXT NOT NULL DEFAULT 'personal' CHECK(report_scope IN ('personal','workspace'));
+ALTER TABLE reports ADD COLUMN IF NOT EXISTS format TEXT NOT NULL DEFAULT 'detailed' CHECK(format IN ('summary','detailed'));
+ALTER TABLE reports ADD COLUMN IF NOT EXISTS report_scope TEXT NOT NULL DEFAULT 'personal' CHECK(report_scope IN ('personal','workspace'));
+`;
+
+const reportScheduleMigrationSql = `
+CREATE TABLE report_schedules(
+  id BIGSERIAL PRIMARY KEY,
+  workspace_id BIGINT NOT NULL UNIQUE REFERENCES workspaces(id) ON DELETE CASCADE,
+  configured_by BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  frequency TEXT NOT NULL CHECK(frequency IN ('DAILY','WEEKDAYS','SELECTED_DAYS')),
+  selected_days JSONB NOT NULL DEFAULT '[]'::JSONB,
+  local_time TEXT NOT NULL,
+  timezone TEXT NOT NULL,
+  reporter TEXT NOT NULL CHECK(reporter IN ('codex','hermes')),
+  format TEXT NOT NULL CHECK(format IN ('summary','detailed')),
+  include_diff BOOLEAN NOT NULL DEFAULT FALSE,
+  window_days INTEGER NOT NULL CHECK(window_days BETWEEN 1 AND 90),
+  next_run_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL
+);
+ALTER TABLE report_jobs ADD COLUMN IF NOT EXISTS schedule_id BIGINT REFERENCES report_schedules(id) ON DELETE SET NULL;
+ALTER TABLE report_jobs ADD COLUMN IF NOT EXISTS scheduled_for TIMESTAMPTZ;
+ALTER TABLE report_jobs ADD COLUMN IF NOT EXISTS coalesced_runs INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE reports ADD COLUMN IF NOT EXISTS schedule_id BIGINT REFERENCES report_schedules(id) ON DELETE SET NULL;
+ALTER TABLE reports ADD COLUMN IF NOT EXISTS scheduled_for TIMESTAMPTZ;
+ALTER TABLE reports ADD COLUMN IF NOT EXISTS coalesced_runs INTEGER NOT NULL DEFAULT 0;
+CREATE UNIQUE INDEX report_jobs_schedule_occurrence_idx ON report_jobs(schedule_id,scheduled_for);
+CREATE INDEX report_schedules_due_idx ON report_schedules(configured_by,enabled,next_run_at);
 `;
 
 export function normalizePostgresConnectionString(connectionString: string) {
@@ -293,6 +353,9 @@ export class DB {
         {version: 14, name: 'enforce repository selection at ingestion', sql: repositorySelectionEnforcementMigrationSql},
         {version: 15, name: 'repository selection lifecycle fencing', sql: repositorySelectionLifecycleMigrationSql},
         {version: 16, name: 'account-level device installation identity', sql: compatibilityMigrations ? accountDeviceMigrationSql : freshAccountDeviceMigrationSql},
+        {version: 17, name: 'recipient invitation inbox and Developer role', sql: compatibilityMigrations ? invitationInboxMigrationSql : freshInvitationInboxMigrationSql},
+        {version: 18, name: 'report presentation format and scope', sql: reportFormatMigrationSql},
+        {version: 19, name: 'workspace report schedules', sql: reportScheduleMigrationSql},
       ];
       for (const migration of migrations) {
         const checksum = crypto.createHash('sha256').update(migration.sql).digest('hex');
