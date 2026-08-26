@@ -364,6 +364,8 @@ else if(command==='status'){console.log(JSON.stringify(JSON.parse(fs.readFileSyn
     expect(dashboard.stats.totals.commits).toBe(2);
     expect(dashboard.today).toMatchObject({date: today.slice(0, 10), users: [expect.objectContaining({userId: user.user.id, name: 'Ada', totals: {commit: 1, push: 1, pull: 0, stage: 0}})]});
     expect(dashboard.today.users[0].hourly).toHaveLength(24);
+    expect(dashboard.today.users[0].hourly.reduce((sum: number, point: any) => sum + point.total, 0)).toBe(2);
+    expect(dashboard.today.users[0].hourly.every((point: any) => point.total === point.commit + point.push + point.pull + point.stage)).toBe(true);
     expect(dashboard.events).toHaveLength(4);
     expect(dashboard.events.every((event: any) => event.local_key === null)).toBe(true);
     expect(JSON.stringify(dashboard.events)).not.toContain('/home/ada');

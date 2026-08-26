@@ -22,7 +22,7 @@ import { waitForReportJob } from "./report-jobs.js";
 import { canApplyWorkspaceResult } from "./async-state.js";
 import { workspaceLoadPlan, type WorkspaceLoadKey } from "./workspace-loading.js";
 import { repositorySelectionState, type RepositoryCandidate } from "./repository-selection.js";
-import { activityGraphPath, activityUserSummary } from "./today-activity.js";
+import { activityGraphPath, activityGraphTicks, activityUserSummary } from "./today-activity.js";
 import { InvitationInbox, ReportSchedule, WorkspaceInvitations } from "./collaboration.js";
 import "./style.css";
 
@@ -515,13 +515,36 @@ function Trend({ daily }: { daily: any[] }) {
 
 function TodayActivityGraph({today}: {today: any}) {
   const users = today?.users || [];
-  const maximum = Math.max(1, ...users.flatMap((user: any) => user.hourly.map((point: any) => point.total)));
+  const observedMaximum = Math.max(0, ...users.flatMap((user: any) => user.hourly.map((point: any) => point.total)));
+  const scale = activityGraphTicks(observedMaximum);
   const colors = ["#19df91", "#6ea8fe", "#f5c451", "#f07cac", "#9b8cff", "#ff8c66"];
+  const plot = {left: 44, top: 18, width: 656, height: 154};
+  const hourLabels = [0, 6, 12, 18, 23];
   return <section className="card today-activity" aria-labelledby="today-activity-title">
-    <div className="section-heading"><div><span>Live workspace metadata</span><h2 id="today-activity-title">Today by member</h2></div><small>{today?.date || "Today"}</small></div>
-    <svg viewBox="0 0 720 180" role="img" aria-label="Cumulative commits, pushes, pulls, and staging events today for each workspace member">
-      {[0, 1, 2, 3].map(index => <line key={index} x1="20" x2="700" y1={20 + index * 45} y2={20 + index * 45} className="chart-grid" />)}
-      {users.map((user: any, index: number) => <path key={user.userId} d={activityGraphPath(user.hourly, 680, 135, maximum)} transform="translate(20 20)" fill="none" stroke={colors[index % colors.length]} strokeWidth="3" vectorEffect="non-scaling-stroke"><title>{activityUserSummary(user)}</title></path>)}
+    <div className="section-heading"><div><span>Hourly Git activity</span><h2 id="today-activity-title">Today by member</h2></div><small>{today?.date || "Today"}</small></div>
+    <p className="chart-description">Commits, pushes, pulls, and staging events in each hour. Hours without activity remain at zero.</p>
+    <svg viewBox="0 0 720 212" role="img" aria-label="Hourly commits, pushes, pulls, and staging events today for each workspace member">
+      {scale.ticks.map(tick => {
+        const y = plot.top + plot.height - tick / scale.maximum * plot.height;
+        return <g key={tick}>
+          <line x1={plot.left} x2={plot.left + plot.width} y1={y} y2={y} className={tick === 0 ? "chart-baseline" : "chart-grid"} />
+          <text x={plot.left - 12} y={y + 4} textAnchor="end" className="chart-axis-label">{tick}</text>
+        </g>;
+      })}
+      {hourLabels.map(hour => {
+        const x = plot.left + hour / 23 * plot.width;
+        return <g key={hour}>
+          <line x1={x} x2={x} y1={plot.top} y2={plot.top + plot.height} className="chart-grid chart-grid-vertical" />
+          <text x={x} y="199" textAnchor={hour === 0 ? "start" : hour === 23 ? "end" : "middle"} className="chart-axis-label">{String(hour).padStart(2, "0")}:00</text>
+        </g>;
+      })}
+      {users.map((user: any, index: number) => {
+        const color = colors[index % colors.length];
+        return <g key={user.userId}>
+          <path d={activityGraphPath(user.hourly, plot.width, plot.height, scale.maximum)} transform={`translate(${plot.left} ${plot.top})`} fill="none" stroke={color} strokeWidth="3" strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke"><title>{activityUserSummary(user)}</title></path>
+          {user.hourly.map((point: any, hour: number) => point.total > 0 && <circle key={hour} cx={plot.left + hour / 23 * plot.width} cy={plot.top + plot.height - point.total / scale.maximum * plot.height} r="4" fill={color} stroke="var(--surface)" strokeWidth="2"><title>{user.name}, {String(hour).padStart(2, "0")}:00: {point.total} {point.total === 1 ? "activity" : "activities"}</title></circle>)}
+        </g>;
+      })}
     </svg>
     <div className="activity-legend">
       {users.map((user: any, index: number) => <div key={user.userId}><i style={{background: colors[index % colors.length]}} /><strong>{user.name}</strong><small>{user.totals.commit} commits · {user.totals.push} pushes · {user.totals.pull} pulls · {user.totals.stage} stages</small></div>)}

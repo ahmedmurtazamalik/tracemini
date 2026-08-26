@@ -807,10 +807,8 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
       user.hourly[hourInTimezone(event.occurred_at, timezone)][event.type] += 1;
     }
     for (const user of users as any[]) {
-      let cumulative = 0;
       for (const point of user.hourly) {
-        cumulative += point.commit + point.push + point.pull + point.stage;
-        point.total = cumulative;
+        point.total = point.commit + point.push + point.pull + point.stage;
       }
     }
     return {date, timezone, users};
