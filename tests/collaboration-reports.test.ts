@@ -42,7 +42,7 @@ describe('workspace invitation inbox', () => {
 });
 
 describe('workspace repository proposals', () => {
-  it('lets a Developer scan their device while only a Manager can approve tracing', async () => {
+  it('lets each Developer select their own repositories while Managers receive redacted metadata', async () => {
     db = await openTestDb();
     const app = createApp(db);
     const manager = await register(app, 'repository-manager');
@@ -58,14 +58,17 @@ describe('workspace repository proposals', () => {
     expect((await request(app).get(`/api/workspaces/${workspaceId}/repository-candidates`).set(auth(developer.token)).expect(200)).body)
       .toEqual([expect.objectContaining({name: 'shared', local_key: '/projects/shared'})]);
     const candidateId = managerCandidates[0].id;
-    await request(app).patch(`/api/workspaces/${workspaceId}/repository-candidates/${candidateId}`).set(auth(developer.token)).send({traced: true}).expect(403);
-    await request(app).patch(`/api/workspaces/${workspaceId}/repository-candidates/${candidateId}`).set(auth(manager.token)).send({traced: true}).expect(200);
+    await request(app).patch(`/api/workspaces/${workspaceId}/repository-candidates/${candidateId}`).set(auth(manager.token)).send({traced: true}).expect(404);
+    await request(app).patch(`/api/workspaces/${workspaceId}/repository-candidates/${candidateId}`).set(auth(developer.token)).send({traced: true}).expect(200);
     await request(app).post('/api/repositories/register').set(auth(agent.token)).send({workspaceId: String(workspaceId), localKey: '/projects/shared', name: 'different', remoteUrl: 'https://example.test/team/different.git', identityFingerprint: 'a'.repeat(64)}).expect(409);
     await request(app).post('/api/agents/repository-candidates').set(auth(agent.token)).send({workspaceId, repositories: [{localKey: '/projects/shared', name: 'different', remoteUrl: 'https://example.test/team/different.git', branch: 'main', traced: false, identityFingerprint: 'a'.repeat(64)}]}).expect(200);
     expect((await request(app).get(`/api/workspaces/${workspaceId}/repository-candidates`).set(auth(manager.token)).expect(200)).body.find((item: any) => item.name === 'different').desired_traced).toBe(false);
-    await request(app).post('/api/agents/repository-candidates').set(auth(agent.token)).send({workspaceId, repositories: [{localKey: '/projects/private', name: 'private', remoteUrl: 'local:/home/repository-developer/private/repo', branch: 'main', traced: false, identityFingerprint: 'b'.repeat(64)}]}).expect(200);
+    await request(app).post('/api/agents/repository-candidates').set(auth(agent.token)).send({workspaceId, repositories: [{localKey: '/projects/private', name: 'private', remoteUrl: 'local-device-7:/home/repository-developer/private/repo', branch: 'main', traced: false, identityFingerprint: 'b'.repeat(64)}]}).expect(200);
+    await db.prepare("UPDATE repository_candidates SET remote_url=?,normalized_remote=?,error=? WHERE workspace_id=? AND name='private'").run('C:\\Users\\repository-developer\\private\\repo', 'c//users/repository-developer/private/repo', 'EACCES: C:\\Users\\repository-developer\\private\\repo', workspaceId);
     const privateForManager = (await request(app).get(`/api/workspaces/${workspaceId}/repository-candidates`).set(auth(manager.token)).expect(200)).body.find((item: any) => item.name === 'private');
-    expect(privateForManager).toMatchObject({local_key: null, normalized_remote: null});
+    expect(privateForManager).toMatchObject({local_key: null, normalized_remote: null, error: 'Repository update failed on member device'});
+    const privateForDeveloper = (await request(app).get(`/api/workspaces/${workspaceId}/repository-candidates`).set(auth(developer.token)).expect(200)).body.find((item: any) => item.name === 'private');
+    expect(privateForDeveloper.error).toContain('C:\\Users\\repository-developer');
 
     const scan = (await request(app).post(`/api/workspaces/${workspaceId}/repository-scans`).set(auth(developer.token)).send({agentId: agent.agentId}).expect(202)).body;
     expect(scan).toMatchObject({status: 'queued', agentId: agent.agentId});

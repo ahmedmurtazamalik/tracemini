@@ -61,3 +61,7 @@ export function dateKeyInTimezone(value: string | Date, timezone: SupportedTimez
   const part = zonedParts(new Date(value), normalizeTimezone(timezone));
   return `${part.year}-${String(part.month).padStart(2, '0')}-${String(part.day).padStart(2, '0')}`;
 }
+
+export function hourInTimezone(value: string | Date, timezone: SupportedTimezone) {
+  return zonedParts(new Date(value), normalizeTimezone(timezone)).hour;
+}

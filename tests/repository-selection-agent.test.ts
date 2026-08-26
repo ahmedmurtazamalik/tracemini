@@ -189,7 +189,7 @@ describe('device repository selection', () => {
     expect(fs.readFileSync(path.join(repo, '.git', 'hooks', 'post-commit'), 'utf8')).toContain('TraceMini managed hook');
   });
 
-  it('ignores a stale heartbeat response after the device binding changes', async () => {
+  it('ignores a stale control-sync response after the device binding changes', async () => {
     temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'tracemini-stale-heartbeat-'));
     process.env.TRACEMINI_HOME = path.join(temporary, 'state');
     const root = path.join(temporary, 'workspace-two');
@@ -203,10 +203,10 @@ describe('device repository selection', () => {
     const blocked = new Promise<void>(resolve => { release = resolve; });
     const requested = new Promise<void>(resolve => { started = resolve; });
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
-      if (new URL(url).pathname === '/api/agents/heartbeat') {
+      if (new URL(url).pathname === '/api/agents/sync') {
         started();
         await blocked;
-        return new Response(JSON.stringify({workspaceIds: [99]}), {status: 200});
+        return new Response(JSON.stringify({workspaceIds: [99], jobs: [], refreshRequests: [], repositorySelections: [], pushes: []}), {status: 200});
       }
       if (new URL(url).pathname === '/api/activity') return new Response(JSON.stringify({error: 'offline'}), {status: 503});
       return new Response(JSON.stringify([]), {status: 200});

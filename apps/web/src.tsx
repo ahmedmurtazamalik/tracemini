@@ -22,6 +22,7 @@ import { waitForReportJob } from "./report-jobs.js";
 import { canApplyWorkspaceResult } from "./async-state.js";
 import { workspaceLoadPlan, type WorkspaceLoadKey } from "./workspace-loading.js";
 import { repositorySelectionState, type RepositoryCandidate } from "./repository-selection.js";
+import { activityGraphPath, activityUserSummary } from "./today-activity.js";
 import { InvitationInbox, ReportSchedule, WorkspaceInvitations } from "./collaboration.js";
 import "./style.css";
 
@@ -509,6 +510,22 @@ function Trend({ daily }: { daily: any[] }) {
   );
 }
 
+function TodayActivityGraph({today}: {today: any}) {
+  const users = today?.users || [];
+  const maximum = Math.max(1, ...users.flatMap((user: any) => user.hourly.map((point: any) => point.total)));
+  const colors = ["#19df91", "#6ea8fe", "#f5c451", "#f07cac", "#9b8cff", "#ff8c66"];
+  return <section className="card today-activity" aria-labelledby="today-activity-title">
+    <div className="section-heading"><div><span>Live workspace metadata</span><h2 id="today-activity-title">Today by member</h2></div><small>{today?.date || "Today"}</small></div>
+    <svg viewBox="0 0 720 180" role="img" aria-label="Cumulative commits, pushes, pulls, and staging events today for each workspace member">
+      {[0, 1, 2, 3].map(index => <line key={index} x1="20" x2="700" y1={20 + index * 45} y2={20 + index * 45} className="chart-grid" />)}
+      {users.map((user: any, index: number) => <path key={user.userId} d={activityGraphPath(user.hourly, 680, 135, maximum)} transform="translate(20 20)" fill="none" stroke={colors[index % colors.length]} strokeWidth="3" vectorEffect="non-scaling-stroke"><title>{activityUserSummary(user)}</title></path>)}
+    </svg>
+    <div className="activity-legend">
+      {users.map((user: any, index: number) => <div key={user.userId}><i style={{background: colors[index % colors.length]}} /><strong>{user.name}</strong><small>{user.totals.commit} commits · {user.totals.push} pushes · {user.totals.pull} pulls · {user.totals.stage} stages</small></div>)}
+    </div>
+  </section>;
+}
+
 function Activity({
   events,
   workspaceId,
@@ -585,7 +602,7 @@ function EmptyState({ title, text }: { title: string; text: string }) {
   );
 }
 
-function RepositorySelection({workspaceId, candidates, agents, userId, canManage, reload}: {workspaceId: number; candidates: RepositoryCandidate[]; agents: any[]; userId: number; canManage: boolean; reload: () => Promise<void>}) {
+function RepositorySelection({workspaceId, candidates, agents, userId, reload}: {workspaceId: number; candidates: RepositoryCandidate[]; agents: any[]; userId: number; reload: () => Promise<void>}) {
   const [changing, setChanging] = useState<number>();
   const [scanning, setScanning] = useState(false);
   const [scanPolling, setScanPolling] = useState(false);
@@ -594,27 +611,27 @@ function RepositorySelection({workspaceId, candidates, agents, userId, canManage
   const mounted = useRef(true);
   const active = () => canApplyWorkspaceResult(workspaceId, workspaceId, mounted.current);
   useEffect(() => () => { mounted.current = false; }, []);
-  const hasPending = scanPolling || candidates.some(candidate => candidate.desired_traced !== candidate.traced && !candidate.error);
+  const hasPending = scanPolling || candidates.some(candidate => candidate.owner_user_id === userId && candidate.desired_traced !== candidate.traced && !candidate.error);
   useEffect(() => {
     if (!hasPending) return;
-    const timer = setInterval(() => void reload(), 2_000);
+    const timer = setInterval(() => void reload(), 10_000);
     return () => clearInterval(timer);
   }, [hasPending, reload]);
   useEffect(() => {
     if (!scanPolling) return;
-    const timer = setTimeout(() => setScanPolling(false), 30_000);
+    const timer = setTimeout(() => setScanPolling(false), 75_000);
     return () => clearTimeout(timer);
   }, [scanPolling]);
   const ownAgents = agents.filter(agent => Number(agent.user_id) === Number(userId) && agent.status !== "revoked");
   return <section className="card settings-card repository-selection-card">
-    <span>Local Git discovery</span><h2>Repository proposals</h2>
-    <p className="muted">Scan only folders you previously approved with <code>tracemini watch</code>. The device sends bounded repository metadata here; no hooks or history import starts until a Manager approves tracing.</p>
+    <span>Local Git discovery</span><h2>Workspace repositories</h2>
+    <p className="muted">Scan only folders you previously approved with <code>tracemini watch</code>. The device sends bounded metadata; you choose repositories from your own devices and Managers see their safe workspace identity and status.</p>
     <button className="button secondary" disabled={scanning || ownAgents.length === 0} onClick={async () => {
       setScanning(true); setError(""); setMessage("");
       try {
         for (const agent of ownAgents) await request(`/workspaces/${workspaceId}/repository-scans`, {method: "POST", body: JSON.stringify({agentId: agent.id})});
         if (!active()) return;
-        setMessage(`Scan requested on ${ownAgents.length} device${ownAgents.length === 1 ? "" : "s"}. New repositories will appear as proposals.`);
+        setMessage(`Scan requested on ${ownAgents.length} device${ownAgents.length === 1 ? "" : "s"}. New repositories normally appear within one minute.`);
         setScanPolling(true);
         await reload();
       } catch (caught: any) { if (active()) setError(caught.message); }
@@ -625,6 +642,7 @@ function RepositorySelection({workspaceId, candidates, agents, userId, canManage
     {error && <div className="alert error" role="alert">{error}</div>}
     {candidates.length ? candidates.map(candidate => {
       const state = repositorySelectionState(candidate);
+      const canSelect = candidate.owner_user_id === userId;
       return <label className="repository-choice" key={candidate.id}>
         <span><strong>{candidate.name}</strong><small>{candidate.owner_name ? `${candidate.owner_name} · ` : ""}{candidate.machine_name} · {candidate.branch || "detached"}</small>{candidate.local_key && <code>{candidate.local_key}</code>}{candidate.error && <small className="error-text">{candidate.error}</small>}</span>
         <span className={`selection-state ${state.tone}`}>
@@ -632,16 +650,16 @@ function RepositorySelection({workspaceId, candidates, agents, userId, canManage
             ? <><BusyIndicator label="Saving selection…" /><ProgressTrack label={`Saving ${candidate.name} selection`} /></>
             : state.pending
               ? <><BusyIndicator label={state.label} /><ProgressTrack label={`${state.label} ${candidate.name}`} /></>
-              : candidate.traced || candidate.error ? state.label : canManage ? "Awaiting approval" : "Awaiting Manager approval"}
+              : candidate.traced || candidate.error ? state.label : canSelect ? "Not selected" : "Not selected by member"}
         </span>
-        <input type="checkbox" role="switch" aria-label={`${canManage ? "Approve tracing" : "Tracing approval"} for ${candidate.name} on ${candidate.machine_name}`} checked={state.checked} disabled={!canManage || state.pending || changing === candidate.id} onChange={async event => {
+        <input type="checkbox" role="switch" aria-label={`${canSelect ? "Trace" : "Member repository selection"} for ${candidate.name} on ${candidate.machine_name}`} checked={state.checked} disabled={!canSelect || state.pending || changing === candidate.id} onChange={async event => {
           setChanging(candidate.id); setError("");
           try { await request(`/workspaces/${workspaceId}/repository-candidates/${candidate.id}`, {method: "PATCH", body: JSON.stringify({traced: event.target.checked})}); if (active()) await reload(); }
           catch (caught: any) { if (active()) setError(caught.message); }
           finally { if (active()) setChanging(undefined); }
         }} />
       </label>;
-    }) : <p className="muted">No proposals yet. Request a scan after configuring an approved folder on your device.</p>}
+    }) : <p className="muted">No repositories found yet. Request a scan after configuring an approved folder on your device.</p>}
   </section>;
 }
 
@@ -677,10 +695,10 @@ function Settings({ workspace, members, repositories, agents, repositoryCandidat
           description="View the people and repositories in this workspace. Managers control changes."
         />
         <div className="alert progress" role="status">
-          Managers approve workspace tracing. You can scan approved folders on your own devices and review their proposal status here.
+          Select repositories from your own devices. Managers receive repository identity and activity metadata, never your local filesystem path.
         </div>
         <div className="settings-grid">
-          <RepositorySelection workspaceId={workspace.id} candidates={repositoryCandidates} agents={agents} userId={userId} canManage={false} reload={reloadCandidates} />
+          <RepositorySelection workspaceId={workspace.id} candidates={repositoryCandidates} agents={agents} userId={userId} reload={reloadCandidates} />
           <section className="card settings-card">
             <span>People</span>
             <h2>Members</h2>
@@ -726,7 +744,7 @@ function Settings({ workspace, members, repositories, agents, repositoryCandidat
         </div>
       )}
       <div className="settings-grid" aria-busy={pending}>
-        <RepositorySelection workspaceId={workspace.id} candidates={repositoryCandidates} agents={agents} userId={userId} canManage={true} reload={reloadCandidates} />
+        <RepositorySelection workspaceId={workspace.id} candidates={repositoryCandidates} agents={agents} userId={userId} reload={reloadCandidates} />
         <section className="card settings-card">
           <span>People</span>
           <h2>Members</h2>
@@ -994,6 +1012,7 @@ function Dashboard({
   dates,
   setDates,
   stats,
+  today,
   events,
   repositories,
   reload,
@@ -1002,6 +1021,12 @@ function Dashboard({
 }: any) {
   const [refreshPending, setRefreshPending] = useState(false);
   const activeView = useActiveView();
+  useEffect(() => {
+    const refresh = () => { if (activeView.current && document.visibilityState === "visible") void reload(); };
+    const timer = setInterval(refresh, 60_000);
+    document.addEventListener("visibilitychange", refresh);
+    return () => { clearInterval(timer); document.removeEventListener("visibilitychange", refresh); };
+  }, [reload]);
   return (
     <div className="page-stack">
       <PageHeading
@@ -1050,6 +1075,7 @@ function Dashboard({
         ))}
       </div>
       <Trend daily={stats.daily} />
+      <TodayActivityGraph today={today} />
       <div className="dashboard-grid">
         <Activity events={events} workspaceId={workspaceId} timezone={timezone} />
         <aside className="card insight-card">
@@ -1490,6 +1516,7 @@ function App() {
   const [reports, setReports] = useState<any[]>([]);
   const [agents, setAgents] = useState<any[]>([]);
   const [stats, setStats] = useState<any>({ totals: {}, daily: [] });
+  const [today, setToday] = useState<any>({users: []});
   const [report, setReport] = useState<any>();
   const [error, setError] = useState("");
   const [timezone, setTimezone] = useState(initialTimezone);
@@ -1520,6 +1547,7 @@ function App() {
     setReports([]);
     setAgents([]);
     setStats({totals: {}, daily: []});
+    setToday({users: []});
     setReport(undefined);
     setError("");
   }, [workspaceId]);
@@ -1591,6 +1619,7 @@ function App() {
       setReports([]);
       setAgents([]);
       setStats({ totals: {}, daily: [] });
+      setToday({users: []});
       if (shouldBlock) setWorkspacePending(false);
       return;
     }
@@ -1607,6 +1636,7 @@ function App() {
           setEvents(value.events);
           setRepositories(value.repositories);
           setStats(value.stats);
+          setToday(value.today);
         },
         settings: (value) => {
           setMembers(value.members);
@@ -1840,6 +1870,7 @@ function App() {
               dates={dates}
               setDates={setDates}
               stats={stats}
+              today={today}
               events={events}
               repositories={repositories}
               reload={loadWorkspace}

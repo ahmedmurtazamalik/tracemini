@@ -265,8 +265,8 @@ export async function publishRepositoryCandidates(config: Config, root?: string)
   return repositories;
 }
 
-export async function processRepositoryRefreshRequests(config: Config) {
-  const requests = await api<any[]>(config, '/api/agents/refresh-requests');
+export async function processRepositoryRefreshRequests(config: Config, supplied?: any[]) {
+  const requests = supplied ?? await api<any[]>(config, '/api/agents/refresh-requests');
   const request = requests[0];
   if (!request) return 0;
   await api(config, `/api/agents/refresh-requests/${request.id}/claim`, {method: 'POST'});
@@ -295,8 +295,8 @@ export function verifyRepositorySelection(config: Config, selection: {local_key:
   return current;
 }
 
-export async function processRepositorySelections(config: Config, indexState?: Map<string, {mtime: number; timer?: NodeJS.Timeout}>) {
-  const selections = await api<any[]>(config, '/api/agents/repository-selections');
+export async function processRepositorySelections(config: Config, indexState?: Map<string, {mtime: number; timer?: NodeJS.Timeout}>, supplied?: any[]) {
+  const selections = supplied ?? await api<any[]>(config, '/api/agents/repository-selections');
   for (const selection of selections) {
     const binding: Config = {...config};
     let bindingLost = false;
@@ -392,8 +392,8 @@ export function confirmPushForClone(
   return {...result, identityFingerprint: after};
 }
 
-export async function processPushes(config: Config) {
-  const pushes = await api<any[]>(config, '/api/agents/pushes');
+export async function processPushes(config: Config, supplied?: any[]) {
+  const pushes = supplied ?? await api<any[]>(config, '/api/agents/pushes');
   const configuredDelay = Number(process.env.TRACEMINI_PUSH_CONFIRM_DELAY_MS);
   const confirmationDelayMs = Number.isFinite(configuredDelay) ? Math.max(0, configuredDelay) : 8_000;
   for (const push of pushes) {
@@ -454,7 +454,48 @@ function redactEvidence(value: unknown, key = ''): unknown {
 
 export function contextPrompt(context: any, clones: Config['clones']) {
   const grouped = new Map<string, any[]>();
-  for (const event of context.events) grouped.set(event.normalized_remote, [...(grouped.get(event.normalized_remote) || []), event]);
+  const crossMemberEvidenceKeys = new Set(['commitSha', 'message', 'filesChanged', 'insertions', 'deletions', 'branch', 'headSha', 'remoteHeadSha', 'headAction', 'stagedFiles', 'files', 'remote', 'remoteUrl', 'ref', 'expectedSha', 'observedSha', 'confirmation']);
+  const redactCrossMemberPaths = (value: any): any => {
+    if (Array.isArray(value)) return value.slice(0, 500).map(redactCrossMemberPaths);
+    if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value)
+      .filter(([key]) => crossMemberEvidenceKeys.has(key))
+      .map(([key, entry]) => {
+        if (/^remoteUrl$/i.test(key) && typeof entry === 'string' && (/^(?:[\\/]|[a-z]:[\\/]|file:|local(?:-device-\d+)?:)/i.test(entry) || /^local-device-\d+\/\//i.test(entry))) return [key, null];
+        return [key, redactCrossMemberPaths(entry)];
+      }));
+    if (typeof value !== 'string') return value;
+    return value
+      .replace(/(?:file:\/\/\/|local(?:-device-\d+)?:\/+|local-device-\d+\/\/)[^\s"'<>]+/gi, '[private local path]')
+      .replace(/\\\\[^\s"'<>]+/g, '[private local path]')
+      .replace(/(^|[\s"'(=:])\/[^\s"'<>]+/g, '$1[private local path]')
+      .replace(/(^|[\s"'(=:])[a-z]:[\\/][^\s"'<>]+/gi, '$1[private local path]')
+      .slice(0, 2_000);
+  };
+  const safeRepositoryLabel = (value: unknown) => {
+    const parts = String(value || 'repository').trim().split(/[\\/]+/).filter(Boolean);
+    return (parts.at(-1) || 'repository').replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 160) || 'repository';
+  };
+  const isCrossMemberEvent = (event: any) => {
+    const eventUserId = Number(event.user_id);
+    const jobUserId = Number(context.job.user_id);
+    return Number.isFinite(eventUserId) && Number.isFinite(jobUserId) && eventUserId !== jobUserId;
+  };
+  const safeRemote = (event: any) => {
+    const remote = String(event.normalized_remote || '');
+    const crossMemberLocal = isCrossMemberEvent(event)
+      && /^(?:[\\/]|[a-z]:[\\/]|file:|local(?:[\/:]|-device-\d+(?::|\/)))/i.test(remote);
+    return crossMemberLocal ? '' : remote;
+  };
+  for (const event of context.events) {
+    const remote = safeRemote(event);
+    const key = remote || `private:${event.user_id}:${event.repository_name}`;
+    grouped.set(key, [...(grouped.get(key) || []), {
+      ...event,
+      repository_name: isCrossMemberEvent(event) ? safeRepositoryLabel(event.repository_name) : event.repository_name,
+      normalized_remote: remote || null,
+      data: isCrossMemberEvent(event) ? redactCrossMemberPaths(event.data) : event.data,
+    }]);
+  }
   const timezone = context.job.timezone || 'Asia/Karachi';
   const includeDiff = Boolean(context.job.include_diff);
   const format = context.job.format === 'summary' ? 'summary' : 'detailed';
@@ -469,9 +510,10 @@ export function contextPrompt(context: any, clones: Config['clones']) {
   if (Number(context.job.coalesced_runs || 0) > 0) text += `Begin with a brief **Schedule recovery** note stating that ${Number(context.job.coalesced_runs)} older scheduled occurrence(s) were coalesced after the reporting device was unavailable; this report uses the latest due evidence window.\n\n`;
   if (context.job.custom_prompt) text += `User-requested report structure or emphasis:\n${context.job.custom_prompt}\nFollow this preference unless it conflicts with factual accuracy, supplied evidence, redaction, or read-only operation.\n\n`;
   let diffBudget = 80_000;
-  for (const [remote, events] of grouped) {
-    const clone = clones.find(item => item.normalizedRemote === remote);
-    text += `\n## Evidence: ${events[0].repository_name}\nRepository: ${remote}\nLocal clone: ${clone?.path || 'unavailable'}\n`;
+  for (const [_key, events] of grouped) {
+    const remote = events[0].normalized_remote;
+    const clone = remote ? clones.find(item => item.normalizedRemote === remote) : undefined;
+    text += `\n## Evidence: ${events[0].repository_name}\nRepository: ${remote || 'private local repository'}\nLocal clone: ${clone?.path || 'unavailable'}\n`;
     for (const event of events) {
       const data = event.data || {};
       text += `\n### ${event.type}${data.commitSha ? ` ${String(data.commitSha).slice(0, 12)}` : ''}\n`;
@@ -496,6 +538,7 @@ export function contextPrompt(context: any, clones: Config['clones']) {
 
 export async function processJob(config: Config, job: any) {
   await api(config, `/api/agents/jobs/${job.id}/claim`, {method: 'POST'});
+  const stopHeartbeat = startHeartbeatLoop(() => api(config, '/api/agents/heartbeat', {method: 'POST'}), 45_000);
   try {
     const context = await api<any>(config, `/api/agents/jobs/${job.id}/context`);
     const workspaceClones = config.clones.filter(clone => clone.workspaceId == null || clone.workspaceId === Number(job.workspace_id));
@@ -506,17 +549,21 @@ export async function processJob(config: Config, job: any) {
   } catch (error: any) {
     await api(config, `/api/agents/jobs/${job.id}/fail`, {method: 'POST', body: JSON.stringify({error: String(error.message || error).slice(0, 2000)})});
     throw error;
+  } finally {
+    stopHeartbeat();
   }
 }
 
 export async function tick(config: Config, indexState: Map<string, {mtime: number; timer?: NodeJS.Timeout}> = new Map()) {
-  const jobs = await api<any[]>(config, '/api/agents/jobs');
+  const work: any = await api(config, '/api/agents/sync');
+  const jobs = Array.isArray(work) ? [] : work.jobs || [];
+  if (Array.isArray(work.workspaceIds)) reconcileAuthorizedWorkspaces(config, work.workspaceIds.map(Number), indexState);
   if (jobs[0]) await processJob(config, jobs[0]);
-  await processRepositoryRefreshRequests(config);
+  await processRepositoryRefreshRequests(config, work.refreshRequests || []);
   await reconcileConfiguredCloneIdentities(config, indexState);
-  await processRepositorySelections(config, indexState);
+  await processRepositorySelections(config, indexState, work.repositorySelections || []);
   await flush(config);
-  await processPushes(config);
+  await processPushes(config, work.pushes || []);
   const stagedPaths = new Set<string>();
   for (const clone of config.clones) {
     try {
@@ -582,31 +629,16 @@ export function startHeartbeatLoop(
   return () => clearInterval(timer);
 }
 
+export const effectiveAgentPollMs = (configured: number) => Math.max(60_000, Number(configured) || 0);
+
 export async function runAgent(config: Config, once = false) {
   const states = new Map<string, {mtime: number; timer?: NodeJS.Timeout}>();
-  const heartbeat = async () => {
-    const current = loadConfig();
-    const response: any = await api(current, '/api/agents/heartbeat', {method: 'POST'});
-    if (Array.isArray(response.workspaceIds)) reconcileAuthorizedWorkspaces(current, response.workspaceIds.map(Number), states);
-  };
-  const stopHeartbeat = once
-    ? undefined
-    : startHeartbeatLoop(heartbeat);
-  let lastCandidatePublish = 0;
-  try {
-    do {
-      // Pick up roots/clones written by interactive CLI commands while this
-      // long-running process is alive instead of retaining its startup snapshot.
-      config = loadConfig();
-      if (once) { await heartbeat(); config = loadConfig(); }
-      try { await tick(config, states); } catch (error) { console.error(new Date().toISOString(), String(error)); }
-      if (Date.now() - lastCandidatePublish >= 5 * 60_000) {
-        try { await publishRepositoryCandidates(config); lastCandidatePublish = Date.now(); } catch (error) { console.error(new Date().toISOString(), `repository discovery: ${String(error)}`); }
-      }
-      if (once) return;
-      await new Promise(resolve => setTimeout(resolve, config.pollMs));
-    } while (true);
-  } finally {
-    stopHeartbeat?.();
-  }
+  do {
+    // Pick up roots/clones written by interactive CLI commands while this
+    // long-running process is alive instead of retaining its startup snapshot.
+    config = loadConfig();
+    try { await tick(config, states); } catch (error) { console.error(new Date().toISOString(), String(error)); }
+    if (once) return;
+    await new Promise(resolve => setTimeout(resolve, effectiveAgentPollMs(config.pollMs)));
+  } while (true);
 }
