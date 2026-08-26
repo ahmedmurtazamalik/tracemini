@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import type {DB} from './db.js';
 import {linuxInstallCommand, linuxInstaller, linuxSyncCommand} from './linux-installer.js';
-import {dateKeyInTimezone, dateRangeUtc, hourInTimezone, normalizeTimezone} from './timezone.js';
+import {activityBucketMinutes, dateKeyInTimezone, dateRangeUtc, hourInTimezone, normalizeTimezone} from './timezone.js';
 import {materializeDueReportSchedules, nextScheduledRun, normalizeReportFormat, validateScheduleRule} from './report-schedule.js';
 import {sendSlackReport} from './slack.js';
 
@@ -803,17 +803,17 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
     if (query.from) { filters.push('e.occurred_at>=?'); values.push(dateRangeUtc(String(query.from), String(query.from), timezone).from); }
     if (query.to) { filters.push('e.occurred_at<=?'); values.push(dateRangeUtc(String(query.to), String(query.to), timezone).to); }
     const where = filters.join(' AND ');
+    const bucketMinutes = activityBucketMinutes(timezone);
     const totals: any = await db.prepare(`SELECT COUNT(*)::INTEGER commits,COALESCE(SUM(CAST(e.data::JSONB->>'filesChanged' AS INTEGER)),0)::INTEGER "filesChanged",COALESCE(SUM(CAST(e.data::JSONB->>'insertions' AS INTEGER)),0)::INTEGER insertions,COALESCE(SUM(CAST(e.data::JSONB->>'deletions' AS INTEGER)),0)::INTEGER deletions FROM activity_events e JOIN activity_event_repositories aer ON aer.event_id=e.id JOIN repositories r ON r.id=aer.repository_id WHERE ${where}`).get(...values);
-    const dailyEvents = await db.prepare(`SELECT e.occurred_at,e.data FROM activity_events e JOIN activity_event_repositories aer ON aer.event_id=e.id JOIN repositories r ON r.id=aer.repository_id WHERE ${where} ORDER BY e.occurred_at`).all(...values);
+    const dailyBuckets = await db.prepare(`SELECT date_bin('${bucketMinutes} minutes',source.occurred_at,TIMESTAMPTZ '1970-01-01 00:00:00+00') occurred_hour,COUNT(*)::INTEGER commits,COALESCE(SUM(CAST(source.data::JSONB->>'filesChanged' AS INTEGER)),0)::INTEGER "filesChanged",COALESCE(SUM(CAST(source.data::JSONB->>'insertions' AS INTEGER)),0)::INTEGER insertions,COALESCE(SUM(CAST(source.data::JSONB->>'deletions' AS INTEGER)),0)::INTEGER deletions FROM (SELECT DISTINCT e.id,e.occurred_at,e.data FROM activity_events e JOIN activity_event_repositories aer ON aer.event_id=e.id JOIN repositories r ON r.id=aer.repository_id WHERE ${where}) source GROUP BY date_bin('${bucketMinutes} minutes',source.occurred_at,TIMESTAMPTZ '1970-01-01 00:00:00+00') ORDER BY occurred_hour`).all(...values);
     const dailyByDate = new Map<string, any>();
-    for (const event of dailyEvents) {
-      const date = dateKeyInTimezone(event.occurred_at, timezone);
-      const data: any = eventData(event.data) || {};
+    for (const bucket of dailyBuckets) {
+      const date = dateKeyInTimezone(bucket.occurred_hour, timezone);
       const current = dailyByDate.get(date) || {date, commits: 0, filesChanged: 0, insertions: 0, deletions: 0};
-      current.commits += 1;
-      current.filesChanged += Number(data.filesChanged || 0);
-      current.insertions += Number(data.insertions || 0);
-      current.deletions += Number(data.deletions || 0);
+      current.commits += Number(bucket.commits || 0);
+      current.filesChanged += Number(bucket.filesChanged || 0);
+      current.insertions += Number(bucket.insertions || 0);
+      current.deletions += Number(bucket.deletions || 0);
       dailyByDate.set(date, current);
     }
     const daily = [...dailyByDate.values()];
@@ -831,9 +831,10 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
     const values: any[] = [workspaceId, bounds.from, bounds.to];
     if (query.userId) { filters.push('e.user_id=?'); values.push(Number(query.userId)); }
     if (query.repositoryId) { filters.push('r.id=?'); values.push(Number(query.repositoryId)); }
+    const bucketMinutes = activityBucketMinutes(timezone);
     const [workspaceMembers, events] = await Promise.all([
       membersForWorkspace(workspaceId),
-      db.prepare(`SELECT DISTINCT e.id,e.user_id,e.type,e.occurred_at FROM activity_events e JOIN activity_event_repositories aer ON aer.event_id=e.id JOIN repositories r ON r.id=aer.repository_id WHERE ${filters.join(' AND ')} ORDER BY e.occurred_at`).all(...values),
+      db.prepare(`SELECT source.user_id,source.type,date_bin('${bucketMinutes} minutes',source.occurred_at,TIMESTAMPTZ '1970-01-01 00:00:00+00') occurred_hour,COUNT(*)::INTEGER event_count FROM (SELECT DISTINCT e.id,e.user_id,e.type,e.occurred_at FROM activity_events e JOIN activity_event_repositories aer ON aer.event_id=e.id JOIN repositories r ON r.id=aer.repository_id WHERE ${filters.join(' AND ')}) source GROUP BY source.user_id,source.type,date_bin('${bucketMinutes} minutes',source.occurred_at,TIMESTAMPTZ '1970-01-01 00:00:00+00') ORDER BY occurred_hour`).all(...values),
     ]);
     const members = query.userId ? workspaceMembers.filter((member: any) => Number(member.id) === Number(query.userId)) : workspaceMembers;
     const emptyCounts = () => ({commit: 0, push: 0, pull: 0, stage: 0, branch: 0, merge: 0, rewrite: 0});
@@ -845,15 +846,18 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
       totals: emptyCounts(),
       points: labels.map((label, index) => ({label, ...(granularity === 'hour' ? {hour: index} : {date: label}), ...emptyCounts(), total: 0})),
     }));
+    const labelIndexes = new Map(labels.map((label, index) => [label, index]));
     const byUser = new Map(users.map((user: any) => [user.userId, user]));
     for (const event of events as any[]) {
       const user: any = byUser.get(Number(event.user_id));
       if (!user || !(event.type in user.totals)) continue;
-      const index = granularity === 'hour' ? hourInTimezone(event.occurred_at, timezone) : labels.indexOf(dateKeyInTimezone(event.occurred_at, timezone));
-      if (index < 0) continue;
-      user.totals[event.type] += 1;
-      user.points[index][event.type] += 1;
-      user.points[index].total += 1;
+      const occurredHour = event.occurred_hour;
+      const index = granularity === 'hour' ? hourInTimezone(occurredHour, timezone) : labelIndexes.get(dateKeyInTimezone(occurredHour, timezone));
+      if (index === undefined || index < 0) continue;
+      const count = Number(event.event_count || 0);
+      user.totals[event.type] += count;
+      user.points[index][event.type] += count;
+      user.points[index].total += count;
     }
     for (const user of users as any[]) if (granularity === 'hour') user.hourly = user.points;
     return {from, to, ...(span === 1 ? {date: from} : {}), timezone, granularity, users};
@@ -873,6 +877,14 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
   app.get('/api/users/:id/activity', userAuth, async (req: Authed, res) => await queryActivity(req, res, ' AND e.user_id=?', [+req.params.id]));
   app.get('/api/workspaces/:id/stats', userAuth, requireMember, async (req, res) => {
     res.json(await statsForWorkspace(req.params.id, req.query));
+  });
+  app.get('/api/workspaces/:id/timeline', userAuth, requireMember, async (req, res) => {
+    const from = req.query.from === undefined ? undefined : String(req.query.from);
+    const to = req.query.to === undefined ? undefined : String(req.query.to);
+    if (Boolean(from) !== Boolean(to) || (from && !dateOnly(from)) || (to && !dateOnly(to)) || (from && to && (from > to || (Date.parse(`${to}T00:00:00.000Z`) - Date.parse(`${from}T00:00:00.000Z`)) / 86_400_000 >= 90))) {
+      return res.status(400).json({error: 'activity timeline must be a valid range of 90 days or fewer'});
+    }
+    res.json(await timelineForWorkspace(req.params.id, req.query));
   });
   app.get('/api/workspaces/:id/dashboard', userAuth, requireMember, async (req, res) => {
     const from = req.query.from === undefined ? undefined : String(req.query.from);
