@@ -909,8 +909,10 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
       return {id: Number(reportId), workspaceId: Number(job.workspace_id), name: job.report_name || defaultReportName(job.start_date, job.end_date), startDate: isoDate(job.start_date), endDate: isoDate(job.end_date), scope: job.report_scope, notifySlack: Boolean(job.notify_slack)};
     });
     if (!completed) return res.status(409).json({error: 'job not claimed'});
-    if (completed.notifySlack && process.env.SLACK_WEBHOOK_URL) {
-      try { await slackNotifier(process.env.SLACK_WEBHOOK_URL, completed, requestOrigin(req)); }
+    if (completed.notifySlack) {
+      const webhookUrl = process.env.SLACK_REPORT_WEBHOOK_URL;
+      if (!webhookUrl) console.error('Slack report notification skipped: SLACK_REPORT_WEBHOOK_URL is not configured');
+      else try { await slackNotifier(webhookUrl, completed, requestOrigin(req)); }
       catch (error) { console.error('Slack report notification failed:', error); }
     }
     res.status(201).json({ok: true});

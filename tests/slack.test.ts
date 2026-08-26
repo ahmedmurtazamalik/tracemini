@@ -1,9 +1,17 @@
 import {afterEach, describe, expect, it, vi} from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
 import {sendSlackReport} from '../apps/server/src/slack.js';
 
 afterEach(() => vi.unstubAllGlobals());
 
 describe('Slack report notifications', () => {
+  it('loads the root local environment for both server commands', () => {
+    const packageJson = JSON.parse(fs.readFileSync(path.resolve(import.meta.dirname, '../apps/server/package.json'), 'utf8'));
+    expect(packageJson.scripts.dev).toContain('--env-file-if-exists=../../.env.local');
+    expect(packageJson.scripts.start).toContain('--env-file-if-exists=../../.env.local');
+  });
+
   it('sends report metadata and a TraceMini link without report content', async () => {
     const post = vi.fn().mockResolvedValue({ok: true});
     vi.stubGlobal('fetch', post);
