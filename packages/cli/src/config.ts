@@ -4,7 +4,7 @@ export type WatchedRoot={path:string;workspaceId:number};
 export type Config={serverUrl:string;userToken?:string;agentToken?:string;agentId?:number;workspaceId?:number;watchedPaths:string[];watchedRoots?:WatchedRoot[];clones:Clone[];reporter:'codex'|'hermes';pollMs:number};
 export type Queued={eventKey:string;workspaceId?:number;repositoryId:number;localKey?:string;identityFingerprint?:string;type:string;occurredAt:string;data:Record<string,unknown>;attempts:number;nextAttempt:number;claimId?:string;claimedAt?:number};
 export const stateDir=()=>process.env.TRACEMINI_HOME||path.join(os.homedir(),'.tracemini');
-const file=(n:string)=>path.join(stateDir(),n);const defaults=():Config=>({serverUrl:'http://localhost:3000',watchedPaths:[],watchedRoots:[],clones:[],reporter:'codex',pollMs:2000});
+const file=(n:string)=>path.join(stateDir(),n);const defaults=():Config=>({serverUrl:'http://localhost:3000',watchedPaths:[],watchedRoots:[],clones:[],reporter:'codex',pollMs:60000});
 function readStored():Partial<Config>{try{return JSON.parse(fs.readFileSync(file('config.json'),'utf8'))}catch{return {}}}
 function hydrate(stored:Partial<Config>):Config{const watchedPaths=stored.watchedPaths||[];const watchedRoots=stored.watchedRoots||(stored.workspaceId?watchedPaths.map(root=>({path:root,workspaceId:stored.workspaceId!})):[]);return {...defaults(),...stored,watchedPaths,watchedRoots,clones:(stored.clones||[]).map(clone=>({...clone,workspaceId:clone.workspaceId??stored.workspaceId}))}}
 function sameBinding(a:Partial<Config>,b:Partial<Config>){return a.serverUrl===b.serverUrl&&a.agentId===b.agentId&&a.agentToken===b.agentToken}

@@ -344,6 +344,8 @@ else if(command==='status'){console.log(JSON.stringify(JSON.parse(fs.readFileSyn
     await request(app).post('/api/repositories/register').set(auth(agent.agentToken)).send({workspaceId: String(workspace.id), name: 'Legacy', remoteUrl: 'file:///tmp/legacy.git', localKey: '/legacy'}).expect(409);
 
     const pending = (await request(app).post('/api/pushes/pending').set(auth(agent.agentToken)).send({repositoryId: repo.id, localKey: '/clone', identityFingerprint: testFingerprint, eventKey: 'push-1', remoteName: 'origin', remoteUrl: 'file:///tmp/remote.git', ref: 'refs/heads/main', expectedSha: 'abc', occurredAt: new Date().toISOString()}).expect(201)).body;
+    const sync = (await request(app).get('/api/agents/sync').set(auth(agent.agentToken)).expect(200)).body;
+    expect(sync).toMatchObject({workspaceIds: expect.arrayContaining([workspace.id]), jobs: [], refreshRequests: [], repositorySelections: expect.arrayContaining([expect.objectContaining({id: legacyCandidate.id})]), pushes: [expect.objectContaining({id: pending.id})]});
     expect((await request(app).get('/api/agents/pushes').set(auth(agent.agentToken)).expect(200)).body[0].id).toBe(pending.id);
     expect((await request(app).post(`/api/agents/pushes/${pending.id}/complete`).set(auth(agent.agentToken)).send({status: 'unconfirmed', identityFingerprint: testFingerprint}).expect(200)).body.retrying).toBe(true);
     expect((await request(app).get('/api/agents/pushes').set(auth(agent.agentToken)).expect(200)).body).toEqual([]);
@@ -355,10 +357,19 @@ else if(command==='status'){console.log(JSON.stringify(JSON.parse(fs.readFileSyn
     const stats = (await request(app).get(`/api/workspaces/${workspace.id}/stats`).set(auth(user.token)).expect(200)).body;
     expect(stats.totals).toEqual({commits: 1, filesChanged: 3, insertions: 12, deletions: 4});
     expect(stats.daily[0]).toMatchObject({date: '2026-08-21', commits: 1});
-    const dashboard = (await request(app).get(`/api/workspaces/${workspace.id}/dashboard`).set(auth(user.token)).expect(200)).body;
-    expect(dashboard.stats.totals).toEqual(stats.totals);
-    expect(dashboard.events).toHaveLength(3);
-    expect(dashboard.repositories[0]).toMatchObject({id: repo.id, clone_count: 1});
+    const today = new Date().toISOString();
+    await request(app).post('/api/activity').set(auth(agent.agentToken)).send({eventKey: 'commit-today', repositoryId: repo.id, localKey: '/clone', identityFingerprint: testFingerprint, type: 'commit', occurredAt: today, data: {filesChanged: 1, insertions: 2, deletions: 0, sourceCode: 'CANARY /opaque/QZ7M4N8891/source.ts', remoteUrl: 'file:///home/ada/private/project', diagnostic: 'EACCES: /home/ada/private/project'}}).expect(201);
+    await db.prepare('UPDATE repositories SET name=?,remote_url=?,normalized_remote=? WHERE id=?').run('/opaque/QZ7M4N8891/private-project', '/home/ada/private/project', 'home/ada/private/project', repo.id);
+    const dashboard = (await request(app).get(`/api/workspaces/${workspace.id}/dashboard?timezone=UTC`).set(auth(user.token)).expect(200)).body;
+    expect(dashboard.stats.totals.commits).toBe(2);
+    expect(dashboard.today).toMatchObject({date: today.slice(0, 10), users: [expect.objectContaining({userId: user.user.id, name: 'Ada', totals: {commit: 1, push: 1, pull: 0, stage: 0}})]});
+    expect(dashboard.today.users[0].hourly).toHaveLength(24);
+    expect(dashboard.events).toHaveLength(4);
+    expect(dashboard.events.every((event: any) => event.local_key === null)).toBe(true);
+    expect(JSON.stringify(dashboard.events)).not.toContain('/home/ada');
+    expect(JSON.stringify(dashboard.events)).not.toContain('/opaque/');
+    expect(JSON.stringify(dashboard.events)).not.toContain('CANARY');
+    expect(dashboard.repositories[0]).toMatchObject({id: repo.id, name: 'private-project', clone_count: 1, remote_url: null, normalized_remote: null});
     const settings = (await request(app).get(`/api/workspaces/${workspace.id}/settings`).set(auth(user.token)).expect(200)).body;
     expect(settings).toMatchObject({members: [{id: user.user.id, role: 'Manager'}]});
     expect(settings.repositoryCandidates).toHaveLength(2);
@@ -403,6 +414,7 @@ else if(command==='status'){console.log(JSON.stringify(JSON.parse(fs.readFileSyn
     const context = (await request(app).get(`/api/agents/jobs/${regeneration.id}/context`).set(auth(agent.agentToken)).expect(200)).body;
     expect(context.job).toMatchObject({target_report_id: originalReport.id, custom_prompt: 'Lead with outcomes and group work by capability.'});
     await request(app).post(`/api/agents/jobs/${regeneration.id}/complete`).set(auth(agent.agentToken)).send({markdown: '# Regenerated\n\nEngineering outcomes.'}).expect(201);
+    await request(app).get(`/api/agents/jobs/${regeneration.id}/context`).set(auth(agent.agentToken)).expect(404);
 
     expect((await request(app).get(`/api/reports/${originalReport.id}`).set(auth(user.token)).expect(200)).body).toMatchObject({id: originalReport.id, job_id: regeneration.id, name: 'August Engineering Review', markdown: '# Regenerated\n\nEngineering outcomes.', report_scope: 'personal', user_name: 'Report Owner'});
     expect((await request(app).get(`/api/workspaces/${workspace.id}/reports`).set(auth(user.token)).expect(200)).body).toHaveLength(1);

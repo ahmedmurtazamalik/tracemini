@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import type {DB} from './db.js';
 import {linuxInstallCommand, linuxInstaller, linuxSyncCommand} from './linux-installer.js';
-import {dateKeyInTimezone, dateRangeUtc, normalizeTimezone} from './timezone.js';
+import {dateKeyInTimezone, dateRangeUtc, hourInTimezone, normalizeTimezone} from './timezone.js';
 import {materializeDueReportSchedules, nextScheduledRun, normalizeReportFormat, validateScheduleRule} from './report-schedule.js';
 import {sendSlackReport} from './slack.js';
 
@@ -46,6 +46,38 @@ export function normalizeRemote(value: string) {
   }
   return normalized.replace(/^\/+/, '').toLowerCase();
 }
+
+const isPrivateLocalIdentity = (value: unknown) => {
+  const normalized = String(value || '').toLowerCase();
+  return normalized.startsWith('file:')
+    || normalized.startsWith('local/')
+    || /^local-device-\d+\//.test(normalized)
+    || /^[a-z]\/\//.test(normalized);
+};
+const isRawLocalRemote = (value: unknown) => /^(?:[\\/]|[a-z]:[\\/]|file:|local(?:-device-\d+)?:)/i.test(String(value || '').trim());
+
+const redactLocalPathsInString = (value: string) => value
+  .replace(/(?:file:\/\/\/|local(?:-device-\d+)?:\/+|local-device-\d+\/\/)[^\s"'<>]+/gi, '[private local path]')
+  .replace(/\\\\[^\s"'<>]+/g, '[private local path]')
+  .replace(/(^|[\s"'(=:])\/[^\s"'<>]+/g, '$1[private local path]')
+  .replace(/(^|[\s"'(=:])[a-z]:[\\/][^\s"'<>]+/gi, '$1[private local path]');
+
+const safeRepositoryName = (value: unknown) => {
+  const parts = String(value || 'repository').trim().split(/[\\/]+/).filter(Boolean);
+  return (parts.at(-1) || 'repository').replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 160) || 'repository';
+};
+const crossMemberEvidenceKeys = new Set(['commitSha', 'message', 'filesChanged', 'insertions', 'deletions', 'branch', 'headSha', 'remoteHeadSha', 'headAction', 'stagedFiles', 'files', 'remote', 'remoteUrl', 'ref', 'expectedSha', 'observedSha', 'confirmation']);
+
+const redactCrossMemberEvidence = (value: any): any => {
+  if (Array.isArray(value)) return value.slice(0, 500).map(redactCrossMemberEvidence);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value)
+    .filter(([key]) => crossMemberEvidenceKeys.has(key))
+    .map(([key, entry]) => {
+      if (/^remoteUrl$/i.test(key) && typeof entry === 'string' && (isPrivateLocalIdentity(normalizeRemote(entry)) || isRawLocalRemote(entry))) return [key, null];
+      return [key, redactCrossMemberEvidence(entry)];
+    }));
+  return typeof value === 'string' ? redactLocalPathsInString(value).slice(0, 2_000) : value;
+};
 
 type Authed = Request & {user?: any; agent?: any};
 const required = (keys: string[]) => (req: Request, res: Response, next: NextFunction) => {
@@ -117,19 +149,30 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
     const rows = await db.prepare(`SELECT r.* FROM repositories r WHERE r.workspace_id=?${archived} ORDER BY r.name`).all(workspaceId);
     return Promise.all(rows.map(async (row: any) => ({
       ...row,
+      name: safeRepositoryName(row.name),
+      ...((isPrivateLocalIdentity(row.normalized_remote) || isRawLocalRemote(row.remote_url)) ? {remote_url: null, normalized_remote: null} : {}),
       archived: row.archived ? 1 : 0,
       clone_count: (await db.prepare('SELECT COUNT(*)::INTEGER count FROM local_clones WHERE repository_id=?').get(row.id)).count,
     })));
   };
   const membersForWorkspace = (workspaceId: unknown) => db.prepare('SELECT u.id,u.name,u.email,wm.role FROM workspace_members wm JOIN users u ON u.id=wm.user_id WHERE wm.workspace_id=? ORDER BY u.name').all(workspaceId);
   const candidatesForWorkspace = async (workspaceId: unknown, userId: number) => {
-    const rows = await db.prepare(`SELECT c.id,c.local_key,c.name,CASE WHEN c.normalized_remote LIKE 'file:%' OR c.normalized_remote LIKE 'local/%' THEN NULL ELSE c.normalized_remote END normalized_remote,c.branch,c.traced,c.desired_traced,c.revision,c.last_seen,c.error,c.repository_id,a.id agent_id,a.user_id owner_user_id,a.machine_name,u.name owner_name
+    const rows = await db.prepare(`SELECT c.id,c.local_key,c.name,c.remote_url raw_remote_url,c.normalized_remote,c.branch,c.traced,c.desired_traced,c.revision,c.last_seen,c.error,c.repository_id,a.id agent_id,a.user_id owner_user_id,a.machine_name,u.name owner_name
       FROM repository_candidates c JOIN agents a ON a.id=c.agent_id JOIN users u ON u.id=a.user_id JOIN workspace_members owner ON owner.workspace_id=c.workspace_id AND owner.user_id=a.user_id JOIN workspace_members viewer ON viewer.workspace_id=c.workspace_id AND viewer.user_id=?
       WHERE c.workspace_id=? AND (viewer.role='Manager' OR a.user_id=?) AND a.revoked_at IS NULL ORDER BY u.name,a.machine_name,c.name,c.local_key`).all(userId, workspaceId, userId);
-    return rows.map((row: any) => Number(row.owner_user_id) === Number(userId) ? row : {...row, local_key: null});
+    return rows.map((row: any) => {
+      const {raw_remote_url: rawRemoteUrl, ...candidate} = row;
+      return {
+        ...candidate,
+        name: Number(row.owner_user_id) === Number(userId) ? row.name : safeRepositoryName(row.name),
+        local_key: Number(row.owner_user_id) === Number(userId) ? row.local_key : null,
+        normalized_remote: isPrivateLocalIdentity(row.normalized_remote) || isRawLocalRemote(rawRemoteUrl) ? null : row.normalized_remote,
+        error: Number(row.owner_user_id) === Number(userId) ? row.error : row.error ? 'Repository update failed on member device' : null,
+      };
+    });
   };
   const agentsForWorkspace = (workspaceId: unknown) => {
-    const cutoff = new Date(Date.now() - 60_000).toISOString();
+    const cutoff = new Date(Date.now() - 2 * 60_000).toISOString();
     return db.prepare("SELECT a.id,a.user_id,a.machine_name,a.last_seen,a.revoked_at,u.name user_name,CASE WHEN a.revoked_at IS NOT NULL THEN 'revoked' WHEN a.last_seen>=? THEN 'online' ELSE 'offline' END status FROM agents a JOIN users u ON u.id=a.user_id JOIN workspace_members wm ON wm.user_id=a.user_id AND wm.workspace_id=? WHERE a.removed_at IS NULL ORDER BY a.id").all(cutoff, workspaceId);
   };
 
@@ -456,6 +499,17 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
   });
   app.get('/api/agents/status', agentAuth, async (req: Authed, res) => res.json(await agentStatus(req.agent)));
   app.post('/api/agents/heartbeat', agentAuth, async (req: Authed, res) => res.json({ok: true, at: now(), workspaceIds: await agentWorkspaceIds(req.agent.user_id)}));
+  app.get('/api/agents/sync', agentAuth, async (req: Authed, res) => {
+    await materializeDueReportSchedules(db, req.agent.user_id);
+    const [workspaceIds, jobs, refreshRequests, repositorySelections, pushes] = await Promise.all([
+      agentWorkspaceIds(req.agent.user_id),
+      db.prepare("SELECT j.* FROM report_jobs j JOIN workspace_members wm ON wm.workspace_id=j.workspace_id AND wm.user_id=? WHERE j.user_id=? AND j.status='pending' AND (j.report_scope<>'workspace' OR wm.role='Manager') ORDER BY j.id LIMIT 1").all(req.agent.user_id, req.agent.user_id),
+      db.prepare("SELECT id,workspace_id,status,created_at FROM refresh_requests WHERE agent_id=? AND status='queued' AND workspace_id IN (SELECT workspace_id FROM workspace_members WHERE user_id=?) ORDER BY id LIMIT 1").all(req.agent.id, req.agent.user_id),
+      db.prepare('SELECT c.id,c.workspace_id,c.local_key,c.name,c.remote_url,c.normalized_remote,c.branch,c.traced,c.desired_traced,c.revision,c.repository_fingerprint FROM repository_candidates c JOIN workspace_members wm ON wm.workspace_id=c.workspace_id AND wm.user_id=? WHERE c.agent_id=? AND c.desired_traced<>c.traced ORDER BY c.id').all(req.agent.user_id, req.agent.id),
+      db.prepare("SELECT * FROM pending_pushes WHERE agent_id=? AND status='pending' AND (next_check_at IS NULL OR next_check_at<=?) ORDER BY id LIMIT 10").all(req.agent.id, now()),
+    ]);
+    res.json({workspaceIds, jobs, refreshRequests, repositorySelections, pushes});
+  });
   app.post('/api/agents/repository-candidates', agentAuth, async (req: Authed, res) => {
     const repositories = req.body?.repositories;
     if (!Array.isArray(repositories) || repositories.length > 500) return res.status(400).json({error: 'repositories array required (maximum 500)'});
@@ -504,20 +558,19 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
   app.get('/api/workspaces/:id/repository-candidates', userAuth, requireMember, async (req: Authed, res) => {
     res.json(await candidatesForWorkspace(req.params.id, req.user.id));
   });
-  app.patch('/api/workspaces/:id/repository-candidates/:candidateId', userAuth, requireManager, async (req: Authed, res) => {
+  app.patch('/api/workspaces/:id/repository-candidates/:candidateId', userAuth, requireMember, async (req: Authed, res) => {
     if (typeof req.body.traced !== 'boolean') return res.status(400).json({error: 'traced boolean required'});
     const revision = await db.transaction(async () => {
       const workspace = await db.prepare('SELECT id FROM workspaces WHERE id=? FOR UPDATE').get(req.params.id);
       if (!workspace) return undefined;
-      if (!(await db.prepare("SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=? AND role='Manager'").get(req.params.id, req.user.id))) return 'forbidden';
-      const candidate: any = await db.prepare(`SELECT c.* FROM repository_candidates c JOIN agents a ON a.id=c.agent_id JOIN workspace_members owner ON owner.workspace_id=c.workspace_id AND owner.user_id=a.user_id WHERE c.id=? AND c.workspace_id=? AND a.revoked_at IS NULL FOR UPDATE`).get(req.params.candidateId, req.params.id);
+      const candidate: any = await db.prepare(`SELECT c.* FROM repository_candidates c JOIN agents a ON a.id=c.agent_id JOIN workspace_members owner ON owner.workspace_id=c.workspace_id AND owner.user_id=a.user_id WHERE c.id=? AND c.workspace_id=? AND a.user_id=? AND a.revoked_at IS NULL FOR UPDATE`).get(req.params.candidateId, req.params.id, req.user.id);
       if (!candidate) return undefined;
       const nextRevision = Number(candidate.revision) + 1;
       await db.prepare('UPDATE repository_candidates SET desired_traced=?,revision=?,error=NULL WHERE id=?').run(req.body.traced, nextRevision, candidate.id);
       if (!req.body.traced && candidate.repository_id) await db.prepare("UPDATE pending_pushes SET status='unconfirmed',completed_at=? WHERE agent_id=? AND repository_id=? AND local_key=? AND status='pending'").run(now(), candidate.agent_id, candidate.repository_id, candidate.local_key);
       return nextRevision;
     });
-    if (revision === 'forbidden') return res.status(403).json({error: 'Manager required'});
+
     if (revision == null) return res.status(404).json({error: 'repository candidate not found'});
     res.json({ok: true, revision});
   });
@@ -706,7 +759,7 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
     if (query.from) { sql += ' AND e.occurred_at>=?'; values.push(dateRangeUtc(String(query.from), String(query.from), timezone).from); }
     if (query.to) { sql += ' AND e.occurred_at<=?'; values.push(dateRangeUtc(String(query.to), String(query.to), timezone).to); }
     sql += ' ORDER BY e.occurred_at DESC LIMIT 500';
-    return (await db.prepare(sql).all(...values)).map((row: any) => ({...row, data: eventData(row.data)}));
+    return (await db.prepare(sql).all(...values)).map((row: any) => ({...row, repository_name: safeRepositoryName(row.repository_name), local_key: null, data: redactCrossMemberEvidence(eventData(row.data))}));
   };
   const statsForWorkspace = async (workspaceId: unknown, query: Request['query']) => {
     const timezone = normalizeTimezone(query.timezone);
@@ -733,6 +786,35 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
     const daily = [...dailyByDate.values()];
     return {totals, daily};
   };
+  const todayForWorkspace = async (workspaceId: unknown, query: Request['query']) => {
+    const timezone = normalizeTimezone(query.timezone);
+    const date = dateKeyInTimezone(now(), timezone);
+    const bounds = dateRangeUtc(date, date, timezone);
+    const [members, events] = await Promise.all([
+      membersForWorkspace(workspaceId),
+      db.prepare(`SELECT e.user_id,e.type,e.occurred_at FROM activity_events e JOIN repositories r ON r.id=e.repository_id WHERE r.workspace_id=? AND e.occurred_at>=? AND e.occurred_at<=? AND e.type IN ('commit','push','pull','stage') ORDER BY e.occurred_at`).all(workspaceId, bounds.from, bounds.to),
+    ]);
+    const users = members.map((member: any) => ({
+      userId: Number(member.id), name: member.name,
+      totals: {commit: 0, push: 0, pull: 0, stage: 0},
+      hourly: Array.from({length: 24}, (_, hour) => ({hour, commit: 0, push: 0, pull: 0, stage: 0, total: 0})),
+    }));
+    const byUser = new Map(users.map((user: any) => [user.userId, user]));
+    for (const event of events as any[]) {
+      const user: any = byUser.get(Number(event.user_id));
+      if (!user || !(event.type in user.totals)) continue;
+      user.totals[event.type] += 1;
+      user.hourly[hourInTimezone(event.occurred_at, timezone)][event.type] += 1;
+    }
+    for (const user of users as any[]) {
+      let cumulative = 0;
+      for (const point of user.hourly) {
+        cumulative += point.commit + point.push + point.pull + point.stage;
+        point.total = cumulative;
+      }
+    }
+    return {date, timezone, users};
+  };
   const scopedActivity = (query: Request['query']) => query.userId
     ? {extra: ' AND e.user_id=?', args: [Number(query.userId)]}
     : query.repositoryId
@@ -751,12 +833,13 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
   });
   app.get('/api/workspaces/:id/dashboard', userAuth, requireMember, async (req, res) => {
     const scope = scopedActivity(req.query);
-    const [events, repositories, stats] = await Promise.all([
+    const [events, repositories, stats, today] = await Promise.all([
       activityForWorkspace(Number(req.params.id), req.query, scope.extra, scope.args),
       repositoriesForWorkspace(req.params.id, true),
       statsForWorkspace(req.params.id, req.query),
+      todayForWorkspace(req.params.id, req.query),
     ]);
-    res.json({events, repositories, stats});
+    res.json({events, repositories, stats, today});
   });
   app.get('/api/workspaces/:id/settings', userAuth, requireMember, async (req: Authed, res) => {
     const [members, repositories, repositoryCandidates, agents] = await Promise.all([
@@ -883,14 +966,24 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
   });
   app.post('/api/agents/jobs/:id/claim', agentAuth, async (req: Authed, res) => { const result = await db.prepare("UPDATE report_jobs SET status='running',agent_id=?,claimed_at=? WHERE id=? AND user_id=? AND status='pending' AND workspace_id IN (SELECT workspace_id FROM workspace_members WHERE user_id=?) AND (report_scope<>'workspace' OR workspace_id IN (SELECT workspace_id FROM workspace_members WHERE user_id=? AND role='Manager'))").run(req.agent.id, now(), req.params.id, req.agent.user_id, req.agent.user_id, req.agent.user_id); result.changes ? res.json(await db.prepare('SELECT * FROM report_jobs WHERE id=?').get(req.params.id)) : res.status(409).json({error: 'job unavailable'}); });
   app.get('/api/agents/jobs/:id/context', agentAuth, async (req: Authed, res) => {
-    const job: any = await db.prepare("SELECT j.* FROM report_jobs j JOIN workspace_members wm ON wm.workspace_id=j.workspace_id AND wm.user_id=? WHERE j.id=? AND j.user_id=? AND j.agent_id=? AND (j.report_scope<>'workspace' OR wm.role='Manager')").get(req.agent.user_id, req.params.id, req.agent.user_id, req.agent.id);
+    const job: any = await db.prepare("SELECT j.* FROM report_jobs j JOIN workspace_members wm ON wm.workspace_id=j.workspace_id AND wm.user_id=? WHERE j.id=? AND j.user_id=? AND j.agent_id=? AND j.status='running' AND (j.report_scope<>'workspace' OR wm.role='Manager')").get(req.agent.user_id, req.params.id, req.agent.user_id, req.agent.id);
     if (!job) return res.status(404).json({error: 'not found'});
     const bounds = dateRangeUtc(isoDate(job.start_date), isoDate(job.end_date), normalizeTimezone(job.timezone));
-    const events = (await db.prepare(`SELECT e.*,u.name user_name,r.name repository_name,r.normalized_remote
+    const events = (await db.prepare(`SELECT e.*,u.name user_name,r.name repository_name,r.remote_url repository_remote_url,r.normalized_remote
       FROM report_jobs j JOIN workspace_members wm ON wm.workspace_id=j.workspace_id AND wm.user_id=j.user_id
       JOIN repositories r ON r.workspace_id=j.workspace_id JOIN activity_events e ON e.repository_id=r.id JOIN users u ON u.id=e.user_id
       WHERE j.id=? AND j.user_id=? AND j.agent_id=? AND j.status='running' AND (j.report_scope<>'workspace' OR wm.role='Manager')
-        AND (j.report_scope='workspace' OR e.user_id=j.user_id) AND e.occurred_at>=? AND e.occurred_at<=? ORDER BY e.occurred_at`).all(job.id, req.agent.user_id, req.agent.id, bounds.from, bounds.to)).map((row: any) => ({...row, data: eventData(row.data)}));
+        AND (j.report_scope='workspace' OR e.user_id=j.user_id) AND e.occurred_at>=? AND e.occurred_at<=? ORDER BY e.occurred_at`).all(job.id, req.agent.user_id, req.agent.id, bounds.from, bounds.to)).map((row: any) => {
+          const {repository_remote_url: repositoryRemoteUrl, ...event} = row;
+          const crossMember = Number(row.user_id) !== Number(job.user_id);
+          return {
+            ...event,
+            repository_name: crossMember ? safeRepositoryName(row.repository_name) : row.repository_name,
+            local_key: crossMember ? null : row.local_key,
+            normalized_remote: crossMember && (isPrivateLocalIdentity(row.normalized_remote) || isRawLocalRemote(repositoryRemoteUrl)) ? null : row.normalized_remote,
+            data: crossMember ? redactCrossMemberEvidence(eventData(row.data)) : eventData(row.data),
+          };
+        });
     res.json({job, events});
   });
   app.post('/api/agents/jobs/:id/complete', agentAuth, required(['markdown']), async (req: Authed, res) => {

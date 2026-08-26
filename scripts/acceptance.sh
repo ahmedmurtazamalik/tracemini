@@ -81,7 +81,7 @@ select_candidates() {
   while IFS= read -r candidate_id; do
     [ -n "$candidate_id" ] || continue
     api -X PATCH "$BASE/api/workspaces/$workspace_id/repository-candidates/$candidate_id" -H "authorization: Bearer $bearer" -d '{"traced":true}' >/dev/null
-  done < <(api "$BASE/api/workspaces/$workspace_id/repository-candidates" -H "authorization: Bearer $bearer" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>JSON.parse(s).forEach(row=>console.log(row.id)))")
+  done < <(api "$BASE/api/workspaces/$workspace_id/repository-candidates" -H "authorization: Bearer ${bearer}" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>JSON.parse(s).filter(row=>row.local_key).forEach(row=>console.log(row.id)))")
   TRACEMINI_HOME="$home" "${CLI[@]}" once >/dev/null
 }
 select_candidates "$AT" "$TMP/home-a/.tracemini"
