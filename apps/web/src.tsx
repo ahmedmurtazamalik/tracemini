@@ -525,7 +525,8 @@ function ActivityTimelineGraph({timeline, rangePreset, timezone}: {timeline: any
       {users.map((user: any) => {
         const key = seriesKey(user);
         const visible = !hiddenSeries.has(key);
-        return <button type="button" className={`activity-legend-item${visible ? "" : " hidden"}`} key={user.userId} aria-pressed={visible} onClick={() => toggleSeries(key)}><i style={{borderColor: colors[key]}} /><span>{user.name}</span></button>;
+        const summary = activityUserSummary(user).replace(`${user.name}: `, "");
+        return <button type="button" className={`activity-legend-item${visible ? "" : " hidden"}`} key={user.userId} aria-pressed={visible} onClick={() => toggleSeries(key)}><i style={{borderColor: colors[key]}} /><span>{user.name}</span><small>{summary}</small></button>;
       })}
     </div>
     <p id="activity-chart-instructions" className="visually-hidden">Hover across the chart, or focus it and use the left and right arrow keys, to compare all visible members at each time.</p>
@@ -583,13 +584,15 @@ function Activity({
   events,
   workspaceId,
   timezone,
+  height,
 }: {
   events: any[];
   workspaceId: number;
   timezone: string;
+  height?: number;
 }) {
   return (
-    <section className="card activity-card">
+    <section className="card activity-card" style={height ? {height} : undefined}>
       <div className="section-heading">
         <div>
           <span>Timeline</span>
@@ -597,6 +600,7 @@ function Activity({
         </div>
         <span className="count-badge">{events.length}</span>
       </div>
+      <div className="activity-event-scroll" tabIndex={events.length ? 0 : undefined} aria-label="Recent activity timeline">
       {events.length ? (
         events.map((event) => (
           <article className="event" key={event.id}>
@@ -641,6 +645,7 @@ function Activity({
           text="Install the CLI and watch a Git root to start collecting local development signals."
         />
       )}
+      </div>
     </section>
   );
 }
@@ -700,7 +705,7 @@ function RepositorySelection({workspaceId, candidates, agents, userId, reload}: 
   }, [scanActive, scanRequests, workspaceId, reload]);
   const ownAgents = agents.filter(agent => Number(agent.user_id) === Number(userId) && agent.status !== "revoked");
   return <section className="card settings-card repository-selection-card">
-    <span>Local Git discovery</span><h2 className="heading-with-tip">Workspace repositories <InfoTip label="Repository discovery">First run <code>tracemini watch</code> for an absolute folder on your device. Scanning then finds Git repositories only inside approved folders.</InfoTip></h2>
+    <div className="stacked-heading"><span>Local Git discovery</span><h2 className="heading-with-tip">Workspace repositories <InfoTip label="Repository discovery">First run <code>tracemini watch</code> for an absolute folder on your device. Scanning then finds Git repositories only inside approved folders.</InfoTip></h2></div>
     <p className="muted">Scan only folders you previously approved with <code>tracemini watch</code>. The device sends bounded metadata; you choose repositories from your own devices and Managers see their safe workspace identity and status.</p>
     <button className="button secondary" disabled={scanning || scanActive || ownAgents.length === 0} onClick={async () => {
       setScanning(true); setError(""); setMessage("");
@@ -1115,12 +1120,28 @@ function Dashboard({
   const [clock, setClock] = useState(Date.now());
   const activeView = useActiveView();
   const refreshInFlight = useRef(false);
+  const repositorySignalsRef = useRef<HTMLElement>(null);
+  const [repositorySignalsHeight, setRepositorySignalsHeight] = useState<number>();
   useEffect(() => setOffsetInput(timezoneOffsetInput(timezone)), [timezone]);
   useEffect(() => setLastUpdatedAt(Date.now()), [today]);
   useEffect(() => {
     const timer = setInterval(() => setClock(Date.now()), 60_000);
     return () => clearInterval(timer);
   }, []);
+  useEffect(() => {
+    const panel = repositorySignalsRef.current;
+    if (!panel) return;
+    const updateHeight = () => {
+      const viewportLimit = Math.max(280, window.innerHeight - 120);
+      const next = Math.round(Math.min(panel.getBoundingClientRect().height, viewportLimit));
+      setRepositorySignalsHeight(current => current === next ? current : next);
+    };
+    const observer = new ResizeObserver(updateHeight);
+    observer.observe(panel);
+    addEventListener("resize", updateHeight);
+    updateHeight();
+    return () => { observer.disconnect(); removeEventListener("resize", updateHeight); };
+  }, [repositories.length]);
   useEffect(() => {
     const controller = new AbortController();
     const match = route.match(/^\/workspaces\/\d+\/(users|repositories)\/(\d+)/);
@@ -1220,8 +1241,8 @@ function Dashboard({
       <ActivityTimelineGraph timeline={today} rangePreset={rangePreset} timezone={timezone} />
       </div>
       <div className="dashboard-grid">
-        <Activity events={events} workspaceId={workspaceId} timezone={timezone} />
-        <aside className="card insight-card">
+        <Activity events={events} workspaceId={workspaceId} timezone={timezone} height={repositorySignalsHeight} />
+        <aside ref={repositorySignalsRef} className="card insight-card">
           <div className="section-heading">
             <div>
               <span>Workspace</span>
