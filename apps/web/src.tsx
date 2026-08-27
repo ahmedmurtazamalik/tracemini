@@ -515,8 +515,10 @@ function ActivityTimelineGraph({timeline}: {timeline: any}) {
     return next;
   });
   return <section className="card today-activity" aria-labelledby="activity-timeline-title">
-    <div className="section-heading"><div><span>Git activity timeline</span><h2 id="activity-timeline-title" className="heading-with-tip">Activity by member <InfoTip label="Activity timeline">Each point is Git activity during that hour or day, not a running total. No activity is shown as zero.</InfoTip></h2></div><small>{rangeLabel}</small></div>
-    <p className="chart-description">Commits, pushes, pulls, staging, branches, merges, and rewrites. The chart refreshes while this page is visible.</p>
+    <div className="chart-heading-row">
+      <div><h2 id="activity-timeline-title">Activity by member</h2><p className="chart-description">Git activity grouped by member. Empty hours or days remain at zero.</p></div>
+      <span className="chart-meta">{rangeLabel}</span>
+    </div>
     <p id="activity-chart-instructions" className="visually-hidden">Focus the chart and use the left and right arrow keys to compare all visible members at each time.</p>
     <div className="chart-plot-shell">
     <svg viewBox="0 0 720 212" role="img" tabIndex={0} aria-describedby="activity-chart-instructions" aria-label={`Git activities by member from ${timeline?.from || "the selected start"} to ${timeline?.to || "the selected end"}`}
@@ -564,12 +566,11 @@ function ActivityTimelineGraph({timeline}: {timeline: any}) {
       {visibleUsers.map((user: any) => <span key={user.userId}><i style={{background: colors[seriesKey(user)]}} />{user.name}<b>{compactActivityNumber(Number(user.points[activeIndex]?.total || 0))}</b></span>)}
     </div>}
     </div>
-    <div className="activity-legend">
+    <div className="activity-legend" aria-label="Chart series. Select a member to show or hide their line.">
       {users.map((user: any) => {
         const key = seriesKey(user);
         const visible = !hiddenSeries.has(key);
-        const total = Object.values(user.totals || {}).reduce((sum: number, count: any) => sum + Number(count || 0), 0);
-        return <button type="button" className={`activity-legend-item${visible ? "" : " hidden"}`} key={user.userId} aria-pressed={visible} onClick={() => toggleSeries(key)}><i style={{background: colors[key]}} /><strong>{user.name}</strong><small>{total} total · {user.totals.commit} commits · {user.totals.push} pushes · {user.totals.pull} pulls · {user.totals.merge} merges</small></button>;
+        return <button type="button" className={`activity-legend-item${visible ? "" : " hidden"}`} key={user.userId} aria-pressed={visible} onClick={() => toggleSeries(key)}><i style={{background: colors[key]}} /><span>{user.name}</span></button>;
       })}
     </div>
     <details className="activity-data">
