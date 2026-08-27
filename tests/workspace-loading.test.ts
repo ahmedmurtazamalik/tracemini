@@ -39,4 +39,13 @@ describe('route-specific workspace loading', () => {
       {key: 'dashboard', path: '/workspaces/8/dashboard?from=2026-08-01&to=2026-08-25&timezone=Asia%2FKarachi&userId=3'},
     ]);
   });
+
+  it('loads dashboard evidence for multiple repositories, including an empty selection', () => {
+    expect(workspaceLoadPlan('/workspaces/8', 8, dates, 'UTC', [2, 5])).toEqual([
+      {key: 'dashboard', path: '/workspaces/8/dashboard?from=2026-08-01&to=2026-08-25&timezone=UTC&repositoryIds=2,5'},
+    ]);
+    expect(workspaceLoadPlan('/workspaces/8/repositories/2', 8, dates, 'UTC', [])).toEqual([
+      {key: 'dashboard', path: '/workspaces/8/dashboard?from=2026-08-01&to=2026-08-25&timezone=UTC&repositoryIds='},
+    ]);
+  });
 });

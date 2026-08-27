@@ -786,9 +786,25 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
     if (accepted == null) return res.status(403).json({error: 'repository not available'});
     res.status(accepted ? 201 : 200).json({accepted});
   });
+  const repositoryIdsFromQuery = (query: Request['query']): number[] | undefined => {
+    if (!Object.prototype.hasOwnProperty.call(query, 'repositoryIds')) return undefined;
+    if (typeof query.repositoryIds !== 'string' || !query.repositoryIds) return [];
+    if (!/^\d+(,\d+)*$/.test(query.repositoryIds)) return [];
+    return [...new Set(query.repositoryIds.split(',').map(Number).filter(id => Number.isSafeInteger(id) && id > 0))];
+  };
+  const addRepositorySelection = (filters: string[], values: any[], query: Request['query']) => {
+    const repositoryIds = repositoryIdsFromQuery(query);
+    if (repositoryIds === undefined) return;
+    if (!repositoryIds.length) { filters.push('FALSE'); return; }
+    filters.push(`r.id IN (${repositoryIds.map(() => '?').join(',')})`);
+    values.push(...repositoryIds);
+  };
   const activityForWorkspace = async (workspaceId: number, query: Request['query'], extra = '', args: any[] = []) => {
     let sql = 'SELECT e.*,r.id repository_id,u.name user_name,r.name repository_name FROM activity_events e JOIN activity_event_repositories aer ON aer.event_id=e.id JOIN users u ON u.id=e.user_id JOIN repositories r ON r.id=aer.repository_id WHERE r.workspace_id=?' + extra;
     const values: any[] = [workspaceId, ...args];
+    const repositoryFilters: string[] = [];
+    addRepositorySelection(repositoryFilters, values, query);
+    if (repositoryFilters.length) sql += ` AND ${repositoryFilters.join(' AND ')}`;
     const timezone = normalizeTimezone(query.timezone);
     if (query.from) { sql += ' AND e.occurred_at>=?'; values.push(dateRangeUtc(String(query.from), String(query.from), timezone).from); }
     if (query.to) { sql += ' AND e.occurred_at<=?'; values.push(dateRangeUtc(String(query.to), String(query.to), timezone).to); }
@@ -801,6 +817,7 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
     const values: any[] = [workspaceId];
     if (query.userId) { filters.push('e.user_id=?'); values.push(query.userId); }
     if (query.repositoryId) { filters.push('r.id=?'); values.push(query.repositoryId); }
+    addRepositorySelection(filters, values, query);
     if (query.from) { filters.push('e.occurred_at>=?'); values.push(dateRangeUtc(String(query.from), String(query.from), timezone).from); }
     if (query.to) { filters.push('e.occurred_at<=?'); values.push(dateRangeUtc(String(query.to), String(query.to), timezone).to); }
     const where = filters.join(' AND ');
@@ -832,6 +849,7 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
     const values: any[] = [workspaceId, bounds.from, bounds.to];
     if (query.userId) { filters.push('e.user_id=?'); values.push(Number(query.userId)); }
     if (query.repositoryId) { filters.push('r.id=?'); values.push(Number(query.repositoryId)); }
+    addRepositorySelection(filters, values, query);
     const bucketMinutes = activityBucketMinutes(timezone);
     const [workspaceMembers, events] = await Promise.all([
       membersForWorkspace(workspaceId),
