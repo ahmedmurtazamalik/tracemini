@@ -1133,7 +1133,12 @@ function Dashboard({
     if (!panel) return;
     const updateHeight = () => {
       const viewportLimit = Math.max(280, window.innerHeight - 120);
-      const next = Math.round(Math.min(panel.getBoundingClientRect().height, viewportLimit));
+      const repositoryList = panel.querySelector<HTMLElement>(".repository-filter");
+      const panelHeight = panel.getBoundingClientRect().height;
+      const naturalHeight = repositoryList
+        ? panelHeight - repositoryList.clientHeight + repositoryList.scrollHeight
+        : panel.scrollHeight;
+      const next = Math.round(Math.min(naturalHeight, viewportLimit));
       setRepositorySignalsHeight(current => current === next ? current : next);
     };
     const observer = new ResizeObserver(updateHeight);
@@ -1242,7 +1247,7 @@ function Dashboard({
       </div>
       <div className="dashboard-grid">
         <Activity events={events} workspaceId={workspaceId} timezone={timezone} height={repositorySignalsHeight} />
-        <aside ref={repositorySignalsRef} className="card insight-card">
+        <aside ref={repositorySignalsRef} className="card insight-card repository-signals-card" style={repositorySignalsHeight ? {height: repositorySignalsHeight} : undefined}>
           <div className="section-heading">
             <div>
               <span>Workspace</span>
@@ -1262,7 +1267,7 @@ function Dashboard({
               if (routeRepositoryId) navigate(`/workspaces/${workspaceId}`);
               setSelectedRepositoryIds(next);
             };
-            return activeRepositories.length ? <div className="repository-filter" role="group" aria-label="Filter dashboard by repository">
+            return activeRepositories.length ? <div className="repository-filter" role="group" tabIndex={activeRepositories.length >= 10 ? 0 : undefined} aria-label="Filter dashboard by repository">
               <label className={`repo repo-select-all ${allSelected ? "selected" : ""}`}>
                 <input type="checkbox" checked={allSelected} onChange={event => updateSelection(event.target.checked ? null : [])} />
                 <span><strong>All repositories</strong><small>{activeRepositories.length} repositories</small></span>
