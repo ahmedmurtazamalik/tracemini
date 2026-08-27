@@ -20,6 +20,39 @@ function offsetValueFromMinutes(minutes: number) {
   return `UTC${minutes > 0 ? '+' : '-'}${String(Math.floor(absolute / 60)).padStart(2, '0')}:${String(absolute % 60).padStart(2, '0')}`;
 }
 
+export function timezoneOffsetInput(timezone: string, now = new Date()) {
+  const normalized = normalizeTimezone(timezone);
+  const fixed = fixedOffsetMinutes(normalized);
+  let minutes = fixed;
+  if (minutes === undefined) {
+    const name = new Intl.DateTimeFormat('en-US', {timeZone: normalized, timeZoneName: 'longOffset'})
+      .formatToParts(now).find(part => part.type === 'timeZoneName')?.value || 'GMT';
+    const match = /^GMT(?:(?<sign>[+-])(?<hours>\d{2}):(?<minutes>\d{2}))?$/.exec(name);
+    minutes = match?.groups?.sign
+      ? (Number(match.groups.hours) * 60 + Number(match.groups.minutes)) * (match.groups.sign === '+' ? 1 : -1)
+      : 0;
+  }
+  const absolute = Math.abs(minutes);
+  return `${minutes >= 0 ? '+' : '-'}${Math.floor(absolute / 60)}:${String(absolute % 60).padStart(2, '0')}`;
+}
+
+export function timezoneFromOffsetInput(value: string) {
+  const match = /^([+-]?)(\d{1,2})(?::([0-5]\d))?$/.exec(value.trim());
+  if (!match) return undefined;
+  const sign = match[1] === '-' ? -1 : 1;
+  const minutes = sign * (Number(match[2]) * 60 + Number(match[3] || 0));
+  if (minutes < -12 * 60 || minutes > 14 * 60) return undefined;
+  if ((minutes === -12 * 60 || minutes === 14 * 60) && Number(match[3] || 0) !== 0) return undefined;
+  return offsetValueFromMinutes(minutes);
+}
+
+export function hourInTimezone(timezone: string, now = new Date()) {
+  const normalized = normalizeTimezone(timezone);
+  const offset = fixedOffsetMinutes(normalized);
+  if (offset !== undefined) return new Date(now.getTime() + offset * 60_000).getUTCHours();
+  return Number(new Intl.DateTimeFormat('en-US', {timeZone: normalized, hour: '2-digit', hourCycle: 'h23'}).format(now));
+}
+
 export const TIMEZONE_OPTIONS = [
   {value: 'Asia/Karachi', label: 'Pakistan Standard Time (UTC+05:00)'},
   ...fixedOffsetValues.map(minutes => ({value: offsetValueFromMinutes(minutes), label: offsetValueFromMinutes(minutes)})),

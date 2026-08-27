@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {activityGraphPath, activityGraphTicks, activitySeriesColorMap, activityUserSummary, compactActivityNumber} from '../apps/web/today-activity.js';
+import {activityDateRange, activityDisplayPoints, activityGraphPath, activityGraphTicks, activitySeriesColorMap, activityUserSummary, compactActivityNumber} from '../apps/web/today-activity.js';
 
 describe('today workspace activity graph', () => {
   it('draws a bounded smooth curve through each activity point', () => {
@@ -30,9 +30,37 @@ describe('today workspace activity graph', () => {
     expect(withExplicitPaletteColor.Grace).not.toBe('#3b82f6');
   });
 
+  it('uses the requested member colors before assigning yellow to the next member', () => {
+    const colors = activitySeriesColorMap([
+      {key: 'user-1', label: 'Ali Ahmed'},
+      {key: 'user-2', label: 'Murtaza Malik'},
+      {key: 'user-3', label: 'Ashar'},
+      {key: 'user-4', label: 'Sam'},
+    ]);
+    expect(colors).toMatchObject({
+      'user-1': '#3b82f6',
+      'user-2': '#8b5cf6',
+      'user-3': '#ef4444',
+      'user-4': '#eab308',
+    });
+    expect(activitySeriesColorMap([{key: 'joey', label: 'Joey'}]).joey).toBe('#8b5cf6');
+    expect(activitySeriesColorMap([{key: 'asher', label: 'Asher'}]).asher).toBe('#ef4444');
+  });
+
   it('compacts large axis and tooltip values', () => {
     expect(compactActivityNumber(0)).toBe('0');
     expect(compactActivityNumber(1_250)).toBe('1.3K');
     expect(compactActivityNumber(34_000_000)).toBe('34M');
+  });
+
+  it('builds preset ranges and displays a complete day through 24:00', () => {
+    expect(activityDateRange('5h', '2026-08-27')).toEqual({from: '2026-08-27', to: '2026-08-27'});
+    expect(activityDateRange('week', '2026-08-27')).toEqual({from: '2026-08-21', to: '2026-08-27'});
+    expect(activityDateRange('month', '2026-08-27')).toEqual({from: '2026-07-29', to: '2026-08-27'});
+    const points = Array.from({length: 24}, (_, hour) => ({label: `${String(hour).padStart(2, '0')}:00`, total: hour === 5 ? 2 : 0}));
+    const day = activityDisplayPoints(points, 'day', 10);
+    expect(day).toHaveLength(25);
+    expect(day.at(-1)).toEqual({label: '24:00', total: 0});
+    expect(activityDisplayPoints(points, '5h', 10).map(point => point.label)).toEqual(['06:00', '07:00', '08:00', '09:00', '10:00']);
   });
 });
