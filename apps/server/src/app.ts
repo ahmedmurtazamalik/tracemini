@@ -959,7 +959,7 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
     const outcome: any = await db.transaction(async () => {
       await db.prepare('SELECT id FROM workspaces WHERE id=? FOR UPDATE').get(req.params.id);
       if (!(await hasLockedManagerAuthority(+req.params.id, req.user.id))) return undefined;
-      return await db.prepare('UPDATE report_schedules SET enabled=FALSE,next_run_at=NULL,updated_at=? WHERE workspace_id=? RETURNING *').get(now(), req.params.id);
+      return await db.prepare('DELETE FROM report_schedules WHERE workspace_id=? RETURNING *').get(req.params.id);
     });
     if (!outcome) return res.status(404).json({error: 'report schedule not found'});
     res.json({...outcome, selected_days: eventData(outcome.selected_days)});

@@ -138,5 +138,8 @@ describe('workspace report schedules', () => {
     await request(app).post(`/api/agents/jobs/${firstList[0].id}/complete`).set(auth(agent.token)).send({markdown: '# stale'}).expect(409);
     await db.prepare('UPDATE report_schedules SET enabled=TRUE,next_run_at=? WHERE id=?').run(`${firstMissedDate}T00:00:00.000Z`, schedule.id);
     expect((await request(app).get('/api/agents/jobs').set(auth(agent.token)).expect(200)).body).toEqual([]);
+    await request(app).delete(`/api/workspaces/${workspaceId}/report-schedule`).set(auth(backup.token)).expect(200);
+    expect((await request(app).get(`/api/workspaces/${workspaceId}/report-schedule`).set(auth(backup.token)).expect(200)).body).toBeNull();
+    expect(await db.prepare('SELECT schedule_id FROM report_jobs WHERE id=?').get(firstList[0].id)).toMatchObject({schedule_id: null});
   });
 });
