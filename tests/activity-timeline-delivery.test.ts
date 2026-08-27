@@ -27,10 +27,12 @@ describe('activity timeline delivery', () => {
     expect(web).toContain('setToday({users: []});');
   });
 
-  it('provides a semantic table containing every plotted time value', () => {
-    expect(web).toContain('<table className="activity-data-table">');
-    expect(web).toContain('<th scope="col">Time</th>');
-    expect(web).toContain('<th scope="row">{point.label}</th>');
-    expect(web).toContain('{user.points[pointIndex]?.total || 0}</td>');
+  it('provides shared hover and keyboard values without a duplicate timeline table', () => {
+    expect(web).toContain('className={`chart-index-tooltip ${tooltipAlignment}`}');
+    expect(web).toContain('role="status" aria-live="polite"');
+    expect(web).toContain('onPointerMove={event =>');
+    expect(web).toContain('event.key !== "ArrowLeft" && event.key !== "ArrowRight"');
+    expect(web).not.toContain('View exact timeline values');
+    expect(web).not.toContain('<table className="activity-data-table">');
   });
 });

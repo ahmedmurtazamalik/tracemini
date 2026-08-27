@@ -6,6 +6,25 @@ const ACTIVITY_SERIES_PALETTE = [
   '#f97316', '#14b8a6', '#a855f7', '#eab308', '#0ea5e9', '#f43f5e', '#10b981', '#6366f1',
 ];
 
+export type ActivityRangePreset = '5h' | 'day' | 'week' | 'month' | 'custom';
+
+function shiftDate(date: string, days: number) {
+  const value = new Date(`${date}T00:00:00.000Z`);
+  value.setUTCDate(value.getUTCDate() + days);
+  return value.toISOString().slice(0, 10);
+}
+
+export function activityDateRange(preset: Exclude<ActivityRangePreset, 'custom'>, today: string) {
+  const days = preset === 'week' ? 6 : preset === 'month' ? 29 : 0;
+  return {from: shiftDate(today, -days), to: today};
+}
+
+export function activityDisplayPoints<T extends ActivityPoint & {label?: string}>(points: T[], preset: ActivityRangePreset, currentHour: number) {
+  if (preset === '5h') return points.slice(Math.max(0, currentHour - 4), Math.min(points.length, currentHour + 1));
+  if (preset !== 'day' || points.at(-1)?.label !== '23:00') return points;
+  return [...points, {...points.at(-1)!, label: '24:00', total: 0}];
+}
+
 function seriesHash(value: string) {
   let hash = 2166136261;
   for (const character of value.toLowerCase()) {
@@ -15,15 +34,34 @@ function seriesHash(value: string) {
   return hash >>> 0;
 }
 
-export function activitySeriesColorMap(series: Array<{key: string; color?: string}>) {
+const preferredColor = (label: string | undefined) => {
+  const names = new Set(String(label || '').trim().toLowerCase().split(/[^a-z]+/).filter(Boolean));
+  if (names.has('ali')) return '#3b82f6';
+  if (names.has('murtaza') || names.has('joey')) return '#8b5cf6';
+  if (names.has('asher') || names.has('ashar')) return '#ef4444';
+  return undefined;
+};
+
+export function activitySeriesColorMap(series: Array<{key: string; label?: string; color?: string}>) {
   const entries = [...new Map(series.map(item => [item.key, item])).values()]
     .sort((left, right) => seriesHash(left.key) - seriesHash(right.key) || left.key.localeCompare(right.key));
-  const used = new Set(entries.flatMap(entry => entry.color ? [entry.color] : []));
+  const used = new Set(entries.flatMap(entry => {
+    const color = preferredColor(entry.label) || entry.color;
+    return color ? [color] : [];
+  }));
   const colors: Record<string, string> = {};
-  for (const entry of entries) if (entry.color) colors[entry.key] = entry.color;
   for (const entry of entries) {
-    if (entry.color) continue;
+    const color = preferredColor(entry.label) || entry.color;
+    if (color) colors[entry.key] = color;
+  }
+  let assignedYellow = used.has('#eab308');
+  for (const entry of entries) {
+    if (colors[entry.key]) continue;
     let color: string | undefined;
+    if (!assignedYellow) {
+      color = '#eab308';
+      assignedYellow = true;
+    }
     const start = seriesHash(entry.key) % ACTIVITY_SERIES_PALETTE.length;
     for (let offset = 0; !color && offset < ACTIVITY_SERIES_PALETTE.length; offset++) {
       const candidate = ACTIVITY_SERIES_PALETTE[(start + offset) % ACTIVITY_SERIES_PALETTE.length];

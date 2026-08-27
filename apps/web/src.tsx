@@ -16,13 +16,13 @@ import {
 } from "./routes.js";
 import { checkCliConnection, deviceManagementAction } from "./device-connection.js";
 import { reportJobProgress, type ReportJob } from "./report-progress.js";
-import { TIMEZONE_OPTIONS, formatInTimezone, normalizeTimezone, todayInTimezone } from "./timezone.js";
+import { TIMEZONE_OPTIONS, formatInTimezone, hourInTimezone, normalizeTimezone, timezoneFromOffsetInput, timezoneOffsetInput, todayInTimezone } from "./timezone.js";
 import { applyTheme, nextTheme, normalizeTheme, THEME_STORAGE_KEY, themeToggleLabel, type Theme } from "./theme.js";
 import { waitForReportJob } from "./report-jobs.js";
 import { canApplyWorkspaceResult } from "./async-state.js";
 import { workspaceLoadPlan, type WorkspaceLoadKey } from "./workspace-loading.js";
 import { repositorySelectionState, type RepositoryCandidate } from "./repository-selection.js";
-import { activityGraphPath, activityGraphTicks, activitySeriesColorMap, activityUserSummary, compactActivityNumber } from "./today-activity.js";
+import { activityDateRange, activityDisplayPoints, activityGraphPath, activityGraphTicks, activitySeriesColorMap, activityUserSummary, compactActivityNumber, type ActivityRangePreset } from "./today-activity.js";
 import { InvitationInbox, ReportSchedule, WorkspaceInvitations } from "./collaboration.js";
 import { HelpDrawer, InfoTip, type HelpSection } from "./help.js";
 import "./style.css";
@@ -493,19 +493,21 @@ function PageHeading({
   );
 }
 
-function ActivityTimelineGraph({timeline}: {timeline: any}) {
-  const users = timeline?.users || [];
+function ActivityTimelineGraph({timeline, rangePreset, timezone}: {timeline: any; rangePreset: ActivityRangePreset; timezone: string}) {
+  const currentHour = hourInTimezone(timezone);
+  const users = (timeline?.users || []).map((user: any) => ({...user, points: activityDisplayPoints(user.points || [], rangePreset, currentHour)}));
   const points = users[0]?.points || [];
   const [hiddenSeries, setHiddenSeries] = useState<Set<string>>(() => new Set());
   const [hoveredIndex, setHoveredIndex] = useState<number>();
   const seriesKey = (user: any) => String(user.userId ?? user.name);
-  const colors = activitySeriesColorMap(users.map((user: any) => ({key: seriesKey(user), color: user.color})));
+  const colors = activitySeriesColorMap(users.map((user: any) => ({key: seriesKey(user), label: user.name, color: user.color})));
   const visibleUsers = users.filter((user: any) => !hiddenSeries.has(seriesKey(user)));
   const observedMaximum = Math.max(0, ...visibleUsers.flatMap((user: any) => user.points.map((point: any) => point.total)));
   const scale = activityGraphTicks(observedMaximum);
   const plot = {left: 56, top: 18, width: 644, height: 154};
-  const labelIndexes = [...new Set(Array.from({length: Math.min(5, points.length)}, (_, index) => points.length === 1 ? 0 : Math.round(index * (points.length - 1) / Math.max(1, Math.min(5, points.length) - 1))))];
-  const rangeLabel = timeline?.from === timeline?.to ? timeline?.from : `${timeline?.from || ""} — ${timeline?.to || ""}`;
+  const labelCount = timeline?.granularity === "hour" && rangePreset === "day" ? 13 : Math.min(7, points.length);
+  const labelIndexes = [...new Set(Array.from({length: Math.min(labelCount, points.length)}, (_, index) => points.length === 1 ? 0 : Math.round(index * (points.length - 1) / Math.max(1, Math.min(labelCount, points.length) - 1))))];
+  const rangeLabel = rangePreset === "5h" ? "Last 5 hours" : timeline?.from === timeline?.to ? timeline?.from : `${timeline?.from || ""} — ${timeline?.to || ""}`;
   const activeIndex = hoveredIndex != null && hoveredIndex < points.length ? hoveredIndex : undefined;
   const activeLeft = activeIndex == null || points.length < 2 ? plot.left / 720 * 100 : (plot.left + activeIndex / (points.length - 1) * plot.width) / 720 * 100;
   const tooltipAlignment = activeIndex == null || activeIndex < points.length / 3 ? "start" : activeIndex > points.length * 2 / 3 ? "end" : "middle";
@@ -519,7 +521,14 @@ function ActivityTimelineGraph({timeline}: {timeline: any}) {
       <div><h2 id="activity-timeline-title">Activity by member</h2><p className="chart-description">Git activity grouped by member. Empty hours or days remain at zero.</p></div>
       <span className="chart-meta">{rangeLabel}</span>
     </div>
-    <p id="activity-chart-instructions" className="visually-hidden">Focus the chart and use the left and right arrow keys to compare all visible members at each time.</p>
+    <div className="activity-legend" aria-label="Chart series. Select a member to show or hide their line.">
+      {users.map((user: any) => {
+        const key = seriesKey(user);
+        const visible = !hiddenSeries.has(key);
+        return <button type="button" className={`activity-legend-item${visible ? "" : " hidden"}`} key={user.userId} aria-pressed={visible} onClick={() => toggleSeries(key)}><i style={{borderColor: colors[key]}} /><span>{user.name}</span></button>;
+      })}
+    </div>
+    <p id="activity-chart-instructions" className="visually-hidden">Hover across the chart, or focus it and use the left and right arrow keys, to compare all visible members at each time.</p>
     <div className="chart-plot-shell">
     <svg viewBox="0 0 720 212" role="img" tabIndex={0} aria-describedby="activity-chart-instructions" aria-label={`Git activities by member from ${timeline?.from || "the selected start"} to ${timeline?.to || "the selected end"}`}
       onPointerMove={event => {
@@ -556,35 +565,17 @@ function ActivityTimelineGraph({timeline}: {timeline: any}) {
         const color = colors[seriesKey(user)];
         return <g key={user.userId}>
           <path d={activityGraphPath(user.points, plot.width, plot.height, scale.maximum)} transform={`translate(${plot.left} ${plot.top})`} fill="none" stroke={color} strokeWidth="3" strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke"><title>{activityUserSummary(user)}</title></path>
+          {user.points.map((point: any, index: number) => <circle key={index} className="chart-series-point" cx={plot.left + (user.points.length === 1 ? 0 : index / (user.points.length - 1) * plot.width)} cy={plot.top + plot.height - Number(point.total || 0) / scale.maximum * plot.height} r="2.2" fill={color} />)}
           {activeIndex != null && <circle cx={plot.left + (user.points.length === 1 ? 0 : activeIndex / (user.points.length - 1) * plot.width)} cy={plot.top + plot.height - Number(user.points[activeIndex]?.total || 0) / scale.maximum * plot.height} r="4.5" fill={color} stroke="#0f1011" strokeWidth="2" />}
         </g>;
       })}
       {activeIndex != null && <line x1={plot.left + (points.length === 1 ? 0 : activeIndex / (points.length - 1) * plot.width)} x2={plot.left + (points.length === 1 ? 0 : activeIndex / (points.length - 1) * plot.width)} y1={plot.top} y2={plot.top + plot.height} className="chart-hover-line" />}
     </svg>
-    {activeIndex != null && <div className={`chart-index-tooltip ${tooltipAlignment}`} style={{left: `${activeLeft}%`}} aria-hidden="true">
+    {activeIndex != null && <div className={`chart-index-tooltip ${tooltipAlignment}`} style={{left: `${activeLeft}%`}} role="status" aria-live="polite">
       <strong>{points[activeIndex]?.label}</strong>
       {visibleUsers.map((user: any) => <span key={user.userId}><i style={{background: colors[seriesKey(user)]}} />{user.name}<b>{compactActivityNumber(Number(user.points[activeIndex]?.total || 0))}</b></span>)}
     </div>}
     </div>
-    <div className="activity-legend" aria-label="Chart series. Select a member to show or hide their line.">
-      {users.map((user: any) => {
-        const key = seriesKey(user);
-        const visible = !hiddenSeries.has(key);
-        return <button type="button" className={`activity-legend-item${visible ? "" : " hidden"}`} key={user.userId} aria-pressed={visible} onClick={() => toggleSeries(key)}><i style={{background: colors[key]}} /><span>{user.name}</span></button>;
-      })}
-    </div>
-    <details className="activity-data">
-      <summary>View exact timeline values</summary>
-      <div className="activity-data-scroll">
-        <table className="activity-data-table">
-          <thead><tr><th scope="col">Time</th>{users.map((user: any) => <th key={user.userId} scope="col">{user.name}</th>)}</tr></thead>
-          <tbody>{points.map((point: any, pointIndex: number) => <tr key={point.label}>
-            <th scope="row">{point.label}</th>
-            {users.map((user: any) => <td key={user.userId}>{user.points[pointIndex]?.total || 0}</td>)}
-          </tr>)}</tbody>
-        </table>
-      </div>
-    </details>
   </section>;
 }
 
@@ -1112,10 +1103,22 @@ function Dashboard({
   currentWorkspace,
   error,
   timezone,
+  setTimezone,
 }: any) {
   const [refreshPending, setRefreshPending] = useState(false);
+  const [rangePreset, setRangePreset] = useState<ActivityRangePreset>("day");
+  const [offsetInput, setOffsetInput] = useState(() => timezoneOffsetInput(timezone));
+  const [offsetError, setOffsetError] = useState("");
+  const [lastUpdatedAt, setLastUpdatedAt] = useState(Date.now());
+  const [clock, setClock] = useState(Date.now());
   const activeView = useActiveView();
   const refreshInFlight = useRef(false);
+  useEffect(() => setOffsetInput(timezoneOffsetInput(timezone)), [timezone]);
+  useEffect(() => setLastUpdatedAt(Date.now()), [today]);
+  useEffect(() => {
+    const timer = setInterval(() => setClock(Date.now()), 60_000);
+    return () => clearInterval(timer);
+  }, []);
   useEffect(() => {
     const controller = new AbortController();
     const match = route.match(/^\/workspaces\/\d+\/(users|repositories)\/(\d+)/);
@@ -1141,6 +1144,21 @@ function Dashboard({
     document.addEventListener("visibilitychange", refresh);
     return () => { controller.abort(); clearInterval(timer); document.removeEventListener("visibilitychange", refresh); };
   }, [workspaceId, route, dates.from, dates.to, timezone, setTimeline]);
+  const selectRange = (preset: ActivityRangePreset) => {
+    setRangePreset(preset);
+    if (preset !== "custom") setDates(activityDateRange(preset, todayInTimezone(timezone)));
+  };
+  const refreshDashboard = async () => {
+    setRefreshPending(true);
+    try {
+      await reload();
+      if (activeView.current) setLastUpdatedAt(Date.now());
+    } finally {
+      if (activeView.current) setRefreshPending(false);
+    }
+  };
+  const updatedMinutes = Math.max(0, Math.floor((clock - lastUpdatedAt) / 60_000));
+  const updatedLabel = updatedMinutes < 1 ? "Updated just now" : `Updated ${updatedMinutes}m ago`;
   return (
     <div className="page-stack">
       <PageHeading
@@ -1154,26 +1172,6 @@ function Dashboard({
         }
         description="A focused view of commit evidence collected by local TraceMini devices."
       />
-      <section className="dashboard-toolbar">
-        <label>
-          From
-          <input
-            type="date"
-            value={dates.from}
-            onChange={(event) =>
-              setDates({ ...dates, from: event.target.value })
-            }
-          />
-        </label>
-        <label>
-          To
-          <input
-            type="date"
-            value={dates.to}
-            onChange={(event) => setDates({ ...dates, to: event.target.value })}
-          />
-        </label>
-      </section>
       <div className="metrics">
         {[
           ["commits", "Commits"],
@@ -1188,7 +1186,34 @@ function Dashboard({
           </article>
         ))}
       </div>
-      <ActivityTimelineGraph timeline={today} />
+      <div className="activity-chart-composite">
+      <section className="activity-controls" aria-label="Activity chart controls">
+        <span className="activity-updated">{updatedLabel}</span>
+        <button type="button" className="activity-refresh" disabled={refreshPending} onClick={refreshDashboard}>{refreshPending ? "Refreshing…" : "Refresh"}</button>
+        <div className="activity-range" aria-label="Chart range">
+          {(["5h", "day", "week", "month", "custom"] as ActivityRangePreset[]).map(preset => <button type="button" key={preset} className={rangePreset === preset ? "active" : ""} aria-pressed={rangePreset === preset} onClick={() => selectRange(preset)}>{preset === "custom" ? "Custom" : preset}</button>)}
+        </div>
+        {rangePreset === "custom" && <div className="activity-custom-dates">
+          <label>From<input type="date" value={dates.from} max={dates.to} onChange={(event) => setDates({...dates, from: event.target.value})} /></label>
+          <label>To<input type="date" value={dates.to} min={dates.from} onChange={(event) => setDates({...dates, to: event.target.value})} /></label>
+        </div>}
+        <form className="activity-offset" onSubmit={event => {
+          event.preventDefault();
+          const selected = timezoneFromOffsetInput(offsetInput);
+          if (!selected) { setOffsetError("Use an offset from -12:00 to +14:00"); return; }
+          setOffsetError("");
+          localStorage.setItem("timezone", selected);
+          setTimezone(selected);
+          if (rangePreset !== "custom") setDates(activityDateRange(rangePreset, todayInTimezone(selected)));
+        }}>
+          <label>UTC offset<input aria-label="UTC offset" value={offsetInput} onChange={event => setOffsetInput(event.target.value)} placeholder="+0" /></label>
+          <button type="submit">Apply</button>
+          <small>Examples: +3, -7, +5:30</small>
+        </form>
+        {offsetError && <span className="activity-offset-error" role="alert">{offsetError}</span>}
+      </section>
+      <ActivityTimelineGraph timeline={today} rangePreset={rangePreset} timezone={timezone} />
+      </div>
       <div className="dashboard-grid">
         <Activity events={events} workspaceId={workspaceId} timezone={timezone} />
         <aside className="card insight-card">
@@ -1216,16 +1241,6 @@ function Dashboard({
           {!repositories.length && (
             <p className="muted">No repositories yet.</p>
           )}
-          <button
-            className="button secondary full"
-            disabled={refreshPending}
-            onClick={async () => {
-              setRefreshPending(true);
-              try { await reload(); } finally { if (activeView.current) setRefreshPending(false); }
-            }}
-          >
-            {refreshPending ? <BusyIndicator label="Refreshing…" /> : "Refresh dashboard"}
-          </button>
         </aside>
       </div>
       {refreshPending && (
@@ -1883,7 +1898,7 @@ function App() {
           </select>
         </label>
         <label className="workspace-select">
-          <span className="label-with-tip">Timezone <InfoTip label="Timezone">Controls date boundaries and how activity timestamps are grouped and displayed.</InfoTip></span>
+          <span>Timezone</span>
           <select
             value={timezone}
             onChange={(event) => {
@@ -2039,6 +2054,7 @@ function App() {
               currentWorkspace={dataWorkspaceId}
               error={error}
               timezone={timezone}
+              setTimezone={setTimezone}
             />
           )}
         </main>

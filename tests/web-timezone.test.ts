@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {DEFAULT_TIMEZONE, formatInTimezone, normalizeTimezone, TIMEZONE_OPTIONS, todayInTimezone} from '../apps/web/timezone.js';
+import {DEFAULT_TIMEZONE, formatInTimezone, hourInTimezone, normalizeTimezone, TIMEZONE_OPTIONS, timezoneFromOffsetInput, timezoneOffsetInput, todayInTimezone} from '../apps/web/timezone.js';
 
 describe('web timezone preferences', () => {
   it('defaults to Pakistan Standard Time while allowing UTC offsets', () => {
@@ -24,5 +24,14 @@ describe('web timezone preferences', () => {
     expect(todayInTimezone('UTC+01:00', instant)).toBe('2026-08-23');
     expect(todayInTimezone('UTC-03:00', new Date('2026-08-24T02:00:00.000Z'))).toBe('2026-08-23');
     expect(formatInTimezone(instant, 'UTC')).toContain('2026');
+  });
+
+  it('parses compact UTC offsets used by dashboard controls', () => {
+    expect(timezoneFromOffsetInput('+0')).toBe('UTC');
+    expect(timezoneFromOffsetInput('-3')).toBe('UTC-03:00');
+    expect(timezoneFromOffsetInput('+5:30')).toBe('UTC+05:30');
+    expect(timezoneFromOffsetInput('+14:30')).toBeUndefined();
+    expect(timezoneOffsetInput('UTC+05:30')).toBe('+5:30');
+    expect(hourInTimezone('UTC+05:30', new Date('2026-08-27T04:15:00Z'))).toBe(9);
   });
 });
