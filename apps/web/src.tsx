@@ -1104,6 +1104,8 @@ function Dashboard({
   error,
   timezone,
   setTimezone,
+  selectedRepositoryIds,
+  setSelectedRepositoryIds,
 }: any) {
   const [refreshPending, setRefreshPending] = useState(false);
   const [rangePreset, setRangePreset] = useState<ActivityRangePreset>("day");
@@ -1122,14 +1124,17 @@ function Dashboard({
   useEffect(() => {
     const controller = new AbortController();
     const match = route.match(/^\/workspaces\/\d+\/(users|repositories)\/(\d+)/);
-    const scope = match ? `&${match[1] === "users" ? "userId" : "repositoryId"}=${match[2]}` : "";
+    const routeScope = match && (match[1] === "users" || selectedRepositoryIds == null)
+      ? `&${match[1] === "users" ? "userId" : "repositoryId"}=${match[2]}`
+      : "";
+    const repositoryScope = selectedRepositoryIds == null ? "" : `&repositoryIds=${selectedRepositoryIds.join(",")}`;
     const refreshTimeline = async () => {
       if (!activeView.current || document.visibilityState !== "visible") return;
       if (refreshInFlight.current) return;
       refreshInFlight.current = true;
       const generation = dataGeneration.current;
       try {
-        const timeline = await request(`/workspaces/${workspaceId}/timeline?from=${dates.from}&to=${dates.to}&timezone=${encodeURIComponent(timezone)}${scope}`, {signal: controller.signal});
+        const timeline = await request(`/workspaces/${workspaceId}/timeline?from=${dates.from}&to=${dates.to}&timezone=${encodeURIComponent(timezone)}${routeScope}${repositoryScope}`, {signal: controller.signal});
         if (!controller.signal.aborted && canApplyWorkspaceResult(workspaceId, currentWorkspace.current, activeView.current, generation, dataGeneration.current)) setTimeline(timeline);
       } catch (caught: any) {
         if (caught instanceof ApiRequestError && (caught.status === 401 || caught.status === 403) && canApplyWorkspaceResult(workspaceId, currentWorkspace.current, activeView.current, generation, dataGeneration.current)) {
@@ -1143,7 +1148,7 @@ function Dashboard({
     const timer = setInterval(refresh, 15_000);
     document.addEventListener("visibilitychange", refresh);
     return () => { controller.abort(); clearInterval(timer); document.removeEventListener("visibilitychange", refresh); };
-  }, [workspaceId, route, dates.from, dates.to, timezone, setTimeline]);
+  }, [workspaceId, route, dates.from, dates.to, timezone, selectedRepositoryIds, setTimeline]);
   const selectRange = (preset: ActivityRangePreset) => {
     setRangePreset(preset);
     if (preset !== "custom") setDates(activityDateRange(preset, todayInTimezone(timezone)));
@@ -1224,21 +1229,36 @@ function Dashboard({
             </div>
           </div>
           <h3>Repositories</h3>
-          {repositories
-            .filter((repo: any) => !repo.archived)
-            .map((repo: any) => (
-              <button
-                className="repo"
-                key={repo.id}
-                onClick={() =>
-                  navigate(`/workspaces/${workspaceId}/repositories/${repo.id}`)
-                }
-              >
-                <strong>{repo.name}</strong>
-                <small>{repo.clone_count} local clone(s)</small>
-              </button>
-            ))}
-          {!repositories.length && (
+          {(() => {
+            const activeRepositories = repositories.filter((repo: any) => !repo.archived);
+            const routeRepositoryId = Number(route.match(/^\/workspaces\/\d+\/repositories\/(\d+)/)?.[1] || 0);
+            const effectiveIds = selectedRepositoryIds == null
+              ? routeRepositoryId ? [routeRepositoryId] : activeRepositories.map((repo: any) => Number(repo.id))
+              : selectedRepositoryIds;
+            const selected = new Set(effectiveIds.map(Number));
+            const allSelected = activeRepositories.length > 0 && activeRepositories.every((repo: any) => selected.has(Number(repo.id)));
+            const updateSelection = (next: number[] | null) => {
+              if (routeRepositoryId) navigate(`/workspaces/${workspaceId}`);
+              setSelectedRepositoryIds(next);
+            };
+            return activeRepositories.length ? <div className="repository-filter" role="group" aria-label="Filter dashboard by repository">
+              <label className={`repo repo-select-all ${allSelected ? "selected" : ""}`}>
+                <input type="checkbox" checked={allSelected} onChange={event => updateSelection(event.target.checked ? null : [])} />
+                <span><strong>All repositories</strong><small>{activeRepositories.length} repositories</small></span>
+              </label>
+              {activeRepositories.map((repo: any) => {
+                const checked = selected.has(Number(repo.id));
+                return <label className={`repo ${checked ? "selected" : ""}`} key={repo.id}>
+                  <input type="checkbox" checked={checked} onChange={() => {
+                    const next = checked ? effectiveIds.filter((id: number) => Number(id) !== Number(repo.id)) : [...effectiveIds, Number(repo.id)];
+                    updateSelection(next.length === activeRepositories.length ? null : next);
+                  }} />
+                  <span><strong>{repo.name}</strong><small>{repo.clone_count} local clone(s)</small></span>
+                </label>;
+              })}
+            </div> : null;
+          })()}
+          {!repositories.filter((repo: any) => !repo.archived).length && (
             <p className="muted">No repositories yet.</p>
           )}
         </aside>
@@ -1648,6 +1668,7 @@ function App() {
   const [workspaceId, setWorkspaceId] = useState(0);
   const [events, setEvents] = useState<any[]>([]);
   const [repositories, setRepositories] = useState<any[]>([]);
+  const [selectedRepositoryIds, setSelectedRepositoryIds] = useState<number[] | null>(null);
   const [repositoryCandidates, setRepositoryCandidates] = useState<RepositoryCandidate[]>([]);
   const [members, setMembers] = useState<any[]>([]);
   const [reports, setReports] = useState<any[]>([]);
@@ -1680,6 +1701,7 @@ function App() {
     loadGeneration.current += 1;
     setEvents([]);
     setRepositories([]);
+    setSelectedRepositoryIds(null);
     setRepositoryCandidates([]);
     setMembers([]);
     setReports([]);
@@ -1794,7 +1816,7 @@ function App() {
     }
     try {
       setError("");
-      const plan = workspaceLoadPlan(selectedRoute, selectedWorkspace, dates, timezone);
+      const plan = workspaceLoadPlan(selectedRoute, selectedWorkspace, dates, timezone, selectedRepositoryIds);
       const loaded = await Promise.all(
         plan.map(async (item) => [item.key, await request(item.path)] as const),
       );
@@ -1841,7 +1863,7 @@ function App() {
   }, [token]);
   useEffect(() => {
     void loadWorkspace(true);
-  }, [workspaceId, route, dates.from, dates.to, timezone]);
+  }, [workspaceId, route, dates.from, dates.to, timezone, selectedRepositoryIds]);
   if (!token) return (
     <>
       <ThemeToggle theme={theme} onToggle={() => setTheme(nextTheme(theme))} floating />
@@ -2055,6 +2077,8 @@ function App() {
               error={error}
               timezone={timezone}
               setTimezone={setTimezone}
+              selectedRepositoryIds={selectedRepositoryIds}
+              setSelectedRepositoryIds={setSelectedRepositoryIds}
             />
           )}
         </main>

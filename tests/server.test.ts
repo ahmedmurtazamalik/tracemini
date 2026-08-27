@@ -397,6 +397,13 @@ else if(command==='status'){console.log(JSON.stringify(JSON.parse(fs.readFileSyn
     expect(JSON.stringify(dashboard.events)).not.toContain('/opaque/');
     expect(JSON.stringify(dashboard.events)).not.toContain('CANARY');
     expect(dashboard.repositories[0]).toMatchObject({id: repo.id, name: 'private-project', clone_count: 1, remote_url: null, normalized_remote: null});
+    const selectedRepositoryDashboard = (await request(app).get(`/api/workspaces/${workspace.id}/dashboard?timezone=UTC&repositoryIds=${repo.id}`).set(auth(user.token)).expect(200)).body;
+    expect(selectedRepositoryDashboard.events).toHaveLength(7);
+    expect(selectedRepositoryDashboard.stats.totals.commits).toBe(2);
+    const emptyRepositoryDashboard = (await request(app).get(`/api/workspaces/${workspace.id}/dashboard?timezone=UTC&repositoryIds=`).set(auth(user.token)).expect(200)).body;
+    expect(emptyRepositoryDashboard.events).toEqual([]);
+    expect(emptyRepositoryDashboard.stats.totals.commits).toBe(0);
+    expect(emptyRepositoryDashboard.timeline.users[0].hourly.every((point: any) => point.total === 0)).toBe(true);
     const settings = (await request(app).get(`/api/workspaces/${workspace.id}/settings`).set(auth(user.token)).expect(200)).body;
     expect(settings).toMatchObject({members: [{id: user.user.id, role: 'Manager'}]});
     expect(settings.repositoryCandidates).toHaveLength(2);

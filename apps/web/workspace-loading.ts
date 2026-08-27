@@ -8,6 +8,7 @@ export function workspaceLoadPlan(
   workspaceId: number,
   dates: {from: string; to: string},
   timezone?: string,
+  repositoryIds?: number[] | null,
 ): WorkspaceLoadItem[] {
   if (!workspaceId) return [];
   const view = getRouteView(route, workspaceId);
@@ -23,8 +24,9 @@ export function workspaceLoadPlan(
 
   const match = route.match(/^\/workspaces\/\d+\/(users|repositories)\/(\d+)/);
   const timezoneFilter = timezone ? `&timezone=${encodeURIComponent(timezone)}` : '';
-  const scopeFilter = match
+  const routeScope = match && (match[1] === 'users' || repositoryIds == null)
     ? `&${match[1] === 'users' ? 'userId' : 'repositoryId'}=${match[2]}`
     : '';
-  return [{key: 'dashboard', path: `${base}/dashboard?from=${dates.from}&to=${dates.to}${timezoneFilter}${scopeFilter}`}];
+  const repositoryFilter = repositoryIds == null ? '' : `&repositoryIds=${repositoryIds.join(',')}`;
+  return [{key: 'dashboard', path: `${base}/dashboard?from=${dates.from}&to=${dates.to}${timezoneFilter}${routeScope}${repositoryFilter}`}];
 }
