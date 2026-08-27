@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {activityGraphPath, activityGraphTicks, activityUserSummary} from '../apps/web/today-activity.js';
+import {activityGraphPath, activityGraphTicks, activitySeriesColorMap, activityUserSummary, compactActivityNumber} from '../apps/web/today-activity.js';
 
 describe('today workspace activity graph', () => {
   it('draws a bounded smooth curve through each activity point', () => {
@@ -18,5 +18,21 @@ describe('today workspace activity graph', () => {
   it('uses readable integer ticks and preserves a zero scale for an idle day', () => {
     expect(activityGraphTicks(0)).toEqual({maximum: 1, ticks: [0, 1]});
     expect(activityGraphTicks(7)).toEqual({maximum: 10, ticks: [0, 5, 10]});
+  });
+
+  it('assigns stable distinct colors regardless of series order and honors explicit colors', () => {
+    const first = activitySeriesColorMap([{key: 'Ada'}, {key: 'Grace'}, {key: 'Linus'}]);
+    const reordered = activitySeriesColorMap([{key: 'Linus'}, {key: 'Ada'}, {key: 'Grace'}]);
+    expect(reordered).toEqual(first);
+    expect(new Set(Object.values(first)).size).toBe(3);
+    expect(activitySeriesColorMap([{key: 'Ada', color: '#123456'}]).Ada).toBe('#123456');
+    const withExplicitPaletteColor = activitySeriesColorMap([{key: 'Ada', color: '#3b82f6'}, {key: 'Grace'}]);
+    expect(withExplicitPaletteColor.Grace).not.toBe('#3b82f6');
+  });
+
+  it('compacts large axis and tooltip values', () => {
+    expect(compactActivityNumber(0)).toBe('0');
+    expect(compactActivityNumber(1_250)).toBe('1.3K');
+    expect(compactActivityNumber(34_000_000)).toBe('34M');
   });
 });
