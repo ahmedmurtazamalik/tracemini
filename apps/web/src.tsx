@@ -26,6 +26,10 @@ import { activityGraphPath, activityGraphTicks, activityUserSummary } from "./to
 import { InvitationInbox, ReportSchedule, WorkspaceInvitations } from "./collaboration.js";
 import "./style.css";
 
+class ApiRequestError extends Error {
+  constructor(message: string, readonly status: number) { super(message); }
+}
+
 const request = async (path: string, init: RequestInit = {}) => {
   const response = await fetch(`/api${path}`, {
     ...init,
@@ -40,10 +44,11 @@ const request = async (path: string, init: RequestInit = {}) => {
   const text = await response.text();
   const result = text ? JSON.parse(text) : null;
   if (!response.ok)
-    throw new Error(
+    throw new ApiRequestError(
       result?.error ||
         result?.message ||
         "TraceMini could not complete the request.",
+      response.status,
     );
   return result;
 };
@@ -529,6 +534,18 @@ function ActivityTimelineGraph({timeline}: {timeline: any}) {
         return <div key={user.userId}><i style={{background: colors[index % colors.length]}} /><strong>{user.name}</strong><small>{total} total · {user.totals.commit} commits · {user.totals.push} pushes · {user.totals.pull} pulls · {user.totals.merge} merges</small></div>;
       })}
     </div>
+    <details className="activity-data">
+      <summary>View exact timeline values</summary>
+      <div className="activity-data-scroll">
+        <table className="activity-data-table">
+          <thead><tr><th scope="col">Time</th>{users.map((user: any) => <th key={user.userId} scope="col">{user.name}</th>)}</tr></thead>
+          <tbody>{points.map((point: any, pointIndex: number) => <tr key={point.label}>
+            <th scope="row">{point.label}</th>
+            {users.map((user: any) => <td key={user.userId}>{user.points[pointIndex]?.total || 0}</td>)}
+          </tr>)}</tbody>
+        </table>
+      </div>
+    </details>
   </section>;
 }
 
@@ -1050,17 +1067,41 @@ function Dashboard({
   events,
   repositories,
   reload,
+  setTimeline,
+  onAuthorizationFailure,
+  dataGeneration,
+  currentWorkspace,
   error,
   timezone,
 }: any) {
   const [refreshPending, setRefreshPending] = useState(false);
   const activeView = useActiveView();
+  const refreshInFlight = useRef(false);
   useEffect(() => {
-    const refresh = () => { if (activeView.current && document.visibilityState === "visible") void reload(); };
+    const controller = new AbortController();
+    const match = route.match(/^\/workspaces\/\d+\/(users|repositories)\/(\d+)/);
+    const scope = match ? `&${match[1] === "users" ? "userId" : "repositoryId"}=${match[2]}` : "";
+    const refreshTimeline = async () => {
+      if (!activeView.current || document.visibilityState !== "visible") return;
+      if (refreshInFlight.current) return;
+      refreshInFlight.current = true;
+      const generation = dataGeneration.current;
+      try {
+        const timeline = await request(`/workspaces/${workspaceId}/timeline?from=${dates.from}&to=${dates.to}&timezone=${encodeURIComponent(timezone)}${scope}`, {signal: controller.signal});
+        if (!controller.signal.aborted && canApplyWorkspaceResult(workspaceId, currentWorkspace.current, activeView.current, generation, dataGeneration.current)) setTimeline(timeline);
+      } catch (caught: any) {
+        if (caught instanceof ApiRequestError && (caught.status === 401 || caught.status === 403) && canApplyWorkspaceResult(workspaceId, currentWorkspace.current, activeView.current, generation, dataGeneration.current)) {
+          await onAuthorizationFailure(caught.status);
+        }
+      } finally {
+        refreshInFlight.current = false;
+      }
+    };
+    const refresh = async () => { await refreshTimeline(); };
     const timer = setInterval(refresh, 15_000);
     document.addEventListener("visibilitychange", refresh);
-    return () => { clearInterval(timer); document.removeEventListener("visibilitychange", refresh); };
-  }, [reload]);
+    return () => { controller.abort(); clearInterval(timer); document.removeEventListener("visibilitychange", refresh); };
+  }, [workspaceId, route, dates.from, dates.to, timezone, setTimeline]);
   return (
     <div className="page-stack">
       <PageHeading
@@ -1645,6 +1686,37 @@ function App() {
       if (active()) setIdentityPending(false);
     }
   };
+  const clearWorkspaceData = () => {
+    loadGeneration.current += 1;
+    loadedContexts.current.clear();
+    setEvents([]);
+    setRepositories([]);
+    setRepositoryCandidates([]);
+    setMembers([]);
+    setReports([]);
+    setAgents([]);
+    setStats({totals: {}, daily: []});
+    setToday({users: []});
+    setReport(undefined);
+    setWorkspacePending(false);
+    setError("");
+  };
+  const handleAuthorizationFailure = async (status: number) => {
+    clearWorkspaceData();
+    if (status === 401) {
+      identityGeneration.current += 1;
+      localStorage.removeItem("token");
+      setUser(undefined);
+      setWorkspaces([]);
+      setInvitations([]);
+      setWorkspaceId(0);
+      setToken("");
+      navigate("/");
+      return;
+    }
+    const selected = await loadIdentity();
+    navigate(selected ? workspacePath(selected) : "/");
+  };
   const loadWorkspace = async (blocking = false) => {
     const generation = ++loadGeneration.current;
     const selectedWorkspace = workspaceId;
@@ -1698,9 +1770,12 @@ function App() {
       loadedContexts.current.add(context);
     } catch (caught: any) {
       if (generation === loadGeneration.current) {
-        if (getRouteView(selectedRoute, selectedWorkspace) === "report")
-          setReport(undefined);
-        setError(caught.message);
+        if (caught instanceof ApiRequestError && (caught.status === 401 || caught.status === 403)) {
+          await handleAuthorizationFailure(caught.status);
+        } else {
+          if (getRouteView(selectedRoute, selectedWorkspace) === "report") setReport(undefined);
+          setError(caught.message);
+        }
       }
     } finally {
       if (shouldBlock && generation === loadGeneration.current) setWorkspacePending(false);
@@ -1916,6 +1991,10 @@ function App() {
               events={events}
               repositories={repositories}
               reload={loadWorkspace}
+              setTimeline={setToday}
+              onAuthorizationFailure={handleAuthorizationFailure}
+              dataGeneration={loadGeneration}
+              currentWorkspace={dataWorkspaceId}
               error={error}
               timezone={timezone}
             />

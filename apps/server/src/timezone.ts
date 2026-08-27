@@ -10,6 +10,11 @@ export function fixedOffsetMinutes(value: unknown) {
   return minutes >= -12 * 60 && minutes <= 14 * 60 ? minutes : undefined;
 }
 
+export function activityBucketMinutes(timezone: SupportedTimezone) {
+  const fixed = fixedOffsetMinutes(timezone);
+  return fixed !== undefined && Math.abs(fixed) % 15 !== 0 ? 1 : 15;
+}
+
 export function normalizeTimezone(value: unknown): SupportedTimezone {
   if (typeof value !== 'string') return DEFAULT_TIMEZONE;
   if (fixedOffsetMinutes(value) !== undefined) return value;

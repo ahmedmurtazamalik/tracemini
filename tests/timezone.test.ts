@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {dateKeyInTimezone, dateRangeUtc, normalizeTimezone} from '../apps/server/src/timezone.js';
+import {activityBucketMinutes, dateKeyInTimezone, dateRangeUtc, normalizeTimezone} from '../apps/server/src/timezone.js';
 
 describe('workspace timezone boundaries', () => {
   it('defaults to Pakistan Standard Time and supports UTC explicitly', () => {
@@ -9,6 +9,13 @@ describe('workspace timezone boundaries', () => {
     expect(normalizeTimezone('UTC+01:00')).toBe('UTC+01:00');
     expect(normalizeTimezone('UTC-03:00')).toBe('UTC-03:00');
     expect(normalizeTimezone('America/New_York')).toBe('America/New_York');
+  });
+
+  it('uses minute buckets only for accepted fixed offsets that need them', () => {
+    expect(activityBucketMinutes('UTC+05:20')).toBe(1);
+    expect(activityBucketMinutes('UTC-03:07')).toBe(1);
+    expect(activityBucketMinutes('UTC+05:30')).toBe(15);
+    expect(activityBucketMinutes('Asia/Karachi')).toBe(15);
   });
 
   it('converts Pakistan calendar days to exact UTC query bounds', () => {
