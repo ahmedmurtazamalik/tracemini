@@ -50,14 +50,17 @@ describe('workspace repository proposals', () => {
     const workspaceId = manager.workspaceId;
     const invitation = (await request(app).post(`/api/workspaces/${workspaceId}/invitations`).set(auth(manager.token)).send({email: developer.user.email, role: 'Developer'}).expect(201)).body;
     await request(app).post(`/api/invitations/${invitation.id}/accept`).set(auth(developer.token)).expect(200);
+    const managerAgent = (await request(app).post('/api/agents/register').set(auth(manager.token)).send({machineName: 'manager-box'}).expect(201)).body;
     const agent = (await request(app).post('/api/agents/register').set(auth(developer.token)).send({machineName: 'developer-box'}).expect(201)).body;
 
+    await request(app).post('/api/agents/repository-candidates').set(auth(managerAgent.token)).send({workspaceId, repositories: [{localKey: '/projects/manager', name: 'manager-repo', remoteUrl: 'git@example.test:team/manager.git', branch: 'main', traced: false, identityFingerprint: 'c'.repeat(64)}]}).expect(200);
     await request(app).post('/api/agents/repository-candidates').set(auth(agent.token)).send({workspaceId, repositories: [{localKey: '/projects/shared', name: 'shared', remoteUrl: 'git@example.test:team/shared.git', branch: 'main', traced: false, identityFingerprint: 'a'.repeat(64)}]}).expect(200);
     const managerCandidates = (await request(app).get(`/api/workspaces/${workspaceId}/repository-candidates`).set(auth(manager.token)).expect(200)).body;
-    expect(managerCandidates).toEqual([expect.objectContaining({name: 'shared', machine_name: 'developer-box', desired_traced: false, local_key: null})]);
+    expect(managerCandidates.map((candidate: any) => candidate.name)).toEqual(['manager-repo', 'shared']);
+    expect(managerCandidates[1]).toMatchObject({name: 'shared', machine_name: 'developer-box', desired_traced: false, local_key: null});
     expect((await request(app).get(`/api/workspaces/${workspaceId}/repository-candidates`).set(auth(developer.token)).expect(200)).body)
       .toEqual([expect.objectContaining({name: 'shared', local_key: '/projects/shared'})]);
-    const candidateId = managerCandidates[0].id;
+    const candidateId = managerCandidates[1].id;
     await request(app).patch(`/api/workspaces/${workspaceId}/repository-candidates/${candidateId}`).set(auth(manager.token)).send({traced: true}).expect(404);
     await request(app).patch(`/api/workspaces/${workspaceId}/repository-candidates/${candidateId}`).set(auth(developer.token)).send({traced: true}).expect(200);
     await request(app).post('/api/repositories/register').set(auth(agent.token)).send({workspaceId: String(workspaceId), localKey: '/projects/shared', name: 'different', remoteUrl: 'https://example.test/team/different.git', identityFingerprint: 'a'.repeat(64)}).expect(409);

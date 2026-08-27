@@ -166,7 +166,8 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
   const candidatesForWorkspace = async (workspaceId: unknown, userId: number) => {
     const rows = await db.prepare(`SELECT c.id,c.local_key,c.name,c.remote_url raw_remote_url,c.normalized_remote,c.branch,c.traced,c.desired_traced,c.revision,c.last_seen,c.error,c.repository_id,a.id agent_id,a.user_id owner_user_id,a.machine_name,u.name owner_name
       FROM repository_candidates c JOIN agents a ON a.id=c.agent_id JOIN users u ON u.id=a.user_id JOIN workspace_members owner ON owner.workspace_id=c.workspace_id AND owner.user_id=a.user_id JOIN workspace_members viewer ON viewer.workspace_id=c.workspace_id AND viewer.user_id=?
-      WHERE c.workspace_id=? AND (viewer.role='Manager' OR a.user_id=?) AND a.revoked_at IS NULL ORDER BY u.name,a.machine_name,c.name,c.local_key`).all(userId, workspaceId, userId);
+      WHERE c.workspace_id=? AND (viewer.role='Manager' OR a.user_id=?) AND a.revoked_at IS NULL
+      ORDER BY CASE WHEN a.user_id=? THEN 0 ELSE 1 END,u.name,a.machine_name,c.name,c.local_key`).all(userId, workspaceId, userId, userId);
     return rows.map((row: any) => {
       const {raw_remote_url: rawRemoteUrl, ...candidate} = row;
       return {
