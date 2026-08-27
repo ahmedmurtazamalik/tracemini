@@ -41,6 +41,18 @@ describe('real Git integration', () => {
     expect(inspectRepo(repo).name).toBe('CoachConnect');
   });
 
+  it('continues below an invalid Git marker to find nested repositories', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tracemini-invalid-git-marker-'));
+    const outer = path.join(tmp, 'outer');
+    const repo = path.join(outer, 'project');
+    fs.mkdirSync(path.join(outer, '.git'), {recursive: true});
+    fs.mkdirSync(repo);
+    run(repo, 'init');
+
+    expect(discover(tmp)).toEqual([repo]);
+    fs.rmSync(tmp, {recursive: true, force: true});
+  });
+
   it('imports only commits inside an initial or incremental history window', () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tracemini-history-'));
     const repo = path.join(tmp, 'repo');

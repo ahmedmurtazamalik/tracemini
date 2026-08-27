@@ -8,6 +8,11 @@ export const git = (repo: string, args: string[]) => execFileSync('git', ['-C', 
   stdio: ['ignore', 'pipe', 'pipe'],
 }).trim();
 
+function isRepositoryRoot(directory: string) {
+  try { return fs.realpathSync(git(directory, ['rev-parse', '--show-toplevel'])) === fs.realpathSync(directory); }
+  catch { return false; }
+}
+
 export function discover(root: string, limits: {maxRepositories?: number; maxDirectories?: number; maxDepth?: number; maxMillis?: number} = {}) {
   const found: string[] = [];
   const maxRepositories = limits.maxRepositories ?? 500;
@@ -25,7 +30,7 @@ export function discover(root: string, limits: {maxRepositories?: number; maxDir
     visitedDirectories++;
     let entries: fs.Dirent[];
     try { entries = fs.readdirSync(directory, {withFileTypes: true}); } catch { return; }
-    if (entries.some(entry => entry.name === '.git')) {
+    if (entries.some(entry => entry.name === '.git') && isRepositoryRoot(directory)) {
       found.push(directory);
       return;
     }
