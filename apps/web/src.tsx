@@ -24,6 +24,7 @@ import { workspaceLoadPlan, type WorkspaceLoadKey } from "./workspace-loading.js
 import { repositorySelectionState, type RepositoryCandidate } from "./repository-selection.js";
 import { activityGraphPath, activityGraphTicks, activityUserSummary } from "./today-activity.js";
 import { InvitationInbox, ReportSchedule, WorkspaceInvitations } from "./collaboration.js";
+import { HelpDrawer, InfoTip, type HelpSection } from "./help.js";
 import "./style.css";
 
 class ApiRequestError extends Error {
@@ -403,7 +404,7 @@ function Install({ workspaceId, agents, userId, onAgentsChecked }: { workspaceId
       <section className="card install-card">
         <div className="step-number">01</div>
         <div>
-          <h2>Connect or sync this device</h2>
+          <h2 className="heading-with-tip">Connect or sync this device <InfoTip label="CLI connection">The CLI runs locally, observes only folders you approve, and is required for repository activity and AI-generated reports.</InfoTip></h2>
           <p>
             The command expires after 10 minutes and works once. If TraceMini is already installed, it updates and securely reconnects that installation to this account. Otherwise, it performs the first installation—no sudo or npm registry required.
           </p>
@@ -502,7 +503,7 @@ function ActivityTimelineGraph({timeline}: {timeline: any}) {
   const labelIndexes = [...new Set(Array.from({length: Math.min(5, points.length)}, (_, index) => points.length === 1 ? 0 : Math.round(index * (points.length - 1) / Math.max(1, Math.min(5, points.length) - 1))))];
   const rangeLabel = timeline?.from === timeline?.to ? timeline?.from : `${timeline?.from || ""} — ${timeline?.to || ""}`;
   return <section className="card today-activity" aria-labelledby="activity-timeline-title">
-    <div className="section-heading"><div><span>Git activity timeline</span><h2 id="activity-timeline-title">Activity by member</h2></div><small>{rangeLabel}</small></div>
+    <div className="section-heading"><div><span>Git activity timeline</span><h2 id="activity-timeline-title" className="heading-with-tip">Activity by member <InfoTip label="Activity timeline">Each point is Git activity during that hour or day, not a running total. No activity is shown as zero.</InfoTip></h2></div><small>{rangeLabel}</small></div>
     <p className="chart-description">Commits, pushes, pulls, staging, branches, merges, and rewrites. The chart refreshes while this page is visible.</p>
     <svg viewBox="0 0 720 212" role="img" aria-label={`Git activities by member from ${timeline?.from || "the selected start"} to ${timeline?.to || "the selected end"}`}>
       {scale.ticks.map(tick => {
@@ -670,7 +671,7 @@ function RepositorySelection({workspaceId, candidates, agents, userId, reload}: 
   }, [scanActive, scanRequests, workspaceId, reload]);
   const ownAgents = agents.filter(agent => Number(agent.user_id) === Number(userId) && agent.status !== "revoked");
   return <section className="card settings-card repository-selection-card">
-    <span>Local Git discovery</span><h2>Workspace repositories</h2>
+    <span>Local Git discovery</span><h2 className="heading-with-tip">Workspace repositories <InfoTip label="Repository discovery">First run <code>tracemini watch</code> for an absolute folder on your device. Scanning then finds Git repositories only inside approved folders.</InfoTip></h2>
     <p className="muted">Scan only folders you previously approved with <code>tracemini watch</code>. The device sends bounded metadata; you choose repositories from your own devices and Managers see their safe workspace identity and status.</p>
     <button className="button secondary" disabled={scanning || scanActive || ownAgents.length === 0} onClick={async () => {
       setScanning(true); setError(""); setMessage("");
@@ -1470,7 +1471,7 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error, timezon
             />
           </label>
           <label>
-            Generator
+            <span className="label-with-tip">Generator <InfoTip label="Report generator">The selected Codex or Hermes executable runs on your connected device and must already be installed and authenticated there.</InfoTip></span>
             <select value={reporter} onChange={(event) => setReporter(event.target.value)}>
               <option value="codex">Codex</option>
               <option value="hermes">Hermes</option>
@@ -1484,7 +1485,7 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error, timezon
             </select>
           </label>
           {role === "Manager" && <label>
-            Report scope
+            <span className="label-with-tip">Report scope <InfoTip label="Report scope">Whole workspace includes every member’s bounded activity metadata. My contributions includes only your activity.</InfoTip></span>
             <select value={reportScope} onChange={(event) => setReportScope(event.target.value)}>
               <option value="workspace">Whole workspace</option>
               <option value="personal">My contributions</option>
@@ -1537,7 +1538,7 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error, timezon
         <label className="diff-consent">
           <input type="checkbox" checked={includeDiff} onChange={(event) => setIncludeDiff(event.target.checked)} />
           <span>
-            <strong>Analyze code changes</strong>
+            <strong className="label-with-tip">Analyze code changes <InfoTip label="Code change analysis">Allows the local agent to add bounded, redacted diff excerpts to the report prompt. Source files are not uploaded to TraceMini.</InfoTip></strong>
             <small>Add bounded diff excerpts for better detail.</small>
           </span>
         </label>
@@ -1609,6 +1610,7 @@ function App() {
     return {from: date, to: date};
   });
   const [dialog, setDialog] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
   const [logoutPending, setLogoutPending] = useState(false);
   const [logoutError, setLogoutError] = useState("");
   const loadGeneration = useRef(0);
@@ -1825,7 +1827,7 @@ function App() {
         </button>
         <p className="workspace-label">Developer command center</p>
         <label className="workspace-select">
-          Workspace
+          <span className="label-with-tip">Workspace <InfoTip label="Workspace">A workspace is a separate team area with its own members, repositories, activity, and reports. You can create and switch between multiple workspaces.</InfoTip></span>
           <select
             value={workspaceId}
             onChange={(event) => {
@@ -1843,7 +1845,7 @@ function App() {
           </select>
         </label>
         <label className="workspace-select">
-          Timezone
+          <span className="label-with-tip">Timezone <InfoTip label="Timezone">Controls date boundaries and how activity timestamps are grouped and displayed.</InfoTip></span>
           <select
             value={timezone}
             onChange={(event) => {
@@ -1875,6 +1877,7 @@ function App() {
             );
           })}
         </nav>
+        <button className="sidebar-help" aria-haspopup="dialog" aria-expanded={helpOpen} aria-controls="help-drawer" onClick={() => setHelpOpen(true)}><span aria-hidden="true">?</span><span><strong>Help</strong><small>How to use TraceMini</small></span></button>
         <div className="sidebar-footer">
           <span className="status online" />
           <div>
@@ -1883,6 +1886,7 @@ function App() {
           </div>
         </div>
       </aside>
+      {helpOpen && <HelpDrawer hasWorkspace={Boolean(workspaceId)} onClose={() => setHelpOpen(false)} onNavigate={(destination: HelpSection['destination']) => navigate(workspacePath(workspaceId, destination))} />}
       <div className="content-column">
         <header className="topbar">
           <div>
