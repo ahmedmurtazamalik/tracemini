@@ -652,6 +652,7 @@ else if(command==='status'){console.log(JSON.stringify(JSON.parse(fs.readFileSyn
     await request(app).post(`/api/agents/repository-selections/${appCandidate.id}/claim`).set(auth(device.agentToken)).send({revision: appSelection.revision, desiredTraced: true}).expect(200);
     const repository = (await request(app).post('/api/repositories/register').set(auth(device.agentToken)).send({workspaceId: String(workspace.id), name: 'app', remoteUrl: 'git@github.com:user/app.git', localKey: '/home/user/app', branch: 'main', identityFingerprint: 'a'.repeat(64)}).expect(200)).body;
     await request(app).post(`/api/agents/repository-selections/${appCandidate.id}/complete`).set(auth(device.agentToken)).send({traced: true, desiredTraced: true, revision: appSelection.revision}).expect(200);
+    await request(app).delete(`/api/workspaces/${workspace.id}/repository-candidates/${appCandidate.id}`).set(auth(user.token)).expect(409);
     expect((await request(app).get('/api/agents/repository-selections').set(auth(device.agentToken)).expect(200)).body).toEqual([expect.objectContaining({local_key: '/home/user/api', desired_traced: false})]);
 
     await request(app).post('/api/activity').set(auth(device.agentToken)).send({eventKey: 'selected-event', repositoryId: repository.id, localKey: '/home/user/app', identityFingerprint: 'a'.repeat(64), type: 'commit', occurredAt: new Date().toISOString()}).expect(201);
@@ -677,5 +678,8 @@ else if(command==='status'){console.log(JSON.stringify(JSON.parse(fs.readFileSyn
     const replaced = (await request(app).get(`/api/workspaces/${workspace.id}/repository-candidates`).set(auth(user.token)).expect(200)).body.find((candidate: any) => candidate.id === appCandidate.id);
     expect(replaced).toMatchObject({traced: false, desired_traced: false, repository_id: null});
     await request(app).post('/api/activity').set(auth(device.agentToken)).send({eventKey: 'replacement-event', repositoryId: repository.id, localKey: '/home/user/app', type: 'commit', occurredAt: new Date().toISOString()}).expect(403);
+    await request(app).delete(`/api/workspaces/${workspace.id}/repository-candidates/${appCandidate.id}`).set(auth(user.token)).expect(204);
+    expect((await request(app).get(`/api/workspaces/${workspace.id}/repository-candidates`).set(auth(user.token)).expect(200)).body.some((candidate: any) => candidate.id === appCandidate.id)).toBe(false);
+    expect(await db.prepare('SELECT 1 FROM activity_events WHERE event_key=?').get('selected-event')).toBeTruthy();
   });
 });

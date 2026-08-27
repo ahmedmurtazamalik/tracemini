@@ -612,6 +612,7 @@ function EmptyState({ title, text }: { title: string; text: string }) {
 function RepositorySelection({workspaceId, candidates, agents, userId, reload}: {workspaceId: number; candidates: RepositoryCandidate[]; agents: any[]; userId: number; reload: () => Promise<void>}) {
   type ScanRequest = {id: number; agent_id?: number; agentId?: number; status: "queued" | "running" | "completed" | "error"; repositories_found?: number | null; error?: string | null};
   const [changing, setChanging] = useState<number>();
+  const [removing, setRemoving] = useState<number>();
   const [scanning, setScanning] = useState(false);
   const [scanRequests, setScanRequests] = useState<ScanRequest[]>([]);
   const [message, setMessage] = useState("");
@@ -655,7 +656,12 @@ function RepositorySelection({workspaceId, candidates, agents, userId, reload}: 
   const ownAgents = agents.filter(agent => Number(agent.user_id) === Number(userId) && agent.status !== "revoked");
   return <section className="card settings-card repository-selection-card">
     <span>Local Git discovery</span><h2 className="heading-with-tip">Workspace repositories <InfoTip label="Repository discovery">First run <code>tracemini watch</code> for an absolute folder on your device. Scanning then finds Git repositories only inside approved folders.</InfoTip></h2>
-    <p className="muted">Scan only folders you previously approved with <code>tracemini watch</code>. The device sends bounded metadata; you choose repositories from your own devices and Managers see their safe workspace identity and status.</p>
+    <p className="muted">TraceMini searches only the folders you explicitly approve. Folder approval belongs to your device; repository tracing is chosen separately for each workspace.</p>
+    <div className="repository-folder-guide" aria-label="How repository folder selection works">
+      <div><b>1</b><span><strong>Approve a parent folder</strong><small>Run <code>tracemini watch /absolute/path</code> in a terminal. Add more roots by running it again. TraceMini searches recursively below those roots—never the whole device.</small></span></div>
+      <div><b>2</b><span><strong>Scan approved folders</strong><small>The button below asks your connected devices to scan all saved roots. Only bounded repository identity and status metadata is sent to this workspace.</small></span></div>
+      <div><b>3</b><span><strong>Choose what to trace</strong><small>Turn on repositories individually. Removing an untraced result keeps its history and local files; it can reappear on a later scan while it remains inside an approved root.</small></span></div>
+    </div>
     <button className="button secondary" disabled={scanning || scanActive || ownAgents.length === 0} onClick={async () => {
       setScanning(true); setError(""); setMessage("");
       try {
@@ -678,7 +684,8 @@ function RepositorySelection({workspaceId, candidates, agents, userId, reload}: 
     {candidates.length ? candidates.map(candidate => {
       const state = repositorySelectionState(candidate);
       const canSelect = candidate.owner_user_id === userId;
-      return <label className="repository-choice" key={candidate.id}>
+      const canRemove = canSelect && !candidate.traced && !candidate.desired_traced && !state.pending;
+      return <div className="repository-choice" key={candidate.id}>
         <span><strong>{candidate.name}</strong><small>{candidate.owner_name ? `${candidate.owner_name} · ` : ""}{candidate.machine_name} · {candidate.branch || "detached"}</small>{candidate.local_key && <code>{candidate.local_key}</code>}{candidate.error && <small className="error-text">{candidate.error}</small>}</span>
         <span className={`selection-state ${state.tone}`}>
           {changing === candidate.id
@@ -687,13 +694,25 @@ function RepositorySelection({workspaceId, candidates, agents, userId, reload}: 
               ? <><BusyIndicator label={state.label} />{state.detail && <small>{state.detail}</small>}<ProgressTrack label={`${state.label} ${candidate.name}`} /></>
               : candidate.traced || candidate.error ? state.label : canSelect ? "Not selected" : "Not selected by member"}
         </span>
-        <input type="checkbox" role="switch" aria-label={`${canSelect ? "Trace" : "Member repository selection"} for ${candidate.name} on ${candidate.machine_name}`} checked={state.checked} disabled={!canSelect || state.pending || changing === candidate.id} onChange={async event => {
-          setChanging(candidate.id); setError("");
-          try { await request(`/workspaces/${workspaceId}/repository-candidates/${candidate.id}`, {method: "PATCH", body: JSON.stringify({traced: event.target.checked})}); if (active()) await reload(); }
-          catch (caught: any) { if (active()) setError(caught.message); }
-          finally { if (active()) setChanging(undefined); }
-        }} />
-      </label>;
+        {canRemove && <button className="repository-remove" disabled={removing === candidate.id} onClick={async () => {
+          if (!confirm(`Remove ${candidate.name} from this workspace list? Recorded activity and local files will be kept. It may reappear after the next scan if it remains under an approved folder.`)) return;
+          setRemoving(candidate.id); setError(""); setMessage("");
+          try {
+            await request(`/workspaces/${workspaceId}/repository-candidates/${candidate.id}`, {method: "DELETE"});
+            if (active()) { setMessage(`${candidate.name} removed from this workspace list.`); await reload(); }
+          } catch (caught: any) { if (active()) setError(caught.message); }
+          finally { if (active()) setRemoving(undefined); }
+        }}>{removing === candidate.id ? "Removing…" : "Remove"}</button>}
+        <label className="repository-toggle">
+          <span className="visually-hidden">Trace {candidate.name}</span>
+          <input type="checkbox" role="switch" aria-label={`${canSelect ? "Trace" : "Member repository selection"} for ${candidate.name} on ${candidate.machine_name}`} checked={state.checked} disabled={!canSelect || state.pending || changing === candidate.id || removing === candidate.id} onChange={async event => {
+            setChanging(candidate.id); setError("");
+            try { await request(`/workspaces/${workspaceId}/repository-candidates/${candidate.id}`, {method: "PATCH", body: JSON.stringify({traced: event.target.checked})}); if (active()) await reload(); }
+            catch (caught: any) { if (active()) setError(caught.message); }
+            finally { if (active()) setChanging(undefined); }
+          }} />
+        </label>
+      </div>;
     }) : <p className="muted">No repositories found yet. Request a scan after configuring an approved folder on your device.</p>}
   </section>;
 }
@@ -1770,7 +1789,7 @@ function App() {
           </select>
         </label>
         <label className="workspace-select">
-          <span className="label-with-tip">Timezone <InfoTip label="Timezone">Controls date boundaries and how activity timestamps are grouped and displayed.</InfoTip></span>
+          Timezone
           <select
             value={timezone}
             onChange={(event) => {

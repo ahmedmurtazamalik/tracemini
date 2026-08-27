@@ -585,6 +585,23 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
     if (revision == null) return res.status(404).json({error: 'repository candidate not found'});
     res.json({ok: true, revision});
   });
+  app.delete('/api/workspaces/:id/repository-candidates/:candidateId', userAuth, requireMember, async (req: Authed, res) => {
+    const outcome = await db.transaction(async () => {
+      await db.prepare('SELECT id FROM workspaces WHERE id=? FOR UPDATE').get(req.params.id);
+      const candidate: any = await db.prepare(`SELECT c.* FROM repository_candidates c JOIN agents a ON a.id=c.agent_id JOIN workspace_members owner ON owner.workspace_id=c.workspace_id AND owner.user_id=a.user_id WHERE c.id=? AND c.workspace_id=? AND a.user_id=? AND a.revoked_at IS NULL FOR UPDATE`).get(req.params.candidateId, req.params.id, req.user.id);
+      if (!candidate) return 'missing';
+      if (candidate.traced || candidate.desired_traced) return 'active';
+      if (candidate.repository_id) {
+        await db.prepare('DELETE FROM local_clones WHERE agent_id=? AND local_key=? AND repository_id=?').run(candidate.agent_id, candidate.local_key, candidate.repository_id);
+        await db.prepare("UPDATE pending_pushes SET status='unconfirmed',completed_at=? WHERE agent_id=? AND repository_id=? AND local_key=? AND status='pending'").run(now(), candidate.agent_id, candidate.repository_id, candidate.local_key);
+      }
+      await db.prepare('DELETE FROM repository_candidates WHERE id=?').run(candidate.id);
+      return 'removed';
+    });
+    if (outcome === 'missing') return res.status(404).json({error: 'repository candidate not found'});
+    if (outcome === 'active') return res.status(409).json({error: 'stop tracing this repository before removing it'});
+    res.status(204).end();
+  });
   app.post('/api/workspaces/:id/repository-scans', userAuth, requireMember, async (req: Authed, res) => {
     const agentId = Number(req.body.agentId);
     if (!Number.isInteger(agentId)) return res.status(400).json({error: 'agentId required'});

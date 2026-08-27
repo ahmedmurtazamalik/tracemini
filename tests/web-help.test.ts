@@ -16,6 +16,8 @@ describe('in-app help', () => {
     ]);
     expect(HELP_SECTIONS.map(section => section.destination)).toEqual(['', 'install', 'settings', 'settings', '', 'reports']);
     expect(HELP_SECTIONS.every(section => section.description && section.detail && section.action)).toBe(true);
+    expect(HELP_SECTIONS[2].detail).toContain('device-wide');
+    expect(HELP_SECTIONS[3].detail).toContain('later scan can rediscover');
   });
 
   it('styles a left-side drawer and keyboard-focusable information tips', () => {

@@ -59,6 +59,7 @@ describe('workspace repository proposals', () => {
       .toEqual([expect.objectContaining({name: 'shared', local_key: '/projects/shared'})]);
     const candidateId = managerCandidates[0].id;
     await request(app).patch(`/api/workspaces/${workspaceId}/repository-candidates/${candidateId}`).set(auth(manager.token)).send({traced: true}).expect(404);
+    await request(app).delete(`/api/workspaces/${workspaceId}/repository-candidates/${candidateId}`).set(auth(manager.token)).expect(404);
     await request(app).patch(`/api/workspaces/${workspaceId}/repository-candidates/${candidateId}`).set(auth(developer.token)).send({traced: true}).expect(200);
     await request(app).post('/api/repositories/register').set(auth(agent.token)).send({workspaceId: String(workspaceId), localKey: '/projects/shared', name: 'different', remoteUrl: 'https://example.test/team/different.git', identityFingerprint: 'a'.repeat(64)}).expect(409);
     await request(app).post('/api/agents/repository-candidates').set(auth(agent.token)).send({workspaceId, repositories: [{localKey: '/projects/shared', name: 'different', remoteUrl: 'https://example.test/team/different.git', branch: 'main', traced: false, identityFingerprint: 'a'.repeat(64)}]}).expect(200);
