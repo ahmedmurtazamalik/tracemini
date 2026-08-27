@@ -726,7 +726,7 @@ function RepositorySelection({workspaceId, candidates, agents, userId, reload}: 
     </div>}
     {message && <div className="alert success" role="status">{message}</div>}
     {error && <div className="alert error" role="alert">{error}</div>}
-    {candidates.length ? candidates.map(candidate => {
+    {candidates.length ? <div className="repository-choice-list" role="group" tabIndex={candidates.length >= 10 ? 0 : undefined} aria-label="Discovered workspace repositories">{candidates.map(candidate => {
       const state = repositorySelectionState(candidate);
       const canSelect = candidate.owner_user_id === userId;
       return <label className="repository-choice" key={candidate.id}>
@@ -745,7 +745,7 @@ function RepositorySelection({workspaceId, candidates, agents, userId, reload}: 
           finally { if (active()) setChanging(undefined); }
         }} />
       </label>;
-    }) : <p className="muted">No repositories found yet. Request a scan after configuring an approved folder on your device.</p>}
+    })}</div> : <p className="muted">No repositories found yet. Request a scan after configuring an approved folder on your device.</p>}
   </section>;
 }
 
