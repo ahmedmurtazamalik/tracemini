@@ -9,7 +9,7 @@ describe('in-app help', () => {
     expect(HELP_SECTIONS.map(section => section.title)).toEqual([
       'Create or join a workspace',
       'Install the local CLI',
-      'Approve folders and find repositories',
+      'Find and select repositories',
       'Select repositories to trace',
       'Review activity',
       'Generate a report',

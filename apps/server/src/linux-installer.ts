@@ -17,7 +17,7 @@ export function linuxInstaller(cliDir: string, serverUrl: string, installToken: 
   if (!files.includes('index.js')) throw new Error(`built TraceMini CLI not found in ${cliDir}`);
   const payload = files.map(name => {
     const encoded = fs.readFileSync(path.join(cliDir, name)).toString('base64');
-    return `printf '%s' ${shellQuote(encoded)} | base64 -d > "$CLI_DIR/${name}"`;
+    return `printf '%s' ${shellQuote(encoded)} | base64 -d > "$STAGE_DIR/cli/${name}"`;
   }).join('\n');
   return `#!/bin/sh
 set -eu
@@ -40,21 +40,79 @@ if ! command -v systemctl >/dev/null 2>&1; then
   exit 1
 fi
 
-CLI_DIR="$HOME/.local/share/tracemini/cli"
+INSTALL_ROOT="$HOME/.local/share/tracemini"
+CLI_DIR="$INSTALL_ROOT/cli"
 BIN_DIR="$HOME/.local/bin"
-mkdir -p "$CLI_DIR" "$BIN_DIR"
-chmod 700 "$HOME/.local/share/tracemini" "$CLI_DIR"
+STATE_DIR="\${TRACEMINI_HOME:-$HOME/.tracemini}"
+SERVICE="$HOME/.config/systemd/user/tracemini.service"
+CACHE_DIR="$HOME/.cache/tracemini"
+mkdir -p "$CACHE_DIR" "$BIN_DIR" "$INSTALL_ROOT"
+chmod 700 "$CACHE_DIR" "$INSTALL_ROOT"
+STAGE_DIR=$(mktemp -d "$CACHE_DIR/install.XXXXXX")
+BACKUP_DIR="$STAGE_DIR/backup"
+mkdir -p "$STAGE_DIR/cli" "$BACKUP_DIR"
+
+HAD_INSTALL=0
+if [ -e "$CLI_DIR" ] || [ -e "$BIN_DIR/tracemini" ] || [ -e "$STATE_DIR/config.json" ] || [ -e "$SERVICE" ]; then HAD_INSTALL=1; fi
+
+rollback() {
+  status=$?
+  trap - EXIT HUP INT TERM
+  if [ "$status" -eq 0 ]; then
+    rm -rf "$STAGE_DIR"
+    return
+  fi
+  echo '✗ Installation failed; rolling back local changes.' >&2
+  systemctl --user stop tracemini.service >/dev/null 2>&1 || true
+  if [ -e "$BACKUP_DIR/cli" ]; then rm -rf "$CLI_DIR"; cp -a "$BACKUP_DIR/cli" "$CLI_DIR"; else rm -rf "$CLI_DIR"; fi
+  if [ -e "$BACKUP_DIR/tracemini" ]; then cp -a "$BACKUP_DIR/tracemini" "$BIN_DIR/tracemini"; else rm -f "$BIN_DIR/tracemini"; fi
+  if [ -e "$BACKUP_DIR/service" ]; then mkdir -p "$(dirname "$SERVICE")"; cp -a "$BACKUP_DIR/service" "$SERVICE"; else rm -f "$SERVICE"; fi
+  if [ ! -e "$STAGE_DIR/credential-exchanged" ]; then
+    if [ -e "$BACKUP_DIR/state" ]; then rm -rf "$STATE_DIR"; cp -a "$BACKUP_DIR/state" "$STATE_DIR"; elif [ "$HAD_INSTALL" -eq 0 ]; then rm -rf "$STATE_DIR"; fi
+  elif [ "$HAD_INSTALL" -eq 0 ]; then
+    rm -rf "$STATE_DIR"
+  fi
+  systemctl --user daemon-reload >/dev/null 2>&1 || true
+  if [ -e "$BACKUP_DIR/service" ]; then systemctl --user restart tracemini.service >/dev/null 2>&1 || true; fi
+  rm -rf "$STAGE_DIR"
+  echo '✓ Previous installation restored.' >&2
+  exit "$status"
+}
+trap rollback EXIT HUP INT TERM
+
+echo 'TraceMini Setup'
+echo '────────────────────────────────────────'
+echo '[1/3] Staging TraceMini CLI'
 ${payload}
+node "$STAGE_DIR/cli/index.js" --help >/dev/null
+echo '✓ CLI bundle verified'
+
+echo '[2/3] Saving the current installation'
+systemctl --user stop tracemini.service >/dev/null 2>&1 || true
+[ ! -e "$CLI_DIR" ] || cp -a "$CLI_DIR" "$BACKUP_DIR/cli"
+[ ! -e "$BIN_DIR/tracemini" ] || cp -a "$BIN_DIR/tracemini" "$BACKUP_DIR/tracemini"
+[ ! -e "$SERVICE" ] || cp -a "$SERVICE" "$BACKUP_DIR/service"
+[ ! -e "$STATE_DIR" ] || cp -a "$STATE_DIR" "$BACKUP_DIR/state"
+rm -rf "$CLI_DIR"
+mv "$STAGE_DIR/cli" "$CLI_DIR"
+chmod 700 "$CLI_DIR"
 cat > "$BIN_DIR/tracemini" <<'TRACEMINI_WRAPPER'
 #!/bin/sh
 exec node "$HOME/.local/share/tracemini/cli/index.js" "$@"
 TRACEMINI_WRAPPER
 chmod 755 "$BIN_DIR/tracemini"
-"$BIN_DIR/tracemini" install --server ${shellQuote(serverUrl)} --install-token ${shellQuote(installToken)}
+
+echo '[3/3] Running guided setup'
+"$BIN_DIR/tracemini" setup --server ${shellQuote(serverUrl)} --install-token ${shellQuote(installToken)} --transaction-dir "$STAGE_DIR"
 
 case ":$PATH:" in
   *:"$BIN_DIR":*) ;;
-  *) echo "TraceMini installed. Add $BIN_DIR to PATH, then open a new shell:"; echo '  export PATH="$HOME/.local/bin:$PATH"' ;;
+  *)
+    if ! grep -F '.local/bin' "$HOME/.profile" >/dev/null 2>&1; then
+      printf '\n%s\n' 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.profile"
+    fi
+    echo 'Open a new terminal before running tracemini commands.'
+    ;;
 esac
 `;
 }

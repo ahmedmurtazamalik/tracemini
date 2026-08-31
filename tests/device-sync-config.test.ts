@@ -1,7 +1,9 @@
 import {describe, expect, it, vi} from 'vitest';
+import {Readable, Writable} from 'node:stream';
 import type {Config} from '../packages/cli/src/config.js';
 import {normalizeServerUrl, previousDeviceTokenForServer, rebindDeviceConfig, rebindWorkspaceConfig} from '../packages/cli/src/pairing.js';
 import {restartStartup, stopStartup} from '../packages/cli/src/install.js';
+import {helpText, normalizeWatchPath, promptForWatchPaths} from '../packages/cli/src/setup.js';
 
 const existing = (): Config => ({
   serverUrl: 'https://old.example.test',
@@ -16,6 +18,20 @@ const existing = (): Config => ({
 });
 
 describe('CLI device re-pairing', () => {
+  it('normalizes guided watch paths and exposes the complete help command', () => {
+    expect(normalizeWatchPath('$HOME', process.cwd())).toBe(process.cwd());
+    expect(() => normalizeWatchPath('relative/path')).toThrow(/absolute path/);
+    expect(helpText).toContain('tracemini watch "$HOME/projects"');
+    expect(helpText).toContain('tracemini --help');
+  });
+
+  it('consumes every guided answer from piped installer input', async () => {
+    let output = '';
+    const sink = new Writable({write(chunk, _encoding, done) { output += chunk.toString(); done(); }});
+    await expect(promptForWatchPaths(Readable.from([`${process.cwd()}\nn\n`]) as any, sink as any)).resolves.toEqual([process.cwd()]);
+    expect(output).toContain('Add another watch path?');
+  });
+
   it('keeps local preferences but clears repository state and installs the new credential', () => {
     const rebound = rebindDeviceConfig(existing(), 'https://new.example.test', {
       agentToken: 'new-device', agentId: 10, workspaceId: 8,

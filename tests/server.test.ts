@@ -10,6 +10,7 @@ import crypto from 'node:crypto';
 import type {DB} from '../apps/server/src/db.js';
 import {openTestDb} from '../apps/server/src/test-db.js';
 import {createApp} from '../apps/server/src/app.js';
+import {linuxInstaller} from '../apps/server/src/linux-installer.js';
 
 let db: DB;
 afterEach(async () => {
@@ -286,7 +287,8 @@ describe('approved server workflows', () => {
     fs.writeFileSync(path.join(cliDir, 'index.js'), `#!/usr/bin/env node
 import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path'; import {execFileSync} from 'node:child_process';
 const args=process.argv.slice(2), command=args.shift(), flag=n=>args[args.indexOf(n)+1]; const configPath=path.join(os.homedir(),'.tracemini','config.json');
-if(command==='install'){const response=await fetch(flag('--server')+'/api/agents/install/exchange',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({installToken:flag('--install-token'),machineName:'fixture-box'})});if(!response.ok)throw new Error(await response.text());const value=await response.json();fs.mkdirSync(path.dirname(configPath),{recursive:true});fs.writeFileSync(configPath,JSON.stringify({serverUrl:flag('--server'),agentToken:value.agentToken,workspaceId:value.workspaceId}));fs.mkdirSync(path.join(os.homedir(),'.config/systemd/user'),{recursive:true});fs.writeFileSync(path.join(os.homedir(),'.config/systemd/user/tracemini.service'),'fixture');execFileSync('systemctl',['--user','daemon-reload']);execFileSync('systemctl',['--user','enable','--now','tracemini.service']);console.log('installed');}
+if(command==='setup'){const response=await fetch(flag('--server')+'/api/agents/install/exchange',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({installToken:flag('--install-token'),machineName:'fixture-box'})});if(!response.ok)throw new Error(await response.text());const value=await response.json();fs.mkdirSync(path.dirname(configPath),{recursive:true});fs.writeFileSync(configPath,JSON.stringify({serverUrl:flag('--server'),agentToken:value.agentToken,workspaceId:value.workspaceId}));fs.mkdirSync(path.join(os.homedir(),'.config/systemd/user'),{recursive:true});fs.writeFileSync(path.join(os.homedir(),'.config/systemd/user/tracemini.service'),'fixture');execFileSync('systemctl',['--user','daemon-reload']);execFileSync('systemctl',['--user','enable','--now','tracemini.service']);console.log('installed');}
+else if(command==='--help'){console.log('help');}
 else if(command==='status'){console.log(JSON.stringify(JSON.parse(fs.readFileSync(configPath,'utf8'))));}
 `);
     fs.writeFileSync(path.join(fakeBin, 'node'), `#!/bin/sh\nif [ "\${1:-}" = -p ]; then echo 22; else exec ${process.execPath} "$@"; fi\n`, {mode: 0o755});
@@ -315,6 +317,21 @@ else if(command==='status'){console.log(JSON.stringify(JSON.parse(fs.readFileSyn
       expect(fs.readFileSync(path.join(home, 'systemctl.log'), 'utf8')).toContain('--user enable --now tracemini.service');
       await request(origin).post('/api/agents/install/exchange').send({installToken: token, machineName: 'replay'}).expect(409);
       await request(origin).get(`/api/installers/linux/${encodeURIComponent(token)}`).expect(410);
+
+      const upgrade = (await request(origin).post('/api/agents/installations').set(auth(user.token)).send({workspaceId: workspace.id}).expect(201)).body;
+      const brokenCliDir = path.join(temporary, 'broken-cli');
+      fs.mkdirSync(brokenCliDir);
+      fs.writeFileSync(path.join(brokenCliDir, 'index.js'), `#!/usr/bin/env node
+import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path';
+const args=process.argv.slice(2),command=args.shift(),flag=n=>args[args.indexOf(n)+1];
+if(command==='--help'){console.log('help');process.exit(0);}
+if(command==='setup'){const configPath=path.join(os.homedir(),'.tracemini','config.json');const previous=JSON.parse(fs.readFileSync(configPath,'utf8'));const response=await fetch(flag('--server')+'/api/agents/install/exchange',{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer '+previous.agentToken},body:JSON.stringify({installToken:flag('--install-token'),machineName:'fixture-box'})});const value=await response.json();fs.writeFileSync(configPath,JSON.stringify({...previous,agentToken:value.agentToken}));fs.writeFileSync(path.join(flag('--transaction-dir'),'credential-exchanged'),'');process.exit(1);}
+`);
+      const failedUpgrade = path.join(temporary, 'failed-upgrade.sh');
+      fs.writeFileSync(failedUpgrade, linuxInstaller(brokenCliDir, origin, installToken(upgrade)), {mode: 0o700});
+      await expect(execFileAsync('sh', [failedUpgrade], {env})).rejects.toThrow();
+      expect(fs.readFileSync(path.join(home, '.local/share/tracemini/cli/index.js'), 'utf8')).toContain("else if(command==='status')");
+      expect(execFileSync(wrapper, ['status'], {env, encoding: 'utf8'})).toContain(origin);
     } finally {
       await new Promise<void>(resolve => server.close(() => resolve()));
       fs.rmSync(temporary, {recursive: true, force: true});

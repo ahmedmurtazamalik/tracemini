@@ -8,6 +8,7 @@ import {commitData, git, parsePrePush, removeHooks, repositoryFingerprint, stage
 import {flush, runAgent, scanWatchedRoots} from './agent.js';
 import {installStartup, restartStartup, stopStartup} from './install.js';
 import {installationId, normalizeServerUrl, previousDeviceTokenForServer, rebindDeviceConfig, rebindWorkspaceConfig} from './pairing.js';
+import {createInstallLogger, helpText, promptForWatchPaths} from './setup.js';
 
 const args = process.argv.slice(2);
 const command = args.shift();
@@ -43,11 +44,54 @@ async function exchangeInstallToken() {
 }
 
 async function main() {
-  if (command === 'install') {
-    stopStartup();
-    const response = await exchangeInstallToken();
-    const startup = installStartup();
-    console.log(`Device ${response.agentId} installed and started via ${startup}`);
+  if (command === 'setup' || command === 'install') {
+    const log = createInstallLogger();
+    const transactionDir = flag('--transaction-dir');
+    let exchanged = false;
+    let freshDevice = false;
+    try {
+      log.step(1, 7, 'Checking local environment');
+      if (process.platform !== 'linux') throw new Error('automatic setup currently supports Linux only');
+      log.success(`Node.js ${process.versions.node} on Linux`);
+      log.step(2, 7, 'Checking the existing installation');
+      stopStartup();
+      log.success('Background service is ready for setup');
+      log.step(3, 7, 'Collecting watched folders');
+      const roots = await promptForWatchPaths();
+      log.step(4, 7, 'Connecting this device');
+      const response = await exchangeInstallToken();
+      exchanged = true;
+      freshDevice = Boolean(response.created);
+      if (transactionDir) fs.writeFileSync(path.join(transactionDir, 'credential-exchanged'), '', {mode: 0o600});
+      log.success(`Device ${response.agentId} connected`);
+      log.step(5, 7, 'Discovering repositories');
+      let found = 0;
+      for (const root of roots) {
+        if (!config.watchedPaths.includes(root)) config.watchedPaths.push(root);
+        found += await scanWatchedRoots(config, [root]);
+      }
+      log.success(`${found} repository candidate(s) discovered`);
+      log.step(6, 7, 'Installing the background service');
+      installStartup();
+      log.success('Background service started');
+      log.step(7, 7, 'Verifying the installation');
+      await api(config, '/api/agents/status');
+      log.success('Server connection is healthy');
+      console.log(`\n✓ TraceMini installation completed successfully\n✓ Watched paths: ${roots.length}\n✓ Repository candidates discovered: ${found}`);
+      console.log('\nNext: open TraceMini Settings and select which repositories to trace.');
+      console.log('\nYou can add another folder at any time:\n\n  tracemini watch "$HOME/path"');
+      console.log('\nFor all available CLI commands and options, run:\n\n  tracemini --help');
+      console.log(`\nInstallation log:\n  ${log.path}`);
+    } catch (error: any) {
+      log.failure(error.message || String(error));
+      if (exchanged && freshDevice) {
+        try { await api(config, '/api/agents/install/abort', {method: 'POST'}); } catch {}
+      } else if (exchanged) {
+        console.error('The installer will restore the previous executable while keeping the newly connected device credential valid.');
+      }
+      console.error(`Details: ${log.path}`);
+      throw error;
+    }
     return;
   }
   if (command === 'sync') {
@@ -150,7 +194,8 @@ async function main() {
     return;
   }
   if (command === 'start' || command === 'once') { await runAgent(config, command === 'once'); return; }
-  console.log('Usage: tracemini sync --server URL --install-token TOKEN | watch PATH | repositories | status | event --repo PATH --type TYPE | start | once');
+  if (command === '--help' || command === '-h' || command === 'help' || !command) { console.log(helpText); return; }
+  throw new Error(`unknown command: ${command}\n\n${helpText}`);
 }
 
 main().catch(error => {

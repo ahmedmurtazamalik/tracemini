@@ -468,15 +468,26 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
       if (!reusable && previous?.user_id === setup.user_id) reusable = previous;
       if (reusable) {
         await db.prepare('UPDATE agents SET workspace_id=?,machine_name=?,installation_id=COALESCE(?,installation_id),token_hash=?,last_seen=? WHERE id=?').run(setup.workspace_id, req.body.machineName.trim(), installationId, hash(agentToken), now(), reusable.id);
-        return {agentId: Number(reusable.id), workspaceId: setup.workspace_id};
+        return {agentId: Number(reusable.id), workspaceId: setup.workspace_id, created: false};
       }
       const result = installationId
         ? await db.prepare('INSERT INTO agents(user_id,workspace_id,machine_name,installation_id,token_hash,last_seen,created_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT (user_id,installation_id) DO UPDATE SET workspace_id=EXCLUDED.workspace_id,machine_name=EXCLUDED.machine_name,token_hash=EXCLUDED.token_hash,last_seen=EXCLUDED.last_seen RETURNING id').run(setup.user_id, setup.workspace_id, req.body.machineName.trim(), installationId, hash(agentToken), now(), now())
         : await db.prepare('INSERT INTO agents(user_id,workspace_id,machine_name,installation_id,token_hash,last_seen,created_at) VALUES(?,?,?,?,?,?,?) RETURNING id').run(setup.user_id, setup.workspace_id, req.body.machineName.trim(), installationId, hash(agentToken), now(), now());
-      return {agentId: Number(result.lastInsertRowid), workspaceId: setup.workspace_id};
+      return {agentId: Number(result.lastInsertRowid), workspaceId: setup.workspace_id, created: true};
     });
     if (!exchanged) return res.status(409).json({error: 'install token invalid, expired, or already used'});
     res.status(201).json({...exchanged, agentToken});
+  });
+  app.post('/api/agents/install/abort', agentAuth, async (req: Authed, res) => {
+    await db.transaction(async () => {
+      const agent: any = await db.prepare('SELECT id FROM agents WHERE id=? AND token_hash=? AND revoked_at IS NULL AND removed_at IS NULL FOR UPDATE').get(req.agent.id, hash(req.headers.authorization!.replace(/^Bearer\s+/i, '')));
+      if (!agent) return;
+      await revokeDeviceWork(agent.id, 'fresh installation rolled back');
+      await db.prepare('DELETE FROM local_clones WHERE agent_id=?').run(agent.id);
+      await db.prepare('DELETE FROM repository_candidates WHERE agent_id=?').run(agent.id);
+      await db.prepare('UPDATE agents SET removed_at=? WHERE id=?').run(now(), agent.id);
+    });
+    res.status(204).end();
   });
   app.post('/api/agents/register', userAuth, required(['machineName']), async (req: Authed, res) => {
     const installationId = req.body.installationId == null ? null : String(req.body.installationId);

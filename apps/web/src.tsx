@@ -428,7 +428,7 @@ function Install({ workspaceId, agents, userId, onAgentsChecked }: { workspaceId
           ) : (
             <>
               <div className="alert progress" role="status">
-                Run this command on the device. It installs or updates the CLI, safely connects it to this account, and keeps your watched folders.
+                Run this command once. It installs or updates TraceMini, connects this device, asks which folders it may watch, starts the background agent, verifies the connection, and rolls back automatically if setup fails.
               </div>
               <Copy label="Connect or sync command" command={installation.syncCommand || installation.installCommand} />
             </>
@@ -439,34 +439,12 @@ function Install({ workspaceId, agents, userId, onAgentsChecked }: { workspaceId
         <section className="card install-card">
           <div className="step-number">02</div>
           <div>
-            <h2>Verify the device</h2>
+            <h2>Complete setup in the terminal</h2>
             <p>
-              The page checks for a heartbeat every five seconds. Open a new terminal after connecting, then run these checks.
+              Follow the guided watch-folder prompt. For example, enter <code>~/projects</code>, then choose whether to add another folder or proceed. The page checks for the device heartbeat automatically.
             </p>
-            <Copy
-              label="Add TraceMini to PATH"
-              command={'export PATH="$HOME/.local/bin:$PATH"'}
-            />
-            <Copy label="Find the command" command="command -v tracemini" />
-            <Copy label="Check device status" command="tracemini status" />
-            <Copy
-              label="Register an absolute repository folder (repeat for multiple paths)"
-              command={'tracemini watch "$HOME/path-to-repositories"'}
-            />
             <p className="muted">
-              You can run <code>tracemini watch</code> multiple times. Watch paths are absolute, device-wide, and available when scanning any workspace.
-            </p>
-            <Copy
-              label="Import existing Git history when convenient"
-              command="tracemini sync-history --days 90"
-            />
-            <Copy
-              label="Check system service"
-              command="systemctl --user status tracemini.service --no-pager"
-            />
-            <p className="muted">
-              Install command expires at{" "}
-              {new Date(installation.expiresAt).toLocaleTimeString()}.
+              Setup also explains how to add folders later with <code>tracemini watch "$HOME/path"</code> and how to see all CLI commands with <code>tracemini --help</code>. This install command expires at {new Date(installation.expiresAt).toLocaleTimeString()}.
             </p>
           </div>
         </section>

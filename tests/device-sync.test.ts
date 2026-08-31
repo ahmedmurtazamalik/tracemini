@@ -53,4 +53,23 @@ describe('existing CLI device sync', () => {
       .toMatchObject({id: synced.agentId, workspaceId: newWorkspace.id, machineName: 'existing-laptop'});
   });
 
+  it('removes a newly created device when fresh setup is aborted', async () => {
+    db = await openTestDb();
+    const app = createApp(db);
+    const account = (await request(app).post('/api/auth/register').send({
+      name: 'Cancelled install', email: 'cancelled-install@example.test', password: 'password123',
+    }).expect(201)).body;
+    const workspace = (await request(app).get('/api/workspaces').set(authorization(account.token)).expect(200)).body[0];
+    const installation = (await request(app).post('/api/agents/installations').set(authorization(account.token)).send({workspaceId: workspace.id}).expect(201)).body;
+    const installed = (await request(app).post('/api/agents/install/exchange').send({
+      installToken: tokenFrom(installation.installCommand), machineName: 'cancelled-box', installationId: 'a'.repeat(64),
+    }).expect(201)).body;
+    expect(installed.created).toBe(true);
+
+    await request(app).post('/api/agents/install/abort').set(authorization(installed.agentToken)).expect(204);
+    await request(app).get('/api/agents/status').set(authorization(installed.agentToken)).expect(401);
+    const devices = (await request(app).get(`/api/workspaces/${workspace.id}/agents`).set(authorization(account.token)).expect(200)).body;
+    expect(devices).toHaveLength(0);
+  });
+
 });

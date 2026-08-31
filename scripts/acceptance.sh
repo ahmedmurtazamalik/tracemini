@@ -63,13 +63,14 @@ INSTALL_B=$(api -X POST "$BASE/api/agents/installations" -H "authorization: Bear
 INSTALL_COMMAND_A=$(printf '%s' "$INSTALL_A" | json installCommand)
 ITOKEN_A=$(printf '%s' "$INSTALL_A" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(decodeURIComponent(JSON.parse(s).installCommand.match(/\\/linux\\/([^']+)/)[1])))")
 ITOKEN_B=$(printf '%s' "$INSTALL_B" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(decodeURIComponent(JSON.parse(s).installCommand.match(/\\/linux\\/([^']+)/)[1])))")
-HOME="$TMP/home-a" PATH="$TMP/bin:$PATH" sh -c "$INSTALL_COMMAND_A" >/dev/null
+printf '%s\nn\n' "$TMP/repos/a-root" | HOME="$TMP/home-a" PATH="$TMP/bin:$PATH" sh -c "$INSTALL_COMMAND_A"
 test -x "$TMP/home-a/.local/bin/tracemini"
 test -f "$TMP/home-a/.config/systemd/user/tracemini.service"
 test -f "$TMP/home-a/.tracemini/config.json"
 INSTALLED_WID=$(node -e "console.log(require(process.argv[1]).workspaceId || '')" "$TMP/home-a/.tracemini/config.json")
 if [ "$INSTALLED_WID" != "$WID" ]; then echo "installed workspace mismatch: expected $WID, got ${INSTALLED_WID:-missing}" >&2; exit 1; fi
 HOME="$TMP/home-a" PATH="$TMP/bin:$PATH" "$TMP/home-a/.local/bin/tracemini" status >/dev/null
+HOME="$TMP/home-a" PATH="$TMP/bin:$PATH" "$TMP/home-a/.local/bin/tracemini" --help | grep -q 'tracemini watch'
 AGENT_B=$(api -X POST "$BASE/api/agents/install/exchange" -d "{\"installToken\":\"$ITOKEN_B\",\"machineName\":\"bob-box\"}")
 node -e "require('fs').writeFileSync(process.argv[1],JSON.stringify({serverUrl:process.argv[2],agentToken:JSON.parse(process.argv[3]).agentToken,agentId:JSON.parse(process.argv[3]).agentId,workspaceId:Number(process.argv[4]),watchedPaths:[],clones:[],reporter:'codex',pollMs:2000}))" "$TMP/home-b/config.json" "$BASE" "$AGENT_B" "$WID"
 test "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/agents/install/exchange" -H 'content-type: application/json' -d "{\"installToken\":\"$ITOKEN_A\",\"machineName\":\"replay\"}")" = 409
