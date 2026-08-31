@@ -730,6 +730,7 @@ function Settings({ workspace, members, repositories, agents, repositoryCandidat
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [pending, setPending] = useState(false);
+  const [workspaceName, setWorkspaceName] = useState(workspace.name);
   const mutate = async (path: string, method = "POST", body?: any) => {
     setError("");
     setMessage("");
@@ -806,6 +807,20 @@ function Settings({ workspace, members, repositories, agents, repositoryCandidat
         </div>
       )}
       <div className="settings-grid" aria-busy={pending}>
+        <section className="card settings-card workspace-name-card">
+          <span>Workspace</span>
+          <h2>Rename workspace</h2>
+          <form className="workspace-name-form" onSubmit={(event) => {
+            event.preventDefault();
+            void mutate(`/workspaces/${workspace.id}`, "PATCH", { name: workspaceName });
+          }}>
+            <label>
+              Workspace name
+              <input value={workspaceName} onChange={(event) => setWorkspaceName(event.target.value)} maxLength={120} required />
+            </label>
+            <button className="button primary" disabled={pending || workspaceName.trim() === workspace.name}>Save name</button>
+          </form>
+        </section>
         <RepositorySelection workspaceId={workspace.id} candidates={repositoryCandidates} agents={agents} userId={userId} reload={reloadCandidates} />
         <section className="card settings-card">
           <span>People</span>

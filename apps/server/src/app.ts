@@ -254,6 +254,19 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
   });
   app.post('/api/workspaces/join', userAuth, async (_req, res) => res.status(410).json({error: 'invite codes are retired; accept a targeted invitation from your inbox'}));
   app.get('/api/workspaces', userAuth, async (req: Authed, res) => res.json(await workspacesForUser(req.user.id)));
+  app.patch('/api/workspaces/:id', userAuth, requireManager, async (req: Authed, res) => {
+    const name = typeof req.body.name === 'string' ? req.body.name.trim() : '';
+    if (!name) return res.status(400).json({error: 'workspace name is required'});
+    if (name.length > 120) return res.status(400).json({error: 'workspace name must be 120 characters or fewer'});
+    const renamed = await db.transaction(async () => {
+      await db.prepare('SELECT id FROM workspaces WHERE id=? FOR UPDATE').get(req.params.id);
+      if (!(await hasLockedManagerAuthority(+req.params.id, req.user.id))) return false;
+      await db.prepare('UPDATE workspaces SET name=? WHERE id=?').run(name, req.params.id);
+      return true;
+    });
+    if (!renamed) return res.status(403).json({error: 'Manager required'});
+    res.json({id: +req.params.id, name});
+  });
   app.get('/api/workspaces/:id/members', userAuth, requireMember, async (req, res) => res.json(await membersForWorkspace(req.params.id)));
 
   app.post('/api/workspaces/:id/invitations', userAuth, requireManager, async (req: Authed, res) => {

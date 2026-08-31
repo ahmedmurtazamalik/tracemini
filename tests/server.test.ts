@@ -170,6 +170,12 @@ describe('approved server workflows', () => {
     const jane = (await request(app).post('/api/auth/register').send({name: 'Jane', email: 'jane@test.local', password: 'password123'}).expect(201)).body;
     const janeWorkspace = (await request(app).get('/api/workspaces').set(auth(jane.token)).expect(200)).body[0];
     expect(janeWorkspace).not.toHaveProperty('invite_code');
+
+    await inviteAndAccept(app, joey.token, workspaces[0].id, jane);
+    await request(app).patch(`/api/workspaces/${workspaces[0].id}`).set(auth(jane.token)).send({name: 'Developer rename'}).expect(403);
+    await request(app).patch(`/api/workspaces/${workspaces[0].id}`).set(auth(joey.token)).send({name: '   '}).expect(400);
+    expect((await request(app).patch(`/api/workspaces/${workspaces[0].id}`).set(auth(joey.token)).send({name: '  Product delivery  '}).expect(200)).body).toEqual({id: workspaces[0].id, name: 'Product delivery'});
+    expect((await request(app).get('/api/workspaces').set(auth(jane.token)).expect(200)).body.find((workspace: any) => workspace.id === workspaces[0].id).name).toBe('Product delivery');
   });
 
   it('retries invite-code collisions without misreporting them as duplicate email', async () => {
