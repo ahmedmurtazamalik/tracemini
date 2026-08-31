@@ -20,6 +20,8 @@ const existing = (): Config => ({
 describe('CLI device re-pairing', () => {
   it('normalizes guided watch paths and exposes the complete help command', () => {
     expect(normalizeWatchPath('$HOME', process.cwd())).toBe(process.cwd());
+    expect(normalizeWatchPath(`"${process.cwd()}"`)).toBe(process.cwd());
+    expect(normalizeWatchPath(new URL(`file://${process.cwd()}`).href)).toBe(process.cwd());
     expect(() => normalizeWatchPath('relative/path')).toThrow(/absolute path/);
     expect(helpText).toContain('tracemini watch "$HOME/projects"');
     expect(helpText).toContain('tracemini --help');

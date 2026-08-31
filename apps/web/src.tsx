@@ -441,7 +441,7 @@ function Install({ workspaceId, agents, userId, onAgentsChecked }: { workspaceId
           <div>
             <h2>Complete setup in the terminal</h2>
             <p>
-              Follow the guided watch-folder prompt. For example, enter <code>~/projects</code>, then choose whether to add another folder or proceed. The page checks for the device heartbeat automatically.
+              Copy a folder location from your file manager address bar and paste the full path into the guided prompt—for example, <code>/home/murtaza/Murtaza</code>. Then choose whether to add another folder or proceed. The page checks for the device heartbeat automatically.
             </p>
             <p className="muted">
               Setup also explains how to add folders later with <code>tracemini watch "$HOME/path"</code> and how to see all CLI commands with <code>tracemini --help</code>. This install command expires at {new Date(installation.expiresAt).toLocaleTimeString()}.

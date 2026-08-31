@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import {fileURLToPath} from 'node:url';
 import readline from 'node:readline/promises';
 import {stdin, stdout} from 'node:process';
 
@@ -21,12 +22,16 @@ export function createInstallLogger(target = installLogPath()) {
 }
 
 export function normalizeWatchPath(value: string, home = os.homedir()) {
-  const trimmed = value.trim();
-  const expanded = trimmed === '~' ? home
-    : trimmed.startsWith('~/') ? path.join(home, trimmed.slice(2))
-      : trimmed === '$HOME' ? home
-        : trimmed.startsWith('$HOME/') ? path.join(home, trimmed.slice(6))
-          : trimmed;
+  const pasted = value.trim();
+  const trimmed = ((pasted.startsWith('"') && pasted.endsWith('"')) || (pasted.startsWith("'") && pasted.endsWith("'")))
+    ? pasted.slice(1, -1).trim()
+    : pasted;
+  const location = trimmed.startsWith('file://') ? fileURLToPath(trimmed) : trimmed;
+  const expanded = location === '~' ? home
+    : location.startsWith('~/') ? path.join(home, location.slice(2))
+      : location === '$HOME' ? home
+        : location.startsWith('$HOME/') ? path.join(home, location.slice(6))
+          : location;
   if (!path.isAbsolute(expanded)) throw new Error('Enter an absolute path, ~/path, or $HOME/path.');
   const resolved = path.resolve(expanded);
   const stat = fs.statSync(resolved, {throwIfNoEntry: false});
@@ -47,11 +52,12 @@ export async function promptForWatchPaths(input = stdin, output = stdout) {
   const watched: string[] = [];
   try {
     console.log('\nTraceMini observes Git repositories only inside folders you approve.');
-    console.log(`Example: ${path.join(os.homedir(), 'projects')}\n`);
+    console.log('Copy the folder location from your file manager address bar and paste it here.');
+    console.log(`Example: ${path.join(os.homedir(), 'Murtaza')}\n`);
     while (true) {
       let root: string | undefined;
       while (!root) {
-        const answer = await ask('Enter a folder to watch: ');
+        const answer = await ask('Paste a folder location to watch: ');
         if (!answer.trim()) throw new Error('A watch path is required to finish setup.');
         try {
           root = normalizeWatchPath(answer);
