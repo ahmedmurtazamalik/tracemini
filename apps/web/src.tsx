@@ -25,6 +25,7 @@ import { repositorySelectionState, type RepositoryCandidate } from "./repository
 import { activityDateRange, activityDisplayPoints, activityGraphPath, activityGraphTicks, activitySeriesColorMap, activityUserSummary, compactActivityNumber, type ActivityRangePreset } from "./today-activity.js";
 import { InvitationInbox, ReportSchedule, WorkspaceInvitations } from "./collaboration.js";
 import { HelpDrawer, InfoTip, type HelpSection } from "./help.js";
+import { activitySummary } from "./activity-summary.js";
 import "./style.css";
 
 class ApiRequestError extends Error {
@@ -608,10 +609,7 @@ function Activity({
                 </button>
               </div>
               <p>
-                <strong>{event.type}</strong>{" "}
-                {event.data.message || event.data.branch || ""}
-                {event.type === "push" &&
-                  ` · ${event.data.confirmation || "unconfirmed"}`}
+                <strong>{event.type}</strong>{activitySummary(event) && ` · ${activitySummary(event)}`}
               </p>
               <time>{formatInTimezone(event.occurred_at, timezone)}</time>
             </div>
