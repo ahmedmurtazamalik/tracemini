@@ -799,7 +799,11 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
       const repository: any = repositories.find((item: any) => Number(item.id) === repositoryId);
       if (!repository) return undefined;
       const data = JSON.stringify(req.body.data || {});
-      let event: any = await db.prepare(`SELECT e.id FROM activity_events e JOIN activity_event_repositories aer ON aer.event_id=e.id
+      const commitSha = req.body.type === 'commit' && typeof req.body.data?.commitSha === 'string' ? req.body.data.commitSha : null;
+      let event: any = commitSha ? await db.prepare(`SELECT e.id FROM activity_events e JOIN activity_event_repositories aer ON aer.event_id=e.id
+        JOIN repository_candidates c ON c.repository_id=aer.repository_id
+        WHERE c.agent_id=? AND c.local_key=? AND c.repository_fingerprint=? AND e.agent_id=? AND e.type='commit' AND e.data::JSONB->>'commitSha'=? LIMIT 1`).get(req.agent.id, req.body.localKey, fingerprint, req.agent.id, commitSha) : undefined;
+      event ||= await db.prepare(`SELECT e.id FROM activity_events e JOIN activity_event_repositories aer ON aer.event_id=e.id
         JOIN repository_candidates c ON c.repository_id=aer.repository_id
         WHERE c.agent_id=? AND c.local_key=? AND c.repository_fingerprint=? AND e.agent_id=? AND e.type=? AND e.occurred_at=? AND e.data=CAST(? AS JSONB) LIMIT 1`).get(req.agent.id, req.body.localKey, fingerprint, req.agent.id, req.body.type, occurredAt, data);
       const result = event ? {changes: 0} : await db.prepare('INSERT INTO activity_events(event_key,user_id,agent_id,repository_id,type,occurred_at,data,created_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING').run(req.body.eventKey, req.agent.user_id, req.agent.id, repository.id, req.body.type, occurredAt, data, now());

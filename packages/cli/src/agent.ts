@@ -558,7 +558,6 @@ export async function tick(config: Config, indexState: Map<string, {mtime: numbe
   await processRepositoryRefreshRequests(config, work.refreshRequests || []);
   await reconcileConfiguredCloneIdentities(config, indexState);
   await processRepositorySelections(config, indexState, work.repositorySelections || []);
-  await flush(config);
   await processPushes(config, work.pushes || []);
   const stagedPaths = new Set<string>();
   for (const clone of config.clones) {
@@ -568,6 +567,16 @@ export async function tick(config: Config, indexState: Map<string, {mtime: numbe
       const current = readRepositoryState(clone.path);
       const afterReadFingerprint = repositoryFingerprint(clone.path);
       if (afterReadFingerprint !== beforeReadFingerprint) throw new Error('repository identity changed');
+      if (clone.historyHeads?.length) {
+        const commits = commitHistoryAfterHeads(clone.path, clone.historyHeads) || [];
+        const currentHeads = historyHeads(clone.path);
+        for (const data of commits) {
+          if (!enqueue(config, {eventKey: eventKey(['commit-history', config.agentId, afterReadFingerprint, data.commitSha]), workspaceId: clone.workspaceId, repositoryId: clone.repositoryId, localKey: clone.path, identityFingerprint: afterReadFingerprint, type: 'commit', occurredAt: data.commitTimestamp, data: {...data, importedFromHistory: true}, attempts: 0, nextAttempt: 0})) {
+            throw new Error('repository commit recovery could not be queued');
+          }
+        }
+        clone.historyHeads = currentHeads;
+      }
       if (clone.headSha && clone.branch) {
         const observation = observeRepositoryState({branch: clone.branch, headSha: clone.headSha, remoteHeadSha: clone.remoteHeadSha}, current);
         if (observation.event) {
@@ -609,6 +618,7 @@ export async function tick(config: Config, indexState: Map<string, {mtime: numbe
     } catch {}
   }
   saveConfig(config, {preserveCurrentScalars: true});
+  await flush(config);
 }
 
 export function startHeartbeatLoop(
