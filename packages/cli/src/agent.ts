@@ -492,7 +492,18 @@ export function contextPrompt(context: any, clones: Config['clones']) {
   const includeDiff = Boolean(context.job.include_diff);
   const format = context.job.format === 'summary' ? 'summary' : 'detailed';
   const workspaceReport = context.job.report_scope === 'workspace';
-  const contributors = [...new Set(context.events.map((event: any) => event.user_name).filter(Boolean))];
+  const engineerName = (name: unknown) => {
+    const accountName = String(name || '').trim();
+    return ({
+      ali: 'Ali',
+      murtaza: 'Murtaza',
+      ashar: 'Ashar',
+      uwu: 'Ashar',
+      ibrahim: 'Ibrahim',
+      jerry: 'Ibrahim',
+    } as Record<string, string>)[accountName.toLowerCase()] || accountName;
+  };
+  const contributors = [...new Set(context.events.map((event: any) => engineerName(event.user_name)).filter(Boolean))];
   let text = `Generate a factual Markdown ${workspaceReport ? 'whole-workspace' : 'individual'} report about engineering contributions for ${context.job.start_date} through ${context.job.end_date} (${timezone}). Use only the supplied Git evidence. Do not modify files.\n\n`;
   if (workspaceReport) text += `This report covers the whole workspace. Contributors with qualifying evidence: ${contributors.join(', ') || 'none'}. Include every listed contributor and attribute their work accurately. Organize the result with a workspace overview followed by a clearly labeled section for each contributor; do not collapse the report into the job owner's contributions.\n\n`;
   text += format === 'summary'
@@ -513,7 +524,7 @@ export function contextPrompt(context: any, clones: Config['clones']) {
     for (const event of events) {
       const data = event.data || {};
       text += `\n### ${event.type}${data.commitSha ? ` ${String(data.commitSha).slice(0, 12)}` : ''}\n`;
-      if (event.user_name) text += `Contributor: ${event.user_name}\n`;
+      if (event.user_name) text += `Contributor: ${engineerName(event.user_name)}\n`;
       text += `Timestamp: ${event.occurred_at}\nEvidence:\n${JSON.stringify(redactEvidence(data), null, 2)}\n`;
       if (clone && event.type === 'commit' && data.commitSha) {
         try {

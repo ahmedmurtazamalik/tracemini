@@ -55,4 +55,20 @@ describe('engineering report prompt', () => {
     expect(prompt).toContain('do not add "no qualifying contribution" commentary');
     expect(prompt).toContain('do not invent clock-time boundaries');
   });
+
+  it('uses engineer names instead of TraceMini account usernames', () => {
+    const prompt = contextPrompt({
+      job: {user_id: 1, report_scope: 'workspace', start_date: '2026-08-26', end_date: '2026-08-26'},
+      events: [
+        {user_id: 1, user_name: 'murtaza', repository_name: 'tracemini', type: 'commit', occurred_at: '2026-08-26T10:00:00Z', data: {}},
+        {user_id: 2, user_name: 'ali', repository_name: 'tracemini', type: 'commit', occurred_at: '2026-08-26T11:00:00Z', data: {}},
+        {user_id: 3, user_name: 'UwU', repository_name: 'tracemini', type: 'commit', occurred_at: '2026-08-26T12:00:00Z', data: {}},
+        {user_id: 4, user_name: 'Jerry', repository_name: 'tracemini', type: 'commit', occurred_at: '2026-08-26T13:00:00Z', data: {}},
+      ],
+    }, []);
+
+    expect(prompt).toContain('Contributors with qualifying evidence: Murtaza, Ali, Ashar, Ibrahim');
+    expect(prompt).toContain('Contributor: Ashar');
+    expect(prompt).toContain('Contributor: Ibrahim');
+  });
 });
