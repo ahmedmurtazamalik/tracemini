@@ -28,6 +28,12 @@ export async function openTestDb() {
       return new Date(new Date(origin).getTime() + Math.floor((new Date(source).getTime() - new Date(origin).getTime()) / strideMs) * strideMs);
     },
   });
+  memory.public.registerFunction({
+    name: 'replace',
+    args: [DataType.text, DataType.text, DataType.text],
+    returns: DataType.text,
+    implementation: (value: string, search: string, replacement: string) => value.split(search).join(replacement),
+  });
   const adapter = memory.adapters.createPg();
   const db = new DB(new adapter.Pool() as unknown as Pool);
   // Fresh pg-mem schemas already use the current native types. Compatibility

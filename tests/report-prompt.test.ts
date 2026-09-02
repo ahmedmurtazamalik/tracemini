@@ -70,5 +70,14 @@ describe('engineering report prompt', () => {
     expect(prompt).toContain('Contributors with qualifying evidence: Murtaza, Ali, Ashar, Ibrahim');
     expect(prompt).toContain('Contributor: Ashar');
     expect(prompt).toContain('Contributor: Ibrahim');
+    expect(prompt).not.toContain('UwU');
+    expect(prompt).not.toContain('Jerry');
+
+    const personalPrompt = contextPrompt({
+      job: {user_id: 3, start_date: '2026-08-26', end_date: '2026-08-26'},
+      events: [{user_id: 3, user_name: 'UwU', repository_name: 'tracemini', type: 'commit', occurred_at: '2026-08-26T12:00:00Z', data: {authorName: 'UwU'}}],
+    }, []);
+    expect(personalPrompt).toContain('"authorName": "Ashar"');
+    expect(personalPrompt).not.toContain('UwU');
   });
 });

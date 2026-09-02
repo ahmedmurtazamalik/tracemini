@@ -40,7 +40,7 @@ describe('PostgreSQL database', () => {
     const db = await openTestDb();
     try {
       const migrations = await db.query('SELECT version,name,checksum FROM schema_migrations ORDER BY version');
-      expect(migrations.rows.map((row: any) => row.version)).toEqual([1, 3, 4, 5, 6, 9, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]);
+      expect(migrations.rows.map((row: any) => row.version)).toEqual([1, 3, 4, 5, 6, 9, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]);
       for (const migration of migrations.rows) expect(migration.checksum).toMatch(/^[a-f0-9]{64}$/);
       const reportJobColumns = await db.query("SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='report_jobs'");
       expect(reportJobColumns.rows.map((row: any) => row.column_name)).toEqual(expect.arrayContaining(['custom_prompt', 'target_report_id', 'report_name', 'format', 'report_scope', 'schedule_id', 'scheduled_for', 'coalesced_runs', 'notify_slack']));
@@ -72,6 +72,32 @@ describe('PostgreSQL database', () => {
     } finally {
       await db.close();
     }
+  });
+
+  it('replaces legacy account aliases in profiles, default workspaces, and stored reports', async () => {
+    const {DataType, newDb} = await import('pg-mem');
+    const {canonicalEngineerNamesMigrationSql} = await import('../apps/server/src/db.js');
+    const memory = newDb();
+    memory.public.registerFunction({
+      name: 'replace',
+      args: [DataType.text, DataType.text, DataType.text],
+      returns: DataType.text,
+      implementation: (value: string, search: string, replacement: string) => value.split(search).join(replacement),
+    });
+    memory.public.none(`
+      CREATE TABLE users(id BIGSERIAL PRIMARY KEY,name TEXT NOT NULL);
+      CREATE TABLE workspaces(id BIGSERIAL PRIMARY KEY,name TEXT NOT NULL);
+      CREATE TABLE reports(id BIGSERIAL PRIMARY KEY,markdown TEXT NOT NULL);
+      INSERT INTO users(name) VALUES('UwU'),('Jerry');
+      INSERT INTO workspaces(name) VALUES('UwU''s workspace'),('Jerry''s workspace'),('Jerry project');
+      INSERT INTO reports(markdown) VALUES('# UwU\n\nWorked with Jerry.');
+    `);
+    memory.public.none(canonicalEngineerNamesMigrationSql);
+    expect(memory.public.many('SELECT name FROM users ORDER BY id')).toEqual([{name: 'Ashar'}, {name: 'Ibrahim'}]);
+    expect(memory.public.many('SELECT name FROM workspaces ORDER BY id')).toEqual([
+      {name: "Ashar's workspace"}, {name: "Ibrahim's workspace"}, {name: 'Jerry project'},
+    ]);
+    expect(memory.public.one('SELECT markdown FROM reports')).toEqual({markdown: '# Ashar\n\nWorked with Ibrahim.'});
   });
 
   it('upgrades legacy Member rows to Developer without losing workspace access', async () => {

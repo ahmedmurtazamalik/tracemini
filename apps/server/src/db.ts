@@ -258,6 +258,14 @@ const reportScheduleNamingMigrationSql = `
 ALTER TABLE report_schedules ADD COLUMN IF NOT EXISTS name TEXT NOT NULL DEFAULT 'Scheduled workspace report';
 `;
 
+export const canonicalEngineerNamesMigrationSql = `
+UPDATE users SET name='Ashar' WHERE LOWER(name) IN ('uwu','ashar');
+UPDATE users SET name='Ibrahim' WHERE LOWER(name) IN ('jerry','ibrahim');
+UPDATE workspaces SET name='Ashar''s workspace' WHERE LOWER(name) IN ('uwu''s workspace','ashar''s workspace');
+UPDATE workspaces SET name='Ibrahim''s workspace' WHERE LOWER(name) IN ('jerry''s workspace','ibrahim''s workspace');
+UPDATE reports SET markdown=REPLACE(REPLACE(markdown,'UwU','Ashar'),'Jerry','Ibrahim');
+`;
+
 export function normalizePostgresConnectionString(connectionString: string) {
   const url = new URL(connectionString);
   const isSupabasePooler = url.hostname === 'pooler.supabase.com' || url.hostname.endsWith('.pooler.supabase.com');
@@ -379,6 +387,7 @@ export class DB {
         {version: 20, name: 'optional Slack report notifications', sql: slackReportNotificationMigrationSql},
         {version: 21, name: 'shared activity observations', sql: sharedActivityMigrationSql},
         {version: 22, name: 'scheduled report naming', sql: reportScheduleNamingMigrationSql},
+        {version: 23, name: 'canonical engineer names', sql: canonicalEngineerNamesMigrationSql},
       ];
       for (const migration of migrations) {
         const checksum = crypto.createHash('sha256').update(migration.sql).digest('hex');

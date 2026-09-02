@@ -437,11 +437,25 @@ function redactEvidence(value: unknown, key = ''): unknown {
   if (sensitiveLabel.test(key)) return '[REDACTED SENSITIVE VALUE]';
   if (typeof value === 'string') {
     const redacted = redactSensitiveDiff(value);
-    return redacted.includes('[REDACTED ') ? '[REDACTED SENSITIVE VALUE]' : value;
+    if (redacted.includes('[REDACTED ')) return '[REDACTED SENSITIVE VALUE]';
+    if (/^authorName$/i.test(key)) return engineerName(value);
+    return value;
   }
   if (Array.isArray(value)) return value.map(item => redactEvidence(item));
   if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([field, item]) => [field, redactEvidence(item, field)]));
   return value;
+}
+
+function engineerName(name: unknown) {
+  const accountName = String(name || '').trim();
+  return ({
+    ali: 'Ali',
+    murtaza: 'Murtaza',
+    ashar: 'Ashar',
+    uwu: 'Ashar',
+    ibrahim: 'Ibrahim',
+    jerry: 'Ibrahim',
+  } as Record<string, string>)[accountName.toLowerCase()] || accountName;
 }
 
 export function contextPrompt(context: any, clones: Config['clones']) {
@@ -492,17 +506,6 @@ export function contextPrompt(context: any, clones: Config['clones']) {
   const includeDiff = Boolean(context.job.include_diff);
   const format = context.job.format === 'summary' ? 'summary' : 'detailed';
   const workspaceReport = context.job.report_scope === 'workspace';
-  const engineerName = (name: unknown) => {
-    const accountName = String(name || '').trim();
-    return ({
-      ali: 'Ali',
-      murtaza: 'Murtaza',
-      ashar: 'Ashar',
-      uwu: 'Ashar',
-      ibrahim: 'Ibrahim',
-      jerry: 'Ibrahim',
-    } as Record<string, string>)[accountName.toLowerCase()] || accountName;
-  };
   const contributors = [...new Set(context.events.map((event: any) => engineerName(event.user_name)).filter(Boolean))];
   let text = `Generate a factual Markdown ${workspaceReport ? 'whole-workspace' : 'individual'} report about engineering contributions for ${context.job.start_date} through ${context.job.end_date} (${timezone}). Use only the supplied Git evidence. Do not modify files.\n\n`;
   if (workspaceReport) text += `This report covers the whole workspace. Contributors with qualifying evidence: ${contributors.join(', ') || 'none'}. Include every listed contributor and attribute their work accurately. Organize the result with a workspace overview followed by a clearly labeled section for each contributor; do not collapse the report into the job owner's contributions.\n\n`;
