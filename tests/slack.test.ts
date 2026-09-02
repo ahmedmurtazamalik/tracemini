@@ -28,26 +28,24 @@ describe('Slack report notifications', () => {
     expect(chunks.every(chunk => chunk.length <= 2_900)).toBe(true);
   });
 
-  it('sends the complete converted report with workspace context and the link last', async () => {
+  it('sends the complete converted report with workspace context and no TraceMini link', async () => {
     const post = vi.fn().mockResolvedValue({ok: true});
     vi.stubGlobal('fetch', post);
     await sendSlackReport('https://hooks.slack.test/report', {
       id: 42, workspaceId: 7, workspaceName: 'Trace Mini', name: 'Daily delivery',
       startDate: '2026-08-26', endDate: '2026-08-26', scope: 'workspace',
       markdown: '# Work completed\n\n**Shipped** Slack reports.\n\n- Preserved the entire report.',
-    }, 'https://trace.example');
+    });
 
     const [url, request] = post.mock.calls[0];
     const payload = JSON.parse(request.body);
     expect(url).toBe('https://hooks.slack.test/report');
-    expect(payload.text).toBe('Daily delivery — Trace Mini — August 26, 2026\nhttps://trace.example/workspaces/7/reports/42');
+    expect(payload.text).toBe('Daily delivery — Trace Mini — August 26, 2026');
     expect(payload.blocks).toEqual([
       {type: 'header', text: {type: 'plain_text', text: 'Daily delivery'}},
       {type: 'context', elements: [{type: 'mrkdwn', text: '*Workspace:* Trace Mini  •  *Range:* August 26, 2026  •  *Type:* Workspace report'}]},
       {type: 'divider'},
       {type: 'section', text: {type: 'mrkdwn', text: '*Work completed*\n\n*Shipped* Slack reports.\n\n• Preserved the entire report.'}},
-      {type: 'divider'},
-      {type: 'section', text: {type: 'mrkdwn', text: '<https://trace.example/workspaces/7/reports/42|Open this report in TraceMini>'}},
     ]);
   });
 });

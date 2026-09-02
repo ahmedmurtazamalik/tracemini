@@ -1127,7 +1127,7 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
     if (completed.notifySlack) {
       const webhookUrl = process.env.SLACK_REPORT_WEBHOOK_URL;
       if (!webhookUrl) console.error('Slack report notification skipped: SLACK_REPORT_WEBHOOK_URL is not configured');
-      else try { await slackNotifier(webhookUrl, completed, requestOrigin(req)); }
+      else try { await slackNotifier(webhookUrl, completed); }
       catch (error) { console.error('Slack report notification failed:', error); }
     }
     res.status(201).json({ok: true});

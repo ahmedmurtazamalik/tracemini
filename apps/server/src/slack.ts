@@ -90,8 +90,7 @@ export function chunkSlackMrkdwn(text: string, limit = 2_900) {
   return chunks;
 }
 
-export async function sendSlackReport(webhookUrl: string, report: SlackReport, origin: string) {
-  const link = `${origin}/workspaces/${report.workspaceId}/reports/${report.id}`;
+export async function sendSlackReport(webhookUrl: string, report: SlackReport) {
   const scope = report.scope === 'workspace' ? 'Workspace report' : 'Personal report';
   const range = slackReportRange(report.startDate, report.endDate);
   const reportBlocks = chunkSlackMrkdwn(markdownToSlackMrkdwn(report.markdown));
@@ -101,13 +100,11 @@ export async function sendSlackReport(webhookUrl: string, report: SlackReport, o
     {type: 'context', elements: [{type: 'mrkdwn', text: `*Workspace:* ${escaped(report.workspaceName)}  •  *Range:* ${range}  •  *Type:* ${scope}`}]},
     {type: 'divider'},
     ...reportBlocks.map(text => ({type: 'section', text: {type: 'mrkdwn', text}})),
-    {type: 'divider'},
-    {type: 'section', text: {type: 'mrkdwn', text: `<${link}|Open this report in TraceMini>`}},
   ];
   const response = await fetch(webhookUrl, {
     method: 'POST',
     headers: {'content-type': 'application/json'},
-    body: JSON.stringify({text: `${report.name} — ${report.workspaceName} — ${range}\n${link}`, blocks}),
+    body: JSON.stringify({text: `${report.name} — ${report.workspaceName} — ${range}`, blocks}),
     signal: AbortSignal.timeout(8_000),
   });
   if (!response.ok) throw new Error(`Slack webhook returned ${response.status}`);
