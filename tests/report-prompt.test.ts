@@ -25,6 +25,10 @@ describe('engineering report prompt', () => {
     expect(prompt).toContain('Use an executive summary followed by project outcomes.');
     expect(prompt).toContain('Use only the supplied Git evidence');
     expect(prompt).toContain('2 older scheduled occurrence(s) were coalesced');
+    expect(prompt).toContain('Wrap every repository name in inline code backticks');
+    expect(prompt).toContain('for example, `TraceMini`');
+    expect(prompt).toContain('Use bold text sparingly');
+    expect(prompt).toContain('Do not use tables');
   });
 
   it('uses visibly different structures for summary and detailed reports', () => {
