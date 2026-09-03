@@ -5,6 +5,8 @@ describe('local document agent availability', () => {
   it('recognizes only the missing local OCR dependency guidance', () => {
     expect(OCR_INSTALL_COMMAND).toBe('sudo apt-get install -y poppler-utils tesseract-ocr');
     expect(requiresOcrInstall(new Error(`Local OCR is unavailable. Run: ${OCR_INSTALL_COMMAND}`))).toBe(true);
+    expect(requiresOcrInstall(new Error('This scanned PDF needs local OCR, but pdftoppm is not installed.'))).toBe(true);
+    expect(requiresOcrInstall(new Error('Install the tesseract-ocr package, then try again.'))).toBe(true);
     expect(requiresOcrInstall(new Error('No readable text was found in the scanned PDF.'))).toBe(false);
   });
 
