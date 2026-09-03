@@ -1,5 +1,6 @@
 import type {DB} from './db.js';
 import {fixedOffsetMinutes} from './timezone.js';
+import {decodeScheduleDays, encodeReportContext} from './document-context.js';
 
 export type ReportFormat = 'summary' | 'detailed';
 export type ReportScheduleFrequency = 'DAILY' | 'WEEKDAYS' | 'SELECTED_DAYS';
@@ -140,14 +141,15 @@ export async function materializeDueReportSchedules(db: DB, userId: number, at =
       if (!(await db.prepare("SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=? AND role='Manager'").get(scope.workspace_id, userId))) return 0;
       const schedule: any = await db.prepare('SELECT * FROM report_schedules WHERE id=? AND configured_by=? AND enabled=TRUE AND next_run_at<=? FOR UPDATE').get(item.id, userId, at.toISOString());
       if (!schedule) return 0;
-      const rule = validateScheduleRule({frequency: schedule.frequency, selectedDays: schedule.selected_days, localTime: schedule.local_time, timezone: schedule.timezone});
+      const scheduleState = decodeScheduleDays(schedule.selected_days);
+      const rule = validateScheduleRule({frequency: schedule.frequency, selectedDays: scheduleState.days, localTime: schedule.local_time, timezone: schedule.timezone});
       const firstMissedRun = new Date(schedule.next_run_at);
       const scheduledFor = latestScheduledRun(rule, at);
       const coalescedRuns = coalescedRunCount(rule, firstMissedRun, scheduledFor);
       const endDate = subtractDays(localDateKey(scheduledFor, schedule.timezone), 1);
       const startDate = subtractDays(endDate, Number(schedule.window_days) - 1);
-      const result = await db.prepare("INSERT INTO report_jobs(workspace_id,user_id,reporter,start_date,end_date,timezone,include_diff,notify_slack,status,report_name,format,report_scope,schedule_id,scheduled_for,coalesced_runs,created_at) VALUES(?,?,?,?,?,?,?,?,'pending',? ,?,'workspace',?,?,?,?) ON CONFLICT (schedule_id,scheduled_for) DO NOTHING RETURNING id")
-        .run(schedule.workspace_id, schedule.configured_by, schedule.reporter, startDate, endDate, schedule.timezone, schedule.include_diff, schedule.notify_slack, `${schedule.name || 'Scheduled workspace report'} · ${startDate} — ${endDate}`, schedule.format, schedule.id, scheduledFor.toISOString(), coalescedRuns, at.toISOString());
+      const result = await db.prepare("INSERT INTO report_jobs(workspace_id,user_id,reporter,start_date,end_date,timezone,include_diff,notify_slack,status,report_name,format,report_scope,schedule_id,scheduled_for,coalesced_runs,custom_prompt,created_at) VALUES(?,?,?,?,?,?,?,?,'pending',? ,?,'workspace',?,?,?,?,?) ON CONFLICT (schedule_id,scheduled_for) DO NOTHING RETURNING id")
+        .run(schedule.workspace_id, schedule.configured_by, schedule.reporter, startDate, endDate, schedule.timezone, schedule.include_diff, schedule.notify_slack, `${schedule.name || 'Scheduled workspace report'} · ${startDate} — ${endDate}`, schedule.format, schedule.id, scheduledFor.toISOString(), coalescedRuns, encodeReportContext(null, scheduleState.documents), at.toISOString());
       const nextRun = nextScheduledRun(rule, scheduledFor);
       await db.prepare('UPDATE report_schedules SET next_run_at=?,updated_at=? WHERE id=?').run(nextRun.toISOString(), at.toISOString(), schedule.id);
       return result.changes ? 1 : 0;

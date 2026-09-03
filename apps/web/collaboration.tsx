@@ -1,6 +1,7 @@
 import {type FormEvent, type KeyboardEvent as ReactKeyboardEvent, useEffect, useMemo, useRef, useState} from 'react';
 import {formatInTimezone, TIMEZONE_OPTIONS} from './timezone.js';
 import {InfoTip} from './help.js';
+import {documentIdentity, hostedDocument, type LocalContextDocument} from './document-context.js';
 
 type Api = (path: string, options?: RequestInit) => Promise<any>;
 
@@ -105,7 +106,8 @@ export function WorkspaceInvitations({api, workspaceId}: {api: Api; workspaceId:
 
 const weekdays = [{id: 1, label: 'Mon'}, {id: 2, label: 'Tue'}, {id: 3, label: 'Wed'}, {id: 4, label: 'Thu'}, {id: 5, label: 'Fri'}, {id: 6, label: 'Sat'}, {id: 7, label: 'Sun'}];
 
-export function ReportSchedule({api, workspaceId, timezone}: {api: Api; workspaceId: number; timezone: string}) {
+export function ReportSchedule({api, workspaceId, timezone, documents = []}: {api: Api; workspaceId: number; timezone: string; documents?: LocalContextDocument[]}) {
+  const documentSetKey = documents.map(documentIdentity).join('|');
   const [schedule, setSchedule] = useState<any>(null);
   const [editing, setEditing] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
@@ -120,6 +122,7 @@ export function ReportSchedule({api, workspaceId, timezone}: {api: Api; workspac
   const [includeDiff, setIncludeDiff] = useState(false);
   const [notifySlack, setNotifySlack] = useState(false);
   const [windowDays, setWindowDays] = useState(7);
+  const [selectedDocumentIds, setSelectedDocumentIds] = useState<string[]>([]);
   const [nextRun, setNextRun] = useState<string>();
   const [pending, setPending] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -133,18 +136,20 @@ export function ReportSchedule({api, workspaceId, timezone}: {api: Api; workspac
     api(`/workspaces/${workspaceId}/report-schedule`).then((schedule: any) => {
       if (!alive.current || generation !== loadGeneration.current) return;
       setSchedule(schedule); setEditing(!schedule); setConfirmingDelete(false);
-      if (!schedule) { setName('Scheduled workspace report'); setEnabled(true); setFrequency('WEEKDAYS'); setSelectedDays([]); setLocalTime('09:00'); setZone(timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'); setReporter('hermes'); setFormat('summary'); setIncludeDiff(false); setNotifySlack(false); setWindowDays(7); return; }
-      setName(schedule.name || 'Scheduled workspace report'); setEnabled(Boolean(schedule.enabled)); setFrequency(schedule.frequency); setSelectedDays(schedule.selected_days || []); setLocalTime(schedule.local_time); setZone(schedule.timezone); setReporter(schedule.reporter); setFormat(schedule.format); setIncludeDiff(Boolean(schedule.include_diff)); setNotifySlack(Boolean(schedule.notify_slack)); setWindowDays(Number(schedule.window_days)); setNextRun(schedule.next_run_at);
+      if (!schedule) { setName('Scheduled workspace report'); setEnabled(true); setFrequency('WEEKDAYS'); setSelectedDays([]); setSelectedDocumentIds([]); setLocalTime('09:00'); setZone(timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'); setReporter('hermes'); setFormat('summary'); setIncludeDiff(false); setNotifySlack(false); setWindowDays(7); return; }
+      const selected = new Set((schedule.document_context || []).map(documentIdentity));
+      setName(schedule.name || 'Scheduled workspace report'); setEnabled(Boolean(schedule.enabled)); setFrequency(schedule.frequency); setSelectedDays(schedule.selected_days || []); setSelectedDocumentIds(documents.filter(document => selected.has(documentIdentity(document))).map(document => document.localId)); setLocalTime(schedule.local_time); setZone(schedule.timezone); setReporter(schedule.reporter); setFormat(schedule.format); setIncludeDiff(Boolean(schedule.include_diff)); setNotifySlack(Boolean(schedule.notify_slack)); setWindowDays(Number(schedule.window_days)); setNextRun(schedule.next_run_at);
     }).catch((caught: any) => { if (alive.current && generation === loadGeneration.current) setError(caught.message); })
       .finally(() => { if (alive.current && generation === loadGeneration.current) setLoading(false); });
     return () => { loadGeneration.current += 1; };
-  }, [workspaceId]);
+  }, [workspaceId, documentSetKey]);
   const nextLabel = useMemo(() => nextRun ? formatInTimezone(nextRun, zone) : undefined, [nextRun, zone]);
   const save = async (event: FormEvent) => {
     const generation = loadGeneration.current;
     event.preventDefault(); setPending(true); setError(''); setMessage('');
     try {
-      const schedule = await api(`/workspaces/${workspaceId}/report-schedule`, {method: 'PUT', body: JSON.stringify({name, enabled, frequency, selectedDays, localTime, timezone: zone, reporter, format, includeDiff, notifySlack, windowDays})});
+      const documentContext = documents.filter(document => selectedDocumentIds.includes(document.localId)).map(hostedDocument);
+      const schedule = await api(`/workspaces/${workspaceId}/report-schedule`, {method: 'PUT', body: JSON.stringify({name, enabled, frequency, selectedDays, localTime, timezone: zone, reporter, format, includeDiff, notifySlack, windowDays, documentContext})});
       if (!alive.current || generation !== loadGeneration.current) return; setSchedule(schedule); setName(schedule.name); setNextRun(schedule.next_run_at); setEditing(false); setMessage(enabled ? 'Schedule saved.' : 'Schedule paused.');
     } catch (caught: any) { if (alive.current && generation === loadGeneration.current) setError(caught.message); }
     finally { if (alive.current && generation === loadGeneration.current) setPending(false); }
@@ -155,7 +160,7 @@ export function ReportSchedule({api, workspaceId, timezone}: {api: Api; workspac
     try {
       await api(`/workspaces/${workspaceId}/report-schedule`, {method: 'DELETE'});
       if (!alive.current || generation !== loadGeneration.current) return;
-      setSchedule(null); setName('Scheduled workspace report'); setEnabled(true); setFrequency('WEEKDAYS'); setSelectedDays([]); setLocalTime('09:00'); setReporter('hermes'); setFormat('summary'); setIncludeDiff(false); setNotifySlack(false); setWindowDays(7); setNextRun(undefined); setEditing(true); setConfirmingDelete(false); setMessage('Schedule deleted.');
+      setSchedule(null); setName('Scheduled workspace report'); setEnabled(true); setFrequency('WEEKDAYS'); setSelectedDays([]); setSelectedDocumentIds([]); setLocalTime('09:00'); setReporter('hermes'); setFormat('summary'); setIncludeDiff(false); setNotifySlack(false); setWindowDays(7); setNextRun(undefined); setEditing(true); setConfirmingDelete(false); setMessage('Schedule deleted.');
     } catch (caught: any) { if (alive.current && generation === loadGeneration.current) setError(caught.message); }
     finally { if (alive.current && generation === loadGeneration.current) setPending(false); }
   };
@@ -178,6 +183,7 @@ export function ReportSchedule({api, workspaceId, timezone}: {api: Api; workspac
       <label>Writing style<select value={format} onChange={event => setFormat(event.target.value)}><option value="summary">Bullet-point summary</option><option value="detailed">Detailed report</option></select></label>
       <label className="diff-consent"><input type="checkbox" checked={includeDiff} onChange={event => setIncludeDiff(event.target.checked)} /><span><strong>Share bounded diff excerpts</strong><small>Add redacted code excerpts for better detail.</small></span></label>
       <label className="diff-consent"><input type="checkbox" checked={notifySlack} onChange={event => setNotifySlack(event.target.checked)} /><span><strong>Notify Slack</strong><small>Post the full report when it is ready.</small></span></label>
+      {documents.length > 0 && <fieldset className="document-selector span-all"><legend>Include document context in scheduled reports</legend>{documents.map(document => <label key={document.localId}><input type="checkbox" checked={selectedDocumentIds.includes(document.localId)} onChange={() => setSelectedDocumentIds(current => current.includes(document.localId) ? current.filter(id => id !== document.localId) : [...current, document.localId].slice(0, 5))} /><span><strong>{document.displayName}</strong><small>{document.metadata.shortSummary}</small></span></label>)}</fieldset>}
       <div className="actions span-two"><button className="button primary" disabled={pending || (frequency === 'SELECTED_DAYS' && !selectedDays.length)} type="submit">{pending ? 'Saving…' : schedule ? 'Save changes' : 'Create schedule'}</button>{schedule && <button className="button secondary" disabled={pending} type="button" onClick={() => setEditing(false)}>Cancel</button>}</div>
     </form>}
     {message && <div className="alert success" role="status">{message}</div>}{error && <div className="alert error" role="alert">{error}</div>}

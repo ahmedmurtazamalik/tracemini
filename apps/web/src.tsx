@@ -25,6 +25,7 @@ import { repositorySelectionState, type RepositoryCandidate } from "./repository
 import { activityDateRange, activityDisplayPoints, activityGraphPath, activityGraphTicks, activitySeriesColorMap, activityUserSummary, compactActivityNumber, type ActivityRangePreset } from "./today-activity.js";
 import { InvitationInbox, ReportSchedule, WorkspaceInvitations } from "./collaboration.js";
 import { HelpDrawer, InfoTip, type HelpSection } from "./help.js";
+import {deleteLocalDocument, deriveLocalDocument, documentIdentity, hostedDocument, listLocalDocuments, type LocalContextDocument} from "./document-context.js";
 import { activitySummary } from "./activity-summary.js";
 import "./style.css";
 
@@ -1424,7 +1425,7 @@ function ReportDetail({ report, workspaceId, currentUserId, reload }: any) {
           <div className="section-heading">
             <div><span>Regenerate report</span><h2>Describe the structure or emphasis you want</h2></div>
           </div>
-          <div className="reports-controls">
+          <div className="reports-controls regeneration-controls">
             <label>
               Generator
               <select value={reporter} onChange={(event) => setReporter(event.target.value)}>
@@ -1439,13 +1440,13 @@ function ReportDetail({ report, workspaceId, currentUserId, reload }: any) {
                 <option value="detailed">Detailed report</option>
               </select>
             </label>
-            <label className="span-two">
+            <label>
               Instructions
-              <textarea required maxLength={4000} rows={4} value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="Example: Lead with an executive summary, then group contributions by project and outcome." />
+              <textarea required maxLength={4000} rows={3} value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="Example: Lead with an executive summary, then group contributions by project and outcome." />
             </label>
-            <button className="button primary" disabled={pending || !prompt.trim()} type="submit">
+            <div className="actions span-all regeneration-actions"><button className="button primary" disabled={pending || !prompt.trim()} type="submit">
               {pending ? "Regenerating…" : "Regenerate report"}
-            </button>
+            </button></div>
           </div>
         </form>
       )}
@@ -1482,6 +1483,10 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error, timezon
   const [actionError, setActionError] = useState("");
   const [message, setMessage] = useState("");
   const [refreshPending, setRefreshPending] = useState(false);
+  const [documents, setDocuments] = useState<LocalContextDocument[]>([]);
+  const [selectedDocumentIds, setSelectedDocumentIds] = useState<string[]>([]);
+  const [documentPending, setDocumentPending] = useState(false);
+  const [documentStatus, setDocumentStatus] = useState("Checking the local TraceMini service…");
   const operationScope = useRef({workspaceId, generation: 0});
   const pollingGeneration = useRef(0);
   const restorationGeneration = useRef(0);
@@ -1494,6 +1499,15 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error, timezon
     restorationGeneration.current += 1;
   }, []);
   const progress = job ? reportJobProgress(job) : undefined;
+  useEffect(() => {
+    let active = true;
+    setDocuments([]); setSelectedDocumentIds([]); setDocumentStatus("Checking the local TraceMini service…");
+    listLocalDocuments(workspaceId).then(rows => {
+      if (!active) return;
+      setDocuments(rows); setSelectedDocumentIds(rows.map(document => document.localId).slice(0, 5)); setDocumentStatus("Local TraceMini is ready.");
+    }).catch(() => { if (active) setDocumentStatus("Local document analysis is unavailable. Start or reinstall the TraceMini agent on this PC."); });
+    return () => { active = false; };
+  }, [workspaceId]);
   useEffect(() => {
     const generation = ++restorationGeneration.current;
     const operation = operationScope.current.generation;
@@ -1531,7 +1545,49 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error, timezon
         title="Reports"
         description="Review individual reports from every workspace member alongside whole-workspace summary reports."
       />
-      {role === "Manager" && <ReportSchedule api={request} workspaceId={workspaceId} timezone={timezone} />}
+      <section className="card reports-create-card document-context-card">
+        <div className="section-heading"><div><span>Local context</span><h2>Add PDF/PPTX context</h2></div><span className="count-badge">{documents.length}/5</span></div>
+        <p className="muted document-context-note">Files are analyzed on this PC; only structured metadata is attached to reports. Git remains the evidence of completed work. Scanned PDFs require local OCR.</p>
+        <div className="actions">
+          <label className={`button secondary file-button${documentPending || documents.length >= 5 ? " disabled" : ""}`}>
+            {documentPending ? "Analyzing locally…" : "Add PDF/PPTX files"}
+            <input type="file" multiple accept=".pdf,.pptx,application/pdf,application/vnd.openxmlformats-officedocument.presentationml.presentation" disabled={documentPending || documents.length >= 5} onChange={async event => {
+              const available = Math.max(0, 5 - documents.length);
+              const chosen = Array.from(event.currentTarget.files || []);
+              const files = chosen.slice(0, available);
+              event.currentTarget.value = "";
+              if (!files.length) return;
+              setDocumentPending(true); setActionError("");
+              let succeeded = 0;
+              const failures: string[] = [];
+              for (let index = 0; index < files.length; index += 1) {
+                const file = files[index];
+                setDocumentStatus(`Analyzing ${index + 1} of ${files.length}: ${file.name} (extracting locally → Codex deriving metadata)…`);
+                try {
+                  const document = await deriveLocalDocument(file, workspaceId);
+                  succeeded += 1;
+                  setDocuments(current => current.some(item => item.localId === document.localId) ? current : [...current, document]);
+                  setSelectedDocumentIds(current => [...new Set([...current, document.localId])].slice(0, 5));
+                } catch (caught: any) { failures.push(`${file.name}: ${caught.message || "analysis failed"}`); }
+              }
+              if (chosen.length > files.length) failures.push(`${chosen.length - files.length} file(s) skipped because a workspace can keep at most five documents.`);
+              setActionError(failures.join(" "));
+              setDocumentStatus(failures.length ? `${succeeded} document(s) ready; ${failures.length} issue(s).` : `${succeeded} document(s) ready for reports.`);
+              setDocumentPending(false);
+            }} />
+          </label>
+          <small className="muted">{documentStatus}</small>
+        </div>
+        {documents.length > 0 && <><div className="document-selection-summary"><strong>Include in next report</strong><small>{selectedDocumentIds.length ? `${selectedDocumentIds.length} of ${documents.length} selected` : "No document context will be used"}</small></div><div className="document-list">{documents.map(document => <article key={document.localId} className="document-row"><label title="Include this document's structured context in the next manual report"><input type="checkbox" aria-label={`Include ${document.displayName} in next report`} checked={selectedDocumentIds.includes(document.localId)} onChange={() => setSelectedDocumentIds(current => current.includes(document.localId) ? current.filter(id => id !== document.localId) : [...current, document.localId].slice(0, 5))} /><span><strong>{document.displayName}</strong><small>Owner: you · {document.format.toUpperCase()} · {document.pageOrSlideCount} {document.format === "pdf" ? "pages" : "slides"} · {document.metadata.shortSummary}</small></span></label><button className="button secondary" type="button" onClick={async () => { setActionError(""); try {
+          if (role === "Manager") {
+            const schedule = await request(`/workspaces/${workspaceId}/report-schedule`);
+            const retained = (schedule?.document_context || []).filter((item: LocalContextDocument) => documentIdentity(item) !== documentIdentity(document));
+            if (schedule && retained.length !== (schedule.document_context || []).length) await request(`/workspaces/${workspaceId}/report-schedule`, {method: "PUT", body: JSON.stringify({name: schedule.name, enabled: schedule.enabled, frequency: schedule.frequency, selectedDays: schedule.selected_days, localTime: schedule.local_time, timezone: schedule.timezone, reporter: schedule.reporter, format: schedule.format, includeDiff: schedule.include_diff, notifySlack: schedule.notify_slack, windowDays: schedule.window_days, documentContext: retained})});
+          }
+          await deleteLocalDocument(document.localId); setDocuments(current => current.filter(item => item.localId !== document.localId)); setSelectedDocumentIds(current => current.filter(id => id !== document.localId));
+        } catch (caught: any) { setActionError(caught.message); } }}>Delete</button></article>)}</div></>}
+      </section>
+      {role === "Manager" && <ReportSchedule api={request} workspaceId={workspaceId} timezone={timezone} documents={documents} />}
       <section className="card reports-create-card">
         <div className="section-heading">
           <div>
@@ -1604,12 +1660,13 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error, timezon
                     timezone,
                     includeDiff,
                     notifySlack,
+                    documentContext: documents.filter(document => selectedDocumentIds.includes(document.localId)).map(hostedDocument),
                   }),
                 });
                 if (!active()) return;
                 setName("");
                 setJob(created);
-                setMessage("Report queued. A connected device will generate it shortly.");
+                setMessage(`Report queued with ${selectedDocumentIds.length} context document${selectedDocumentIds.length === 1 ? "" : "s"}. A connected device will generate it shortly.`);
               } catch (caught: any) {
                 if (active()) setActionError(caught.message);
               } finally {
@@ -1625,17 +1682,17 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error, timezon
             {progress.active ? <><BusyIndicator label={progress.label} /><ProgressTrack label={progress.label} /></> : progress.label}
           </div>
         )}
-        <label className="diff-consent">
+        <div className="report-options"><label className="diff-consent">
           <input type="checkbox" checked={includeDiff} onChange={(event) => setIncludeDiff(event.target.checked)} />
           <span>
             <strong className="label-with-tip">Analyze code changes <InfoTip label="Code change analysis">Allows the local agent to add bounded, redacted diff excerpts to the report prompt. Source files are not uploaded to TraceMini.</InfoTip></strong>
-            <small>Add bounded diff excerpts for better detail.</small>
+            <small>Include bounded, redacted diff excerpts.</small>
           </span>
         </label>
         <label className="diff-consent">
           <input type="checkbox" checked={notifySlack} onChange={(event) => setNotifySlack(event.target.checked)} />
-          <span><strong>Notify Slack</strong><small>Post the full report when it is ready.</small></span>
-        </label>
+          <span><strong>Notify Slack</strong><small>Post the completed report.</small></span>
+        </label></div>
         {message && <div className="alert success" role="status">{message}</div>}
         {actionError && <div className="alert error" role="alert">{actionError}</div>}
       </section>

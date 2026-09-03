@@ -122,6 +122,7 @@ async function main() {
     config.watchedPaths = [];
     config.watchedRoots = [];
     config.clones = [];
+    config.documents = [];
     saveConfig(config, {
       replaceCollections: true,
       beforeRepositoryStateReplace: current => { for (const clone of current.clones) { try { removeHooks(clone.path); } catch {} } },

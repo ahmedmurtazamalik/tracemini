@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import {gzipSync} from 'node:zlib';
 
 export const shellQuote = (value: string) => `'${value.replace(/'/g, `'"'"'`)}'`;
 
@@ -16,8 +17,8 @@ export function linuxInstaller(cliDir: string, serverUrl: string, installToken: 
   const files = fs.readdirSync(cliDir).filter(name => name.endsWith('.js')).sort();
   if (!files.includes('index.js')) throw new Error(`built TraceMini CLI not found in ${cliDir}`);
   const payload = files.map(name => {
-    const encoded = fs.readFileSync(path.join(cliDir, name)).toString('base64');
-    return `printf '%s' ${shellQuote(encoded)} | base64 -d > "$STAGE_DIR/cli/${name}"`;
+    const encoded = gzipSync(fs.readFileSync(path.join(cliDir, name)), {level: 9}).toString('base64');
+    return `printf '%s' ${shellQuote(encoded)} | base64 -d | gzip -d > "$STAGE_DIR/cli/${name}"`;
   }).join('\n');
   return `#!/bin/sh
 set -eu
@@ -38,6 +39,13 @@ fi
 if ! command -v systemctl >/dev/null 2>&1; then
   echo 'systemctl is required for the TraceMini systemd user service.' >&2
   exit 1
+fi
+if ! command -v base64 >/dev/null 2>&1 || ! command -v gzip >/dev/null 2>&1; then
+  echo 'base64 and gzip are required to install TraceMini.' >&2
+  exit 1
+fi
+if ! command -v pdftoppm >/dev/null 2>&1 || ! command -v tesseract >/dev/null 2>&1; then
+  echo 'Note: scanned PDF analysis needs the optional poppler-utils and tesseract-ocr packages.' >&2
 fi
 
 INSTALL_ROOT="$HOME/.local/share/tracemini"
