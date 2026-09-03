@@ -11,6 +11,9 @@ export type LocalContextDocument = {
   metadata: {title: string; shortSummary: string; [key: string]: unknown};
 };
 
+export const OCR_INSTALL_COMMAND = 'sudo apt-get install -y poppler-utils tesseract-ocr';
+export const requiresOcrInstall = (error: unknown) => String((error as any)?.message || error).includes(OCR_INSTALL_COMMAND);
+
 const endpoint = 'http://127.0.0.1:43127';
 const unavailable = 'The local TraceMini document agent is not reachable on port 43127. Run `systemctl --user restart tracemini.service`, or use Connect or sync this device in Settings, then try again.';
 const pause = (milliseconds: number) => new Promise(resolve => setTimeout(resolve, milliseconds));

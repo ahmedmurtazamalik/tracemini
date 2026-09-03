@@ -6,7 +6,7 @@ import request from 'supertest';
 import {afterEach, describe, expect, it} from 'vitest';
 import {zipSync, strToU8} from 'fflate';
 import {decodeReportContext, decodeScheduleDays, encodeReportContext, encodeScheduleDays, validateDocumentContext} from '../apps/server/src/document-context.js';
-import {extractPdf, extractPptx} from '../packages/cli/src/document-inspection.js';
+import {extractPdf, extractPptx, OCR_INSTALL_COMMAND as CLI_OCR_INSTALL_COMMAND} from '../packages/cli/src/document-inspection.js';
 import {createDocumentLoopbackHandler} from '../packages/cli/src/document-loopback.js';
 import {generateDocumentMetadata} from '../packages/cli/src/document-metadata.js';
 import {loadConfig, saveConfig} from '../packages/cli/src/config.js';
@@ -130,6 +130,8 @@ describe('local document processing', () => {
     await expect(extractPdf(file, {pdftoppmCommand: renderer, tesseractCommand: ocr})).resolves.toMatchObject({
       format: 'pdf', text: expect.stringContaining('Architecture decision from scan'), warnings: expect.arrayContaining([expect.stringContaining('local OCR')]),
     });
+    await expect(extractPdf(file, {pdftoppmCommand: path.join(temporary, 'missing-pdftoppm')})).rejects.toThrow(CLI_OCR_INSTALL_COMMAND);
+    await expect(extractPdf(file, {pdftoppmCommand: renderer, tesseractCommand: path.join(temporary, 'missing-tesseract')})).rejects.toThrow(CLI_OCR_INSTALL_COMMAND);
     expect(fs.readdirSync(temporary).sort()).toEqual(['fake-pdftoppm', 'fake-tesseract', 'scan.pdf']);
     fs.rmSync(temporary, {recursive: true, force: true});
   });

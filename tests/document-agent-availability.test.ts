@@ -1,7 +1,13 @@
 import {describe, expect, it, vi} from 'vitest';
-import {localAgentFetch} from '../apps/web/document-context.js';
+import {localAgentFetch, OCR_INSTALL_COMMAND, requiresOcrInstall} from '../apps/web/document-context.js';
 
 describe('local document agent availability', () => {
+  it('recognizes only the missing local OCR dependency guidance', () => {
+    expect(OCR_INSTALL_COMMAND).toBe('sudo apt-get install -y poppler-utils tesseract-ocr');
+    expect(requiresOcrInstall(new Error(`Local OCR is unavailable. Run: ${OCR_INSTALL_COMMAND}`))).toBe(true);
+    expect(requiresOcrInstall(new Error('No readable text was found in the scanned PDF.'))).toBe(false);
+  });
+
   it('waits for a restarting service before reporting success', async () => {
     const request = vi.fn()
       .mockRejectedValueOnce(new TypeError('connection refused'))
