@@ -300,6 +300,7 @@ else if(command==='--help'){console.log('help');}
 else if(command==='status'){console.log(JSON.stringify(JSON.parse(fs.readFileSync(configPath,'utf8'))));}
 `);
     fs.writeFileSync(path.join(fakeBin, 'node'), `#!/bin/sh\nif [ "\${1:-}" = -p ]; then echo 22; else exec ${process.execPath} "$@"; fi\n`, {mode: 0o755});
+    fs.writeFileSync(path.join(fakeBin, 'sudo'), `#!/bin/sh\nprintf '%s\\n' "$*" >> "$HOME/sudo.log"\n`, {mode: 0o755});
     fs.writeFileSync(path.join(fakeBin, 'systemctl'), `#!/bin/sh\nprintf '%s\\n' "$*" >> "$HOME/systemctl.log"\n`, {mode: 0o755});
     const app = createApp(db, undefined, cliDir);
     const server = app.listen(0);
@@ -322,6 +323,7 @@ else if(command==='status'){console.log(JSON.stringify(JSON.parse(fs.readFileSyn
       const wrapper = path.join(home, '.local/bin/tracemini');
       expect(fs.existsSync(wrapper)).toBe(true);
       expect(execFileSync(wrapper, ['status'], {env, encoding: 'utf8'})).toContain(origin);
+      expect(fs.readFileSync(path.join(home, 'sudo.log'), 'utf8')).toContain('apt-get install -y poppler-utils tesseract-ocr');
       expect(fs.readFileSync(path.join(home, 'systemctl.log'), 'utf8')).toContain('--user enable --now tracemini.service');
       await request(origin).post('/api/agents/install/exchange').send({installToken: token, machineName: 'replay'}).expect(409);
       await request(origin).get(`/api/installers/linux/${encodeURIComponent(token)}`).expect(410);

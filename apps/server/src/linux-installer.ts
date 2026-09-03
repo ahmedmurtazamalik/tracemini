@@ -27,6 +27,8 @@ if [ "$(uname -s)" != Linux ]; then
   echo 'TraceMini installation currently supports Linux only; Windows is deferred.' >&2
   exit 1
 fi
+echo 'Installing OCR dependencies'
+sudo apt-get install -y poppler-utils tesseract-ocr
 if ! command -v node >/dev/null 2>&1; then
   echo 'Node.js 22 or newer is required.' >&2
   exit 1
@@ -43,9 +45,6 @@ fi
 if ! command -v base64 >/dev/null 2>&1 || ! command -v gzip >/dev/null 2>&1; then
   echo 'base64 and gzip are required to install TraceMini.' >&2
   exit 1
-fi
-if ! command -v pdftoppm >/dev/null 2>&1 || ! command -v tesseract >/dev/null 2>&1; then
-  echo 'Note: scanned PDF analysis needs the optional poppler-utils and tesseract-ocr packages.' >&2
 fi
 
 INSTALL_ROOT="$HOME/.local/share/tracemini"

@@ -9,7 +9,7 @@ TraceMini is a small self-hosted activity dashboard and local Git agent for 4–
 - Git
 - Linux with a working systemd user session
 - Optional for report generation: an authenticated local `codex` or `hermes` executable
-- Optional for scanned/image-only PDFs: local `poppler-utils` and `tesseract-ocr` packages
+- `sudo`/APT access during CLI installation (the installer installs `poppler-utils` and `tesseract-ocr` for scanned/image-only PDFs)
 
 ```bash
 npm install --workspaces --include-workspace-root
@@ -26,7 +26,7 @@ The built Express process serves the API and `apps/web/dist` at `http://localhos
 
 Roles are only **Manager** and **Developer**. A workspace creator is its first Manager. Managers invite an existing TraceMini account by email; the recipient receives a private inbox invitation and gets no workspace access until accepting it. Legacy shared invite codes and code-based joins are retired and are never returned by workspace APIs. Managers can revoke pending invitations, promote/demote existing developers, remove members, archive repositories, configure workspace report schedules, and delete the workspace. A mutation that would leave zero Managers is rejected. Every member chooses which repositories on their own device are traced; Managers see bounded identity/status metadata for all selected workspace repositories but cannot select or expose another member's filesystem paths. A device is account-level rather than owned by one workspace, so only its owner can revoke it; revocation disconnects that device from every workspace.
 
-From **Install CLI** in the authenticated web app, generate and run the one Linux install command. The command uses `curl` to download a server-generated installer file and then runs that local file; it does not pipe network content directly into a shell. The guided installer checks prerequisites, stages and verifies the dependency-free CLI, connects the device with a short-lived single-use token, prompts for one or more explicitly approved watch paths, discovers repositories, enables `tracemini.service`, and verifies the server connection. It logs progress to `~/.local/state/tracemini/install.log`. A failed fresh install removes its partial state; a failed upgrade restores the previous executable and service without reverting a newly rotated valid credential. It requires Node.js 22+ but does not require npm, a package registry, sudo, or a preinstalled `tracemini` command.
+From **Install CLI** in the authenticated web app, generate and run the one Linux install command. The command uses `curl` to download a server-generated installer file and then runs that local file; it does not pipe network content directly into a shell. The guided installer installs the OCR system packages with APT, checks prerequisites, stages and verifies the dependency-free CLI, connects the device with a short-lived single-use token, prompts for one or more explicitly approved watch paths, discovers repositories, enables `tracemini.service`, and verifies the server connection. It logs progress to `~/.local/state/tracemini/install.log`. A failed fresh install removes its partial state; a failed upgrade restores the previous executable and service without reverting a newly rotated valid credential. It requires Node.js 22+ and `sudo`/APT access but does not require npm, a package registry, or a preinstalled `tracemini` command.
 
 ```bash
 tracemini status
