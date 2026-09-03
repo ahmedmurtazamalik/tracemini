@@ -299,6 +299,37 @@ async function copyText(value: string) {
   if (!copied) throw new Error("Copy failed. Select and copy the command manually.");
 }
 
+function CopyableOcrCommand() {
+  const [copied, setCopied] = useState(false);
+  const [copyFailed, setCopyFailed] = useState(false);
+  return <span className="ocr-command-box">
+    <code className="ocr-command">{OCR_INSTALL_COMMAND}</code>
+    <button
+      type="button"
+      className="ocr-copy-button"
+      aria-label={copied ? "OCR install command copied" : "Copy OCR install command"}
+      title={copied ? "Copied" : copyFailed ? "Copy failed; select the command manually" : "Copy command"}
+      onClick={async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        try {
+          await copyText(OCR_INSTALL_COMMAND);
+          setCopied(true);
+          setCopyFailed(false);
+        } catch {
+          setCopied(false);
+          setCopyFailed(true);
+        }
+      }}
+    >
+      {copied
+        ? <svg aria-hidden="true" viewBox="0 0 20 20"><path d="m4 10 4 4 8-9" /></svg>
+        : <svg aria-hidden="true" viewBox="0 0 20 20"><rect x="6" y="5" width="10" height="12" rx="1" /><path d="M13 5V3H4v11h2" /></svg>}
+    </button>
+    <span className="visually-hidden" role="status">{copied ? "OCR install command copied." : copyFailed ? "Copy failed. Select the command manually." : ""}</span>
+  </span>;
+}
+
 function useActiveView() {
   const active = useRef(true);
   useLayoutEffect(() => {
@@ -1547,9 +1578,9 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error, timezon
         description="Review individual reports from every workspace member alongside whole-workspace summary reports."
       />
       <section className="card reports-create-card document-context-card">
-        <div className="section-heading"><div><span>Local context</span><h2 className="heading-with-tip">Add PDF/PPTX context <InfoTip label="Scanned PDF OCR">Scanned PDFs need Poppler and Tesseract on this PC. Copy and paste into a terminal:<code className="ocr-command">{OCR_INSTALL_COMMAND}</code></InfoTip></h2></div><span className="count-badge">{documents.length}/5</span></div>
+        <div className="section-heading"><div><span>Local context</span><h2 className="heading-with-tip">Add PDF/PPTX context <InfoTip label="Scanned PDF OCR">Scanned PDFs need Poppler and Tesseract on this PC. Copy and paste into a terminal:<CopyableOcrCommand /></InfoTip></h2></div><span className="count-badge">{documents.length}/5</span></div>
         <p className="muted document-context-note">Files are analyzed on this PC; only structured metadata is attached to reports. Git remains the evidence of completed work. Scanned PDFs require local OCR.</p>
-        {ocrInstallNeeded && <div className="alert error ocr-install-alert" role="alert"><strong>Local OCR is not installed.</strong><span>Copy and paste this command into a terminal, then retry the PDF:</span><code className="ocr-command">{OCR_INSTALL_COMMAND}</code></div>}
+        {ocrInstallNeeded && <div className="alert error ocr-install-alert" role="alert"><strong>Local OCR is not installed.</strong><span>Copy and paste this command into a terminal, then retry the PDF:</span><CopyableOcrCommand /></div>}
         <div className="actions">
           <label className={`button secondary file-button${documentPending || documents.length >= 5 ? " disabled" : ""}`}>
             {documentPending ? "Analyzing locally…" : "Add PDF/PPTX files"}
