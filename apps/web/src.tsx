@@ -25,7 +25,7 @@ import { repositorySelectionState, type RepositoryCandidate } from "./repository
 import { activityDateRange, activityDisplayPoints, activityGraphPath, activityGraphTicks, activitySeriesColorMap, activityUserSummary, compactActivityNumber, type ActivityRangePreset } from "./today-activity.js";
 import { InvitationInbox, ReportSchedule, WorkspaceInvitations } from "./collaboration.js";
 import { HelpDrawer, InfoTip, type HelpSection } from "./help.js";
-import {deleteLocalDocument, deriveLocalDocument, documentIdentity, hostedDocument, listLocalDocuments, type LocalContextDocument} from "./document-context.js";
+import {deleteLocalDocument, deriveLocalDocument, documentIdentity, hostedDocument, listLocalDocuments, OCR_INSTALL_COMMAND, requiresOcrInstall, type LocalContextDocument} from "./document-context.js";
 import { activitySummary } from "./activity-summary.js";
 import "./style.css";
 
@@ -1487,6 +1487,7 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error, timezon
   const [selectedDocumentIds, setSelectedDocumentIds] = useState<string[]>([]);
   const [documentPending, setDocumentPending] = useState(false);
   const [documentStatus, setDocumentStatus] = useState("Checking the local TraceMini service…");
+  const [ocrInstallNeeded, setOcrInstallNeeded] = useState(false);
   const operationScope = useRef({workspaceId, generation: 0});
   const pollingGeneration = useRef(0);
   const restorationGeneration = useRef(0);
@@ -1501,7 +1502,7 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error, timezon
   const progress = job ? reportJobProgress(job) : undefined;
   useEffect(() => {
     let active = true;
-    setDocuments([]); setSelectedDocumentIds([]); setDocumentStatus("Checking the local TraceMini service…");
+    setDocuments([]); setSelectedDocumentIds([]); setDocumentStatus("Checking the local TraceMini service…"); setOcrInstallNeeded(false);
     listLocalDocuments(workspaceId).then(rows => {
       if (!active) return;
       setDocuments(rows); setSelectedDocumentIds(rows.map(document => document.localId).slice(0, 5)); setDocumentStatus("Local TraceMini is ready.");
@@ -1546,8 +1547,9 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error, timezon
         description="Review individual reports from every workspace member alongside whole-workspace summary reports."
       />
       <section className="card reports-create-card document-context-card">
-        <div className="section-heading"><div><span>Local context</span><h2>Add PDF/PPTX context</h2></div><span className="count-badge">{documents.length}/5</span></div>
+        <div className="section-heading"><div><span>Local context</span><h2 className="heading-with-tip">Add PDF/PPTX context <InfoTip label="Scanned PDF OCR">Scanned PDFs need Poppler and Tesseract on this PC. Copy and paste into a terminal:<code className="ocr-command">{OCR_INSTALL_COMMAND}</code></InfoTip></h2></div><span className="count-badge">{documents.length}/5</span></div>
         <p className="muted document-context-note">Files are analyzed on this PC; only structured metadata is attached to reports. Git remains the evidence of completed work. Scanned PDFs require local OCR.</p>
+        {ocrInstallNeeded && <div className="alert error ocr-install-alert" role="alert"><strong>Local OCR is not installed.</strong><span>Copy and paste this command into a terminal, then retry the PDF:</span><code className="ocr-command">{OCR_INSTALL_COMMAND}</code></div>}
         <div className="actions">
           <label className={`button secondary file-button${documentPending || documents.length >= 5 ? " disabled" : ""}`}>
             {documentPending ? "Analyzing locally…" : "Add PDF/PPTX files"}
@@ -1557,7 +1559,7 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error, timezon
               const files = chosen.slice(0, available);
               event.currentTarget.value = "";
               if (!files.length) return;
-              setDocumentPending(true); setActionError("");
+              setDocumentPending(true); setActionError(""); setOcrInstallNeeded(false);
               let succeeded = 0;
               const failures: string[] = [];
               for (let index = 0; index < files.length; index += 1) {
@@ -1568,7 +1570,10 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error, timezon
                   succeeded += 1;
                   setDocuments(current => current.some(item => item.localId === document.localId) ? current : [...current, document]);
                   setSelectedDocumentIds(current => [...new Set([...current, document.localId])].slice(0, 5));
-                } catch (caught: any) { failures.push(`${file.name}: ${caught.message || "analysis failed"}`); }
+                } catch (caught: any) {
+                  if (requiresOcrInstall(caught)) setOcrInstallNeeded(true);
+                  failures.push(`${file.name}: ${caught.message || "analysis failed"}`);
+                }
               }
               if (chosen.length > files.length) failures.push(`${chosen.length - files.length} file(s) skipped because a workspace can keep at most five documents.`);
               setActionError(failures.join(" "));

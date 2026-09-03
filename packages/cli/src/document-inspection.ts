@@ -8,6 +8,7 @@ import {unzipSync} from 'fflate';
 
 export const MAX_DOCUMENT_BYTES = 25 * 1024 * 1024;
 export const MAX_EXTRACTED_CHARACTERS = 20_000;
+export const OCR_INSTALL_COMMAND = 'sudo apt-get install -y poppler-utils tesseract-ocr';
 
 export type ExtractedDocument = {format: 'pdf' | 'pptx'; pageOrSlideCount: number; text: string; warnings: string[]};
 export type PdfOcrOptions = {pdftoppmCommand?: string; tesseractCommand?: string; maxPages?: number};
@@ -52,7 +53,7 @@ function extractPdfWithLocalOcr(file: string, pageCount: number, options: PdfOcr
   const prefix = path.join(directory, 'page');
   try {
     const rendered = spawnSync(options.pdftoppmCommand ?? 'pdftoppm', ['-f', '1', '-l', String(maximum), '-r', '150', '-gray', '-png', file, prefix], {timeout: 30_000, stdio: ['ignore', 'ignore', 'pipe']});
-    if (rendered.error && (rendered.error as NodeJS.ErrnoException).code === 'ENOENT') throw new Error('This scanned PDF needs local OCR, but pdftoppm is not installed.');
+    if (rendered.error && (rendered.error as NodeJS.ErrnoException).code === 'ENOENT') throw new Error(`This scanned PDF needs local OCR, but Poppler is not installed. Copy and paste this command into a terminal: ${OCR_INSTALL_COMMAND}`);
     if (rendered.error || rendered.status !== 0) throw new Error('The scanned PDF could not be rendered for local OCR.');
     const images = fs.readdirSync(directory).map(name => ({
       name,
@@ -61,7 +62,7 @@ function extractPdfWithLocalOcr(file: string, pageCount: number, options: PdfOcr
     const pages: string[] = [];
     for (const image of images) {
       const recognized = spawnSync(options.tesseractCommand ?? 'tesseract', [path.join(directory, image.name), 'stdout', '-l', 'eng', '--psm', '6'], {encoding: 'utf8', timeout: 15_000, maxBuffer: 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe']});
-      if (recognized.error && (recognized.error as NodeJS.ErrnoException).code === 'ENOENT') throw new Error('This scanned PDF needs local OCR. Install the tesseract-ocr package, then try again.');
+      if (recognized.error && (recognized.error as NodeJS.ErrnoException).code === 'ENOENT') throw new Error(`This scanned PDF needs local OCR, but Tesseract is not installed. Copy and paste this command into a terminal: ${OCR_INSTALL_COMMAND}`);
       if (recognized.error || recognized.status !== 0) continue;
       const pageText = clean(recognized.stdout || '');
       if (pageText) pages.push(`### Page ${image.page}\n${pageText}`);
