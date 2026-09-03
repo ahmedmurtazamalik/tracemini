@@ -9,6 +9,7 @@ import {linuxInstallCommand, linuxInstaller, linuxSyncCommand} from './linux-ins
 import {activityBucketMinutes, dateKeyInTimezone, dateRangeUtc, hourInTimezone, normalizeTimezone} from './timezone.js';
 import {materializeDueReportSchedules, nextScheduledRun, normalizeReportFormat, validateScheduleRule} from './report-schedule.js';
 import {sendSlackReport} from './slack.js';
+import {decodeReportContext, decodeScheduleDays, encodeReportContext, encodeScheduleDays, validateDocumentContext} from './document-context.js';
 
 const now = () => new Date().toISOString();
 const expired = (value: string | Date) => new Date(value).getTime() <= Date.now();
@@ -966,11 +967,16 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
     });
     if (result.forbidden) return res.status(403).json({error: 'Manager required'});
     const row = result.row;
-    res.json(row ? {...row, selected_days: eventData(row.selected_days)} : null);
+    if (!row) return res.json(null);
+    const state = decodeScheduleDays(eventData(row.selected_days));
+    res.json({...row, selected_days: state.days, document_context: state.documents});
   });
   app.put('/api/workspaces/:id/report-schedule', userAuth, requireManager, async (req: Authed, res) => {
     let rule;
+    let documentContext;
     try { rule = validateScheduleRule({frequency: req.body.frequency, selectedDays: req.body.selectedDays, localTime: req.body.localTime, timezone: req.body.timezone}); }
+    catch (error: any) { return res.status(422).json({error: error.message}); }
+    try { documentContext = validateDocumentContext(req.body.documentContext); }
     catch (error: any) { return res.status(422).json({error: error.message}); }
     if (!['codex', 'hermes'].includes(req.body.reporter)) return res.status(400).json({error: 'invalid reporter'});
     if (req.body.format !== undefined && !['summary', 'detailed'].includes(req.body.format)) return res.status(400).json({error: 'invalid report format'});
@@ -988,18 +994,20 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
       let nextRunAt = enabled ? nextScheduledRun(rule, configuredAt).toISOString() : null;
       if (enabled && existing?.enabled && existing.next_run_at) {
         const existingNextRun = existing.next_run_at instanceof Date ? existing.next_run_at.toISOString() : String(existing.next_run_at);
+        const existingDays = decodeScheduleDays(eventData(existing.selected_days)).days;
         const sameTiming = existing.frequency === rule.frequency
           && existing.local_time === rule.localTime
           && existing.timezone === rule.timezone
-          && JSON.stringify(eventData(existing.selected_days)) === JSON.stringify(rule.selectedDays);
+          && JSON.stringify(existingDays) === JSON.stringify(rule.selectedDays);
         if (sameTiming || new Date(existingNextRun) <= configuredAt) nextRunAt = existingNextRun;
       }
       return await db.prepare(`INSERT INTO report_schedules(workspace_id,configured_by,name,enabled,frequency,selected_days,local_time,timezone,reporter,format,include_diff,notify_slack,window_days,next_run_at,created_at,updated_at)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(workspace_id) DO UPDATE SET configured_by=EXCLUDED.configured_by,name=EXCLUDED.name,enabled=EXCLUDED.enabled,frequency=EXCLUDED.frequency,selected_days=EXCLUDED.selected_days,local_time=EXCLUDED.local_time,timezone=EXCLUDED.timezone,reporter=EXCLUDED.reporter,format=EXCLUDED.format,include_diff=EXCLUDED.include_diff,notify_slack=EXCLUDED.notify_slack,window_days=EXCLUDED.window_days,next_run_at=EXCLUDED.next_run_at,updated_at=EXCLUDED.updated_at RETURNING *`)
-        .get(req.params.id, req.user.id, scheduleName, enabled, rule.frequency, JSON.stringify(rule.selectedDays), rule.localTime, rule.timezone, req.body.reporter, normalizeReportFormat(req.body.format), req.body.includeDiff === true, req.body.notifySlack === true, windowDays, nextRunAt, configuredAt.toISOString(), configuredAt.toISOString());
+        .get(req.params.id, req.user.id, scheduleName, enabled, rule.frequency, JSON.stringify(encodeScheduleDays(rule.selectedDays, documentContext)), rule.localTime, rule.timezone, req.body.reporter, normalizeReportFormat(req.body.format), req.body.includeDiff === true, req.body.notifySlack === true, windowDays, nextRunAt, configuredAt.toISOString(), configuredAt.toISOString());
     });
     if (!outcome) return res.status(403).json({error: 'Manager required'});
-    res.json({...outcome, selected_days: eventData(outcome.selected_days)});
+    const state = decodeScheduleDays(eventData(outcome.selected_days));
+    res.json({...outcome, selected_days: state.days, document_context: state.documents});
   });
   app.delete('/api/workspaces/:id/report-schedule', userAuth, requireManager, async (req: Authed, res) => {
     const outcome: any = await db.transaction(async () => {
@@ -1008,7 +1016,8 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
       return await db.prepare('DELETE FROM report_schedules WHERE workspace_id=? RETURNING *').get(req.params.id);
     });
     if (!outcome) return res.status(404).json({error: 'report schedule not found'});
-    res.json({...outcome, selected_days: eventData(outcome.selected_days)});
+    const state = decodeScheduleDays(eventData(outcome.selected_days));
+    res.json({...outcome, selected_days: state.days, document_context: state.documents});
   });
 
   app.post('/api/reports/jobs', userAuth, required(['workspaceId', 'startDate', 'endDate', 'reporter']), async (req: Authed, res) => {
@@ -1020,6 +1029,9 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
     if (!['personal', 'workspace'].includes(reportScope)) return res.status(400).json({error: 'invalid report scope'});
     const reportName = req.body.name?.trim() || defaultReportName(req.body.startDate, req.body.endDate);
     if (reportName.length > 120) return res.status(400).json({error: 'report name must be 120 characters or fewer'});
+    let documentContext;
+    try { documentContext = validateDocumentContext(req.body.documentContext); }
+    catch (error: any) { return res.status(422).json({error: error.message}); }
     const outcome = await db.transaction(async () => {
       const workspaceId = +req.body.workspaceId;
       const workspace = await db.prepare('SELECT id FROM workspaces WHERE id=? FOR UPDATE').get(workspaceId);
@@ -1029,7 +1041,7 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
       if (active) return {job: active, created: false};
       const timezone = normalizeTimezone(req.body.timezone);
       const includeDiff = req.body.includeDiff === true;
-      const result = await db.prepare("INSERT INTO report_jobs(workspace_id,user_id,reporter,start_date,end_date,timezone,include_diff,notify_slack,status,report_name,format,report_scope,created_at) VALUES(?,?,?,?,?,?,?,?,'pending',?,?,?,?) RETURNING id").run(workspaceId, req.user.id, req.body.reporter, req.body.startDate, req.body.endDate, timezone, includeDiff, req.body.notifySlack === true, reportName, normalizeReportFormat(req.body.format), reportScope, now());
+      const result = await db.prepare("INSERT INTO report_jobs(workspace_id,user_id,reporter,start_date,end_date,timezone,include_diff,notify_slack,status,report_name,format,report_scope,custom_prompt,created_at) VALUES(?,?,?,?,?,?,?,?,'pending',?,?,?,?,?) RETURNING id").run(workspaceId, req.user.id, req.body.reporter, req.body.startDate, req.body.endDate, timezone, includeDiff, req.body.notifySlack === true, reportName, normalizeReportFormat(req.body.format), reportScope, encodeReportContext(null, documentContext), now());
       return {job: {id: Number(result.lastInsertRowid), status: 'pending'}, created: true};
     });
     if (!outcome) return res.status(403).json({error: 'forbidden'});
@@ -1049,13 +1061,14 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
     const result = await db.transaction(async () => {
       const workspace = await db.prepare('SELECT id FROM workspaces WHERE id=? FOR UPDATE').get(scope.workspace_id);
       if (!workspace) return {status: 'not_found'};
-      const report: any = await db.prepare('SELECT * FROM reports WHERE id=? AND user_id=? AND workspace_id=? FOR UPDATE').get(req.params.id, req.user.id, scope.workspace_id);
+      const report: any = await db.prepare('SELECT r.*,j.custom_prompt source_custom_prompt FROM reports r LEFT JOIN report_jobs j ON j.id=r.job_id WHERE r.id=? AND r.user_id=? AND r.workspace_id=? FOR UPDATE').get(req.params.id, req.user.id, scope.workspace_id);
       if (!report) return {status: 'not_found'};
       const member = await db.prepare('SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=?').get(report.workspace_id, req.user.id);
       if (!member) return {status: 'forbidden'};
       const active = await db.prepare("SELECT id FROM report_jobs WHERE target_report_id=? AND status IN ('pending','running')").get(report.id);
       if (active) return {status: 'conflict'};
-      const inserted = await db.prepare("INSERT INTO report_jobs(workspace_id,user_id,reporter,start_date,end_date,timezone,include_diff,status,custom_prompt,target_report_id,format,report_scope,created_at) VALUES(?,?,?,?,?,?,?,'pending',?,?,?,?,?) RETURNING id").run(report.workspace_id, report.user_id, req.body.reporter, report.start_date, report.end_date, normalizeTimezone(report.timezone), Boolean(report.include_diff), prompt, report.id, normalizeReportFormat(req.body.format ?? report.format), report.report_scope || 'personal', now());
+      const documents = decodeReportContext(report.source_custom_prompt).documents;
+      const inserted = await db.prepare("INSERT INTO report_jobs(workspace_id,user_id,reporter,start_date,end_date,timezone,include_diff,status,custom_prompt,target_report_id,format,report_scope,created_at) VALUES(?,?,?,?,?,?,?,'pending',?,?,?,?,?) RETURNING id").run(report.workspace_id, report.user_id, req.body.reporter, report.start_date, report.end_date, normalizeTimezone(report.timezone), Boolean(report.include_diff), encodeReportContext(prompt, documents), report.id, normalizeReportFormat(req.body.format ?? report.format), report.report_scope || 'personal', now());
       return {status: 'created', id: Number(inserted.lastInsertRowid)};
     });
     if (result.status === 'not_found') return res.status(404).json({error: 'not found'});
@@ -1109,19 +1122,21 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
     res.json({job, events});
   });
   app.post('/api/agents/jobs/:id/complete', agentAuth, required(['markdown']), async (req: Authed, res) => {
+    if (typeof req.body.markdown !== 'string' || !req.body.markdown.trim()) return res.status(422).json({error: 'report output was empty'});
+    const markdown = req.body.markdown.trim();
     const completed = await db.transaction(async () => {
       const job: any = await db.prepare("SELECT j.*,w.name workspace_name FROM report_jobs j JOIN workspaces w ON w.id=j.workspace_id JOIN workspace_members wm ON wm.workspace_id=j.workspace_id AND wm.user_id=? WHERE j.id=? AND j.user_id=? AND j.status='running' AND j.agent_id=? AND (j.report_scope<>'workspace' OR wm.role='Manager') FOR UPDATE").get(req.agent.user_id, req.params.id, req.agent.user_id, req.agent.id);
       if (!job) return undefined;
       let reportId = job.target_report_id;
       if (job.target_report_id) {
-        const updated = await db.prepare('UPDATE reports SET job_id=?,markdown=?,format=?,report_scope=?,created_at=? WHERE id=? AND workspace_id=? AND user_id=?').run(job.id, req.body.markdown, job.format, job.report_scope, now(), job.target_report_id, job.workspace_id, job.user_id);
+        const updated = await db.prepare('UPDATE reports SET job_id=?,markdown=?,format=?,report_scope=?,created_at=? WHERE id=? AND workspace_id=? AND user_id=?').run(job.id, markdown, job.format, job.report_scope, now(), job.target_report_id, job.workspace_id, job.user_id);
         if (updated.changes !== 1) return undefined;
       } else {
-        const inserted = await db.prepare('INSERT INTO reports(job_id,workspace_id,user_id,start_date,end_date,timezone,include_diff,name,format,report_scope,schedule_id,scheduled_for,coalesced_runs,markdown,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id').run(job.id, job.workspace_id, job.user_id, job.start_date, job.end_date, job.timezone, job.include_diff, job.report_name || defaultReportName(job.start_date, job.end_date), job.format, job.report_scope, job.schedule_id, job.scheduled_for, job.coalesced_runs, req.body.markdown, now());
+        const inserted = await db.prepare('INSERT INTO reports(job_id,workspace_id,user_id,start_date,end_date,timezone,include_diff,name,format,report_scope,schedule_id,scheduled_for,coalesced_runs,markdown,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id').run(job.id, job.workspace_id, job.user_id, job.start_date, job.end_date, job.timezone, job.include_diff, job.report_name || defaultReportName(job.start_date, job.end_date), job.format, job.report_scope, job.schedule_id, job.scheduled_for, job.coalesced_runs, markdown, now());
         reportId = inserted.lastInsertRowid;
       }
       await db.prepare("UPDATE report_jobs SET status='completed',completed_at=? WHERE id=?").run(now(), job.id);
-      return {id: Number(reportId), workspaceId: Number(job.workspace_id), workspaceName: job.workspace_name, name: job.report_name || defaultReportName(job.start_date, job.end_date), startDate: isoDate(job.start_date), endDate: isoDate(job.end_date), scope: job.report_scope, markdown: req.body.markdown, notifySlack: Boolean(job.notify_slack)};
+      return {id: Number(reportId), workspaceId: Number(job.workspace_id), workspaceName: job.workspace_name, name: job.report_name || defaultReportName(job.start_date, job.end_date), startDate: isoDate(job.start_date), endDate: isoDate(job.end_date), scope: job.report_scope, markdown, notifySlack: Boolean(job.notify_slack)};
     });
     if (!completed) return res.status(409).json({error: 'job not claimed'});
     if (completed.notifySlack) {

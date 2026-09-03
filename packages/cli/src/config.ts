@@ -1,12 +1,13 @@
 import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import crypto from 'node:crypto';
 export type Clone={path:string;workspaceId?:number;repositoryId:number;normalizedRemote:string;name:string;branch?:string;headSha?:string;remoteHeadSha?:string;historyHeads?:string[];repositoryFingerprint?:string};
 export type WatchedRoot={path:string;workspaceId:number};
-export type Config={serverUrl:string;userToken?:string;agentToken?:string;agentId?:number;workspaceId?:number;watchedPaths:string[];watchedRoots?:WatchedRoot[];clones:Clone[];reporter:'codex'|'hermes';pollMs:number};
+export type LocalDocument={localId:string;workspaceId:number;displayName:string;format:'pdf'|'pptx';mediaType:string;byteSize:number;sha256?:string;pageOrSlideCount:number;consentedAt:string;metadata:Record<string,unknown>};
+export type Config={serverUrl:string;userToken?:string;agentToken?:string;agentId?:number;workspaceId?:number;watchedPaths:string[];watchedRoots?:WatchedRoot[];clones:Clone[];documents?:LocalDocument[];reporter:'codex'|'hermes';pollMs:number};
 export type Queued={eventKey:string;workspaceId?:number;repositoryId:number;localKey?:string;identityFingerprint?:string;type:string;occurredAt:string;data:Record<string,unknown>;attempts:number;nextAttempt:number;claimId?:string;claimedAt?:number};
 export const stateDir=()=>process.env.TRACEMINI_HOME||path.join(os.homedir(),'.tracemini');
-const file=(n:string)=>path.join(stateDir(),n);const defaults=():Config=>({serverUrl:'http://localhost:3000',watchedPaths:[],watchedRoots:[],clones:[],reporter:'codex',pollMs:60000});
+const file=(n:string)=>path.join(stateDir(),n);const defaults=():Config=>({serverUrl:'http://localhost:3000',watchedPaths:[],watchedRoots:[],clones:[],documents:[],reporter:'codex',pollMs:60000});
 function readStored():Partial<Config>{try{return JSON.parse(fs.readFileSync(file('config.json'),'utf8'))}catch{return {}}}
-function hydrate(stored:Partial<Config>):Config{const watchedPaths=[...new Set([...(stored.watchedPaths||[]),...(stored.watchedRoots||[]).map(root=>root.path)].map(root=>path.resolve(root)))];return {...defaults(),...stored,watchedPaths,watchedRoots:[],clones:(stored.clones||[]).map(clone=>({...clone,workspaceId:clone.workspaceId??stored.workspaceId}))}}
+function hydrate(stored:Partial<Config>):Config{const watchedPaths=[...new Set([...(stored.watchedPaths||[]),...(stored.watchedRoots||[]).map(root=>root.path)].map(root=>path.resolve(root)))];return {...defaults(),...stored,watchedPaths,watchedRoots:[],clones:(stored.clones||[]).map(clone=>({...clone,workspaceId:clone.workspaceId??stored.workspaceId})),documents:(stored.documents||[]).filter(document=>document&&Number.isInteger(document.workspaceId))}}
 function sameBinding(a:Partial<Config>,b:Partial<Config>){return a.serverUrl===b.serverUrl&&a.agentId===b.agentId&&a.agentToken===b.agentToken}
 export function isCurrentBinding(c:Config){const current=readStored();return sameBinding(c,current)}
 export function loadConfig():Config{fs.mkdirSync(stateDir(),{recursive:true,mode:0o700});return hydrate(readStored())}
@@ -88,7 +89,10 @@ export function saveConfig(c:Config, options:{preserveCurrentScalars?:boolean;re
   }else for(const source of sources)for(const clone of source.clones||[])clones.set(cloneKey(clone),clone);
   const scalarConfig=options.preserveCurrentScalars?{...defaults(),...current}:c;
   const watchedPaths=[...new Set(sources.flatMap(source=>[...(source.watchedPaths||[]),...(source.watchedRoots||[]).map(root=>root.path)]).map(root=>path.resolve(root)))];
-  const merged={...scalarConfig,watchedPaths,watchedRoots:[],clones:[...clones.values()]};
+  const documentMap=new Map<string,LocalDocument>();
+  const documentSources=replaceRepositoryState?[c.documents||[]]:options.preserveCurrentScalars?[c.documents||[],current.documents||[]]:[current.documents||[],c.documents||[]];
+  for(const documents of documentSources)for(const document of documents)documentMap.set(document.localId,document);
+  const merged={...scalarConfig,watchedPaths,watchedRoots:[],clones:[...clones.values()],documents:[...documentMap.values()]};
   writeConfig(merged);
   });
 }

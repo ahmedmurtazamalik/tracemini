@@ -460,6 +460,7 @@ if(command==='setup'){const configPath=path.join(os.homedir(),'.tracemini','conf
     const originalJob = (await request(app).post('/api/reports/jobs').set(auth(user.token)).send({workspaceId: String(workspace.id), startDate: '2026-08-21', endDate: '2026-08-21', reporter: 'codex', name: 'August Engineering Review'}).expect(201)).body;
     expect((await request(app).get(`/api/reports/jobs/${originalJob.id}`).set(auth(user.token)).expect(200)).body).toMatchObject({report_name: 'August Engineering Review'});
     await request(app).post(`/api/agents/jobs/${originalJob.id}/claim`).set(auth(agent.agentToken)).expect(200);
+    await request(app).post(`/api/agents/jobs/${originalJob.id}/complete`).set(auth(agent.agentToken)).send({markdown: '   '}).expect(400);
     await request(app).post(`/api/agents/jobs/${originalJob.id}/complete`).set(auth(agent.agentToken)).send({markdown: '# Original'}).expect(201);
     const originalReport = (await request(app).get(`/api/workspaces/${workspace.id}/reports`).set(auth(user.token)).expect(200)).body[0];
     expect(originalReport).toMatchObject({name: 'August Engineering Review'});
