@@ -43,6 +43,20 @@ describe('schema-free document context', () => {
     expect(() => validateDocumentContext(Array.from({length: 6}, () => document))).toThrow(/five/);
   });
 
+  it('applies the 4 KiB limit to metadata rather than transport wrapper fields', () => {
+    const metadata = {
+      title: 'T'.repeat(240),
+      shortSummary: 'S'.repeat(1000),
+      keyPoints: Array.from({length: 9}, (_, index) => ({text: 'K'.repeat(240), references: [`Page ${index + 1}`]})),
+      decisions: [], actionItems: [], projects: [], people: [], relevantDates: [], warnings: [],
+    };
+    const wrapped = {...document, displayName: `${'D'.repeat(156)}.pdf`, format: 'pdf' as const, mediaType: 'application/pdf', metadata};
+
+    expect(Buffer.byteLength(JSON.stringify(metadata))).toBeLessThanOrEqual(4 * 1024);
+    expect(Buffer.byteLength(JSON.stringify(wrapped))).toBeGreaterThan(4 * 1024);
+    expect(validateDocumentContext([wrapped])).toEqual([wrapped]);
+  });
+
   it('adds document metadata separately without changing Git evidence', () => {
     const prompt = contextPrompt({job: {start_date: '2026-09-01', end_date: '2026-09-01', custom_prompt: encodeReportContext(null, [document])}, events: []}, []);
     expect(prompt).toContain('Additional document context');
