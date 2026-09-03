@@ -150,6 +150,8 @@ describe('approved server workflows', () => {
     const installerSource = fs.readFileSync(path.resolve('packages/cli/src/install.ts'), 'utf8');
     expect(installerSource).toContain('Description=TraceMini local Git device');
     expect(installerSource).not.toContain('Description=TraceMini local Git agent');
+    expect(installerSource).toContain('Restart=always');
+    expect(installerSource).not.toContain('Restart=on-failure');
   });
 
   it('creates a personal Manager workspace without exposing retired invite codes', async () => {

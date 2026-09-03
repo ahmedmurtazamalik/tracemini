@@ -12,26 +12,44 @@ export type LocalContextDocument = {
 };
 
 const endpoint = 'http://127.0.0.1:43127';
-const localFetch = async (path: string, init: RequestInit = {}) => {
+const unavailable = 'The local TraceMini document agent is not reachable on port 43127. Run `systemctl --user restart tracemini.service`, or use Connect or sync this device in Settings, then try again.';
+const pause = (milliseconds: number) => new Promise(resolve => setTimeout(resolve, milliseconds));
+
+export const localAgentFetch = async (
+  path: string,
+  init: RequestInit = {},
+  request: typeof fetch = fetch,
+  wait: (milliseconds: number) => Promise<unknown> = pause,
+) => {
   let response: Response;
-  try { response = await fetch(`${endpoint}${path}`, {...init, mode: 'cors'}); }
-  catch { throw new Error('The local TraceMini document agent is not running on port 43127. Start or update the TraceMini agent, then try again.'); }
+  const retryable = !init.method || init.method.toUpperCase() === 'GET';
+  for (let attempt = 0; ; attempt++) {
+    try {
+      response = await request(`${endpoint}${path}`, {...init, mode: 'cors'});
+      break;
+    } catch {
+      // Installation and credential sync restart the service. Give systemd a
+      // brief window to bind the loopback port before declaring it unavailable.
+      if (!retryable || attempt >= 2) throw new Error(unavailable);
+      await wait(250 * (attempt + 1));
+    }
+  }
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body.error || 'Local TraceMini document analysis failed.');
   return body;
 };
 
 export async function localDocumentStatus() {
-  return localFetch('/v1/status');
+  return localAgentFetch('/v1/status');
 }
 
 export async function listLocalDocuments(workspaceId: number): Promise<LocalContextDocument[]> {
-  return localFetch(`/v1/documents?workspaceId=${encodeURIComponent(workspaceId)}`);
+  return localAgentFetch(`/v1/documents?workspaceId=${encodeURIComponent(workspaceId)}`);
 }
 
 export async function deriveLocalDocument(file: File, workspaceId: number): Promise<LocalContextDocument> {
   const status = await localDocumentStatus();
-  return localFetch('/v1/documents/derive-metadata', {
+  return localAgentFetch('/v1/documents/derive-metadata', {
     method: 'POST', body: file,
     headers: {
       'content-type': file.type || 'application/octet-stream',
@@ -45,7 +63,7 @@ export async function deriveLocalDocument(file: File, workspaceId: number): Prom
 
 export async function deleteLocalDocument(localId: string) {
   const status = await localDocumentStatus();
-  return localFetch(`/v1/documents/${encodeURIComponent(localId)}`, {method: 'DELETE', headers: {'x-tracemini-nonce': status.nonce}});
+  return localAgentFetch(`/v1/documents/${encodeURIComponent(localId)}`, {method: 'DELETE', headers: {'x-tracemini-nonce': status.nonce}});
 }
 
 export function hostedDocument(document: LocalContextDocument) {

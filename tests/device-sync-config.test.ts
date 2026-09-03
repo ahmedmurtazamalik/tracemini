@@ -2,7 +2,7 @@ import {describe, expect, it, vi} from 'vitest';
 import {Readable, Writable} from 'node:stream';
 import type {Config} from '../packages/cli/src/config.js';
 import {normalizeServerUrl, previousDeviceTokenForServer, rebindDeviceConfig, rebindWorkspaceConfig} from '../packages/cli/src/pairing.js';
-import {restartStartup, stopStartup} from '../packages/cli/src/install.js';
+import {restartStartup, stopStartup, withStartupRestart} from '../packages/cli/src/install.js';
 import {helpText, normalizeWatchPath, promptForWatchPaths} from '../packages/cli/src/setup.js';
 
 const existing = (): Config => ({
@@ -70,6 +70,23 @@ describe('CLI device re-pairing', () => {
     restartStartup('linux', execute as any);
     expect(execute).toHaveBeenCalledWith('systemctl', ['--user', 'restart', 'tracemini.service'], {stdio: 'ignore'});
     expect(() => restartStartup('win32', execute as any)).toThrow(/Linux only/);
+  });
+
+  it('restarts the service when credential sync fails', async () => {
+    const stop = vi.fn();
+    const restart = vi.fn();
+    const failure = new Error('install token expired');
+
+    await expect(withStartupRestart(async () => { throw failure; }, stop, restart)).rejects.toBe(failure);
+    expect(stop).toHaveBeenCalledOnce();
+    expect(restart).toHaveBeenCalledOnce();
+  });
+
+  it('returns the sync result after restarting the service', async () => {
+    const calls: string[] = [];
+    await expect(withStartupRestart(async () => { calls.push('sync'); return {agentId: 7}; }, () => calls.push('stop'), () => calls.push('restart')))
+      .resolves.toEqual({agentId: 7});
+    expect(calls).toEqual(['stop', 'sync', 'restart']);
   });
 
   it('upgrades hosted HTTP URLs to HTTPS without changing local development URLs', () => {
