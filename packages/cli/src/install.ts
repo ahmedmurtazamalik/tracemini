@@ -22,13 +22,28 @@ export function stopStartup(platform = process.platform, execute: typeof execFil
   }
 }
 
+export async function withStartupRestart<T>(
+  operation: () => Promise<T>,
+  stop: () => void = () => stopStartup(),
+  restart: () => void = () => restartStartup(),
+) {
+  stop();
+  try {
+    return await operation();
+  } finally {
+    // A failed or interrupted sync must not leave Git collection and the local
+    // document endpoint stopped. systemd restart also starts an inactive unit.
+    restart();
+  }
+}
+
 export function installStartup(platform = process.platform, executable = process.argv[1]) {
   if (platform !== 'linux') throw new Error('automatic startup currently supports Linux only; Windows is deferred');
   const directory = path.join(os.homedir(), '.config', 'systemd', 'user');
   const service = path.join(directory, 'tracemini.service');
   const escape = (value: string) => value.replace(/([\\"])/g, '\\$1');
   fs.mkdirSync(directory, {recursive: true, mode: 0o700});
-  fs.writeFileSync(service, `[Unit]\nDescription=TraceMini local Git device\nAfter=network-online.target\n\n[Service]\nType=simple\nEnvironment=PATH=%h/.local/bin:%h/bin:/usr/local/bin:/usr/bin:/bin\nExecStart="${escape(process.execPath)}" "${escape(executable)}" start\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n`, {mode: 0o600});
+  fs.writeFileSync(service, `[Unit]\nDescription=TraceMini local Git device\nAfter=network-online.target\n\n[Service]\nType=simple\nEnvironment=PATH=%h/.local/bin:%h/bin:/usr/local/bin:/usr/bin:/bin\nExecStart="${escape(process.execPath)}" "${escape(executable)}" start\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n`, {mode: 0o600});
   execFileSync('systemctl', ['--user', 'daemon-reload'], {stdio: 'ignore'});
   execFileSync('systemctl', ['--user', 'enable', 'tracemini.service'], {stdio: 'ignore'});
   execFileSync('systemctl', ['--user', 'restart', 'tracemini.service'], {stdio: 'ignore'});

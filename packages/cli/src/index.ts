@@ -6,7 +6,7 @@ import {api} from './api.js';
 import {enqueue, loadConfig, saveConfig, loadQueue, saveQueue, eventKey} from './config.js';
 import {commitData, git, parsePrePush, removeHooks, repositoryFingerprint, stagedData} from './git.js';
 import {flush, runAgent, scanWatchedRoots} from './agent.js';
-import {installStartup, restartStartup, stopStartup} from './install.js';
+import {installStartup, stopStartup, withStartupRestart} from './install.js';
 import {installationId, normalizeServerUrl, previousDeviceTokenForServer, rebindDeviceConfig, rebindWorkspaceConfig} from './pairing.js';
 import {createInstallLogger, helpText, promptForWatchPaths} from './setup.js';
 
@@ -95,9 +95,7 @@ async function main() {
     return;
   }
   if (command === 'sync') {
-    stopStartup();
-    const response = await exchangeInstallToken();
-    restartStartup();
+    const response = await withStartupRestart(exchangeInstallToken);
     console.log(`Device ${response.agentId} synced to workspace ${response.workspaceId}`);
     return;
   }
