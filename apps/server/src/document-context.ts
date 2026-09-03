@@ -83,7 +83,7 @@ export function validateDocumentMetadata(value: unknown): DocumentMetadata {
       warnings: list(metadata.warnings, 'warnings', 8),
     },
   };
-  if (Buffer.byteLength(JSON.stringify(normalized)) > MAX_DOCUMENT_METADATA_BYTES) throw new Error('document metadata exceeds 4 KiB');
+  if (Buffer.byteLength(JSON.stringify(normalized.metadata)) > MAX_DOCUMENT_METADATA_BYTES) throw new Error('document metadata exceeds 4 KiB');
   return normalized;
 }
 
