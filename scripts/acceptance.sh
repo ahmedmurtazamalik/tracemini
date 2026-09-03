@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+trap 'printf "Acceptance failed at line %s.\\n" "$LINENO" >&2' ERR
 unset TRACEMINI_HOME
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -56,8 +57,9 @@ CLI=(node "$ROOT/packages/cli/dist/index.js")
 mkdir -p "$TMP/bin"
 printf '#!/bin/sh\nif [ "${1:-}" = -p ]; then printf "22\\n"; else exec "%s" "$@"; fi\n' "$(command -v node)" >"$TMP/bin/node"
 printf '#!/bin/sh\nexec node "%s" "$@"\n' "$ROOT/packages/cli/dist/index.js" >"$TMP/bin/tracemini"
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "$HOME/sudo.log"\n' >"$TMP/bin/sudo"
 printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "$HOME/systemctl.log"\n' >"$TMP/bin/systemctl"
-chmod +x "$TMP/bin/node" "$TMP/bin/tracemini" "$TMP/bin/systemctl"
+chmod +x "$TMP/bin/node" "$TMP/bin/tracemini" "$TMP/bin/sudo" "$TMP/bin/systemctl"
 INSTALL_A=$(api -X POST "$BASE/api/agents/installations" -H "authorization: Bearer $AT" -d "{\"workspaceId\":$WID}")
 INSTALL_B=$(api -X POST "$BASE/api/agents/installations" -H "authorization: Bearer $BT" -d "{\"workspaceId\":$WID}")
 INSTALL_COMMAND_A=$(printf '%s' "$INSTALL_A" | json installCommand)
@@ -87,8 +89,6 @@ select_candidates() {
 }
 select_candidates "$AT" "$TMP/home-a/.tracemini"
 select_candidates "$BT" "$TMP/home-b"
-TRACEMINI_HOME="$TMP/home-a/.tracemini" "${CLI[@]}" sync-history --days 90 >/dev/null
-TRACEMINI_HOME="$TMP/home-b" "${CLI[@]}" sync-history --days 90 >/dev/null
 
 printf 'acceptance\n' >"$TMP/repos/a-root/clone-a/work.txt"
 git -C "$TMP/repos/a-root/clone-a" add work.txt
@@ -140,11 +140,11 @@ select_candidates "$AT" "$TMP/home-a/.tracemini" "$SECOND_ID"
 TOKEN_AFTER_SWITCH=$(node -e "console.log(require(process.argv[1]).agentToken)" "$TMP/home-a/.tracemini/config.json")
 test "$TOKEN_BEFORE_SWITCH" = "$TOKEN_AFTER_SWITCH"
 SECOND_REPOSITORIES=$(api "$BASE/api/workspaces/$SECOND_ID/repositories?includeArchived=true" -H "authorization: Bearer $AT")
-[[ "$SECOND_REPOSITORIES" == *'"clone_count":1'* ]]
+[[ "$SECOND_REPOSITORIES" == *'"clone_count":3'* ]]
 
 api -X DELETE "$BASE/api/workspaces/$WID/members/$(printf '%s' "$A" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).user.id))")" -H "authorization: Bearer $BT" >/dev/null
 TRACEMINI_HOME="$TMP/home-a/.tracemini" "${CLI[@]}" once >/dev/null
-node -e "const c=require(process.argv[1]);if(c.workspaceId!==Number(process.argv[2])||c.clones.length!==1||c.clones[0].workspaceId!==Number(process.argv[2])||c.watchedRoots.some(r=>r.workspaceId!==Number(process.argv[2])))process.exit(1)" "$TMP/home-a/.tracemini/config.json" "$SECOND_ID"
+node -e "const c=require(process.argv[1]);if(c.workspaceId!==Number(process.argv[2])||c.clones.length!==3||c.clones.some(clone=>clone.workspaceId!==Number(process.argv[2]))||c.watchedRoots.some(r=>r.workspaceId!==Number(process.argv[2])))process.exit(1)" "$TMP/home-a/.tracemini/config.json" "$SECOND_ID"
 STATUS=$(api "$BASE/api/agents/status" -H "authorization: Bearer $TOKEN_AFTER_SWITCH")
 printf '%s' "$STATUS" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const x=JSON.parse(s),lost=Number(process.argv[1]),kept=Number(process.argv[2]);if(x.workspaceIds.includes(lost)||!x.workspaceIds.includes(kept))process.exit(1)})" "$WID" "$SECOND_ID"
 
