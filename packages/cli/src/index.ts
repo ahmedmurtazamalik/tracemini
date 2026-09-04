@@ -77,9 +77,10 @@ async function main() {
       log.step(7, 7, 'Verifying the installation');
       await api(config, '/api/agents/status');
       log.success('Server connection is healthy');
-      console.log(`\n✓ TraceMini installation completed successfully\n✓ Watched paths: ${roots.length}\n✓ Repository candidates discovered: ${found}`);
-      console.log('\nNext: open TraceMini Settings and select which repositories to trace.');
-      console.log('\nYou can add another folder at any time:\n\n  tracemini watch "$HOME/path"');
+      console.log(`\n✓ TraceMini installation completed successfully\n✓ Watched paths configured: ${config.watchedPaths.length}\n✓ Repository candidates discovered: ${found}`);
+      if (found) console.log('\nNext: open TraceMini Settings and select which repositories to trace.');
+      if (!config.watchedPaths.length) console.log('\nNo repositories will be detected by default because no watch paths are configured.');
+      console.log(`\n${config.watchedPaths.length ? 'Add another folder' : 'Add a folder'} at any time:\n\n  tracemini watch "$HOME/path"`);
       console.log('\nFor all available CLI commands and options, run:\n\n  tracemini --help');
       console.log(`\nInstallation log:\n  ${log.path}`);
     } catch (error: any) {

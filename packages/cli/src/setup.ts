@@ -57,10 +57,12 @@ export async function promptForWatchPaths(input = stdin, output = stdout) {
     while (true) {
       let root: string | undefined;
       while (!root) {
-        const answer = await ask('Paste a folder location to watch: ');
+        const answer = await ask('Paste a folder location to watch (press Enter to skip for now): ');
         if (!answer.trim()) {
-          console.error('✗ A watch path is required to finish setup.');
-          continue;
+          console.log(watched.length
+            ? '\n✓ Finished adding watch paths.'
+            : '\n✓ Watch-path setup skipped. No repositories will be detected until you add a watch path.');
+          return watched;
         }
         try {
           root = normalizeWatchPath(answer);

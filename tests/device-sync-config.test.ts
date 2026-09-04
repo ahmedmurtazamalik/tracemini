@@ -27,11 +27,21 @@ describe('CLI device re-pairing', () => {
     expect(helpText).toContain('tracemini --help');
   });
 
-  it('consumes every guided answer and retries blank watch paths', async () => {
+  it('consumes every guided watch-path answer', async () => {
     let output = '';
     const sink = new Writable({write(chunk, _encoding, done) { output += chunk.toString(); done(); }});
-    await expect(promptForWatchPaths(Readable.from([`\n${process.cwd()}\nn\n`]) as any, sink as any)).resolves.toEqual([process.cwd()]);
+    await expect(promptForWatchPaths(Readable.from([`${process.cwd()}\nn\n`]) as any, sink as any)).resolves.toEqual([process.cwd()]);
     expect(output).toContain('Add another watch path?');
+  });
+
+  it('allows watch-path setup to be skipped', async () => {
+    let output = '';
+    const sink = new Writable({write(chunk, _encoding, done) { output += chunk.toString(); done(); }});
+    const logged = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    await expect(promptForWatchPaths(Readable.from(['\n']) as any, sink as any)).resolves.toEqual([]);
+    expect(output).toContain('press Enter to skip for now');
+    expect(logged).toHaveBeenCalledWith(expect.stringContaining('No repositories will be detected'));
+    logged.mockRestore();
   });
 
   it('keeps local preferences but clears repository state and installs the new credential', () => {
