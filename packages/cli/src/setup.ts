@@ -58,7 +58,10 @@ export async function promptForWatchPaths(input = stdin, output = stdout) {
       let root: string | undefined;
       while (!root) {
         const answer = await ask('Paste a folder location to watch: ');
-        if (!answer.trim()) throw new Error('A watch path is required to finish setup.');
+        if (!answer.trim()) {
+          console.error('✗ A watch path is required to finish setup.');
+          continue;
+        }
         try {
           root = normalizeWatchPath(answer);
         } catch (error: any) {

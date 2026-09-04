@@ -322,6 +322,7 @@ else if(command==='status'){console.log(JSON.stringify(JSON.parse(fs.readFileSyn
       await execFileAsync('sh', [installerPath], {env});
       const wrapper = path.join(home, '.local/bin/tracemini');
       expect(fs.existsSync(wrapper)).toBe(true);
+      expect(JSON.parse(fs.readFileSync(path.join(home, '.local/share/tracemini/cli/package.json'), 'utf8'))).toEqual({type: 'module'});
       expect(execFileSync(wrapper, ['status'], {env, encoding: 'utf8'})).toContain(origin);
       expect(fs.readFileSync(path.join(home, 'sudo.log'), 'utf8')).toContain('apt-get install -y poppler-utils tesseract-ocr');
       expect(fs.readFileSync(path.join(home, 'systemctl.log'), 'utf8')).toContain('--user enable --now tracemini.service');

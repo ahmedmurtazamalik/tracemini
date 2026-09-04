@@ -27,10 +27,10 @@ describe('CLI device re-pairing', () => {
     expect(helpText).toContain('tracemini --help');
   });
 
-  it('consumes every guided answer from piped installer input', async () => {
+  it('consumes every guided answer and retries blank watch paths', async () => {
     let output = '';
     const sink = new Writable({write(chunk, _encoding, done) { output += chunk.toString(); done(); }});
-    await expect(promptForWatchPaths(Readable.from([`${process.cwd()}\nn\n`]) as any, sink as any)).resolves.toEqual([process.cwd()]);
+    await expect(promptForWatchPaths(Readable.from([`\n${process.cwd()}\nn\n`]) as any, sink as any)).resolves.toEqual([process.cwd()]);
     expect(output).toContain('Add another watch path?');
   });
 

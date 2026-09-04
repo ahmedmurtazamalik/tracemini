@@ -91,6 +91,7 @@ echo 'TraceMini Setup'
 echo '────────────────────────────────────────'
 echo '[1/3] Staging TraceMini CLI'
 ${payload}
+printf '%s\n' '{"type":"module"}' > "$STAGE_DIR/cli/package.json"
 node "$STAGE_DIR/cli/index.js" --help >/dev/null
 echo '✓ CLI bundle verified'
 
