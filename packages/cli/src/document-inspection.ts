@@ -10,7 +10,7 @@ export const MAX_DOCUMENT_BYTES = 25 * 1024 * 1024;
 export const MAX_EXTRACTED_CHARACTERS = 20_000;
 export const OCR_INSTALL_COMMAND = 'sudo apt-get install -y poppler-utils tesseract-ocr';
 
-export type ExtractedDocument = {format: 'pdf' | 'pptx'; pageOrSlideCount: number; text: string; warnings: string[]};
+export type ExtractedDocument = {format: 'pdf' | 'pptx' | 'md' | 'txt'; pageOrSlideCount: number; text: string; warnings: string[]};
 export type PdfOcrOptions = {pdftoppmCommand?: string; tesseractCommand?: string; maxPages?: number};
 
 const clean = (value: string) => value.replace(/\u0000/g, '').replace(/[ \t]+\n/g, '\n').replace(/\n{4,}/g, '\n\n\n').trim();
@@ -172,5 +172,15 @@ export async function extractDocument(file: string, displayName = path.basename(
   const extension = path.extname(displayName).toLowerCase();
   if (extension === '.pdf') return extractPdf(file);
   if (extension === '.pptx') return extractPptx(file);
-  throw new Error('Only PDF and PPTX files are supported.');
+  if (extension === '.md' || extension === '.txt') {
+    assertFileSize(file);
+    let text: string;
+    try { text = new TextDecoder('utf-8', {fatal: true}).decode(fs.readFileSync(file)); }
+    catch { throw new Error('Markdown and text files must use UTF-8 encoding.'); }
+    if (/[\u0000-\u0008\u000b\u000e-\u001f\u007f]/.test(text)) throw new Error('The selected file contains binary data, not plain text.');
+    text = text.trim();
+    if (!text) throw new Error('The document has no readable text.');
+    return {format: extension === '.md' ? 'md' : 'txt', pageOrSlideCount: 0, ...bounded(text)} satisfies ExtractedDocument;
+  }
+  throw new Error('Only PDF, PPTX, Markdown (.md), and text (.txt) files are supported.');
 }

@@ -6,7 +6,7 @@ export const MAX_REPORT_DOCUMENT_BYTES = 12 * 1024;
 
 export type DocumentMetadata = {
   displayName: string;
-  format: 'pdf' | 'pptx';
+  format: 'pdf' | 'pptx' | 'md' | 'txt';
   mediaType: string;
   byteSize: number;
   pageOrSlideCount: number;
@@ -54,11 +54,12 @@ export function validateDocumentMetadata(value: unknown): DocumentMetadata {
   if (!document || typeof document !== 'object' || Array.isArray(document)) throw new Error('invalid document metadata');
   const allowed = ['displayName', 'format', 'mediaType', 'byteSize', 'pageOrSlideCount', 'consentedAt', 'metadata'];
   if (Object.keys(document).some(key => !allowed.includes(key))) throw new Error('invalid document metadata field');
-  if (!['pdf', 'pptx'].includes(document.format)) throw new Error('invalid document format');
-  const expectedMediaType = document.format === 'pdf' ? 'application/pdf' : 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+  if (!['pdf', 'pptx', 'md', 'txt'].includes(document.format)) throw new Error('invalid document format');
+  const expectedMediaType = {pdf: 'application/pdf', pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', md: 'text/markdown', txt: 'text/plain'}[document.format as DocumentMetadata['format']];
   if (document.mediaType !== expectedMediaType) throw new Error('invalid document media type');
   if (!Number.isInteger(document.byteSize) || document.byteSize < 1 || document.byteSize > 25 * 1024 * 1024) throw new Error('invalid document byte size');
-  if (!Number.isInteger(document.pageOrSlideCount) || document.pageOrSlideCount < 1 || document.pageOrSlideCount > (document.format === 'pdf' ? 100 : 200)) throw new Error('invalid document page or slide count');
+  const isText = document.format === 'md' || document.format === 'txt';
+  if (!Number.isInteger(document.pageOrSlideCount) || (isText ? document.pageOrSlideCount !== 0 : document.pageOrSlideCount < 1 || document.pageOrSlideCount > (document.format === 'pdf' ? 100 : 200))) throw new Error('invalid document page or slide count');
   if (!/^\d{4}-\d{2}-\d{2}T/.test(document.consentedAt || '') || !Number.isFinite(Date.parse(document.consentedAt))) throw new Error('invalid document consent time');
   const metadata = document.metadata;
   if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) throw new Error('invalid document summary');

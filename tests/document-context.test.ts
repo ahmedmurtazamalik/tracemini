@@ -6,7 +6,7 @@ import request from 'supertest';
 import {afterEach, describe, expect, it} from 'vitest';
 import {zipSync, strToU8} from 'fflate';
 import {decodeReportContext, decodeScheduleDays, encodeReportContext, encodeScheduleDays, validateDocumentContext} from '../apps/server/src/document-context.js';
-import {extractPdf, extractPptx, OCR_INSTALL_COMMAND as CLI_OCR_INSTALL_COMMAND} from '../packages/cli/src/document-inspection.js';
+import {extractDocument, MAX_EXTRACTED_CHARACTERS, extractPdf, extractPptx, OCR_INSTALL_COMMAND as CLI_OCR_INSTALL_COMMAND} from '../packages/cli/src/document-inspection.js';
 import {createDocumentLoopbackHandler} from '../packages/cli/src/document-loopback.js';
 import {generateDocumentMetadata} from '../packages/cli/src/document-metadata.js';
 import {loadConfig, saveConfig} from '../packages/cli/src/config.js';
@@ -89,6 +89,24 @@ describe('local document processing', () => {
     fs.rmSync(temporary, {recursive: true, force: true});
   });
 
+  it('bounds text context and rejects empty, non-UTF-8, or binary input', async () => {
+    const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'tracemini-text-'));
+    const file = path.join(temporary, 'document.upload');
+    try {
+      for (const extension of ['md', 'txt']) {
+        fs.writeFileSync(file, '\ufeff' + 'é'.repeat(MAX_EXTRACTED_CHARACTERS + 1));
+        await expect(extractDocument(file, `notes.${extension}`)).resolves.toMatchObject({
+          format: extension, pageOrSlideCount: 0, text: 'é'.repeat(MAX_EXTRACTED_CHARACTERS),
+          warnings: [expect.stringContaining('truncated')],
+        });
+      }
+      for (const [bytes, error] of [[Buffer.from(' \n\t'), /no readable text/], [Buffer.from([0xc3, 0x28]), /UTF-8/], [Buffer.from('binary\0data'), /binary/]] as const) {
+        fs.writeFileSync(file, bytes);
+        await expect(extractDocument(file, 'notes.txt')).rejects.toThrow(error);
+      }
+    } finally { fs.rmSync(temporary, {recursive: true, force: true}); }
+  });
+
   it('extracts ordered text from a normal PDF', async () => {
     const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'tracemini-pdf-'));
     const file = path.join(temporary, 'context.pdf');
@@ -168,25 +186,35 @@ describe('local document processing', () => {
     fs.rmSync(temporary, {recursive: true, force: true});
   });
 
-  it('accepts an exact-origin streamed upload and deletes the temporary binary', async () => {
+  it.each([
+    ['pptx', 'application/octet-stream', 'fake-pptx', document.mediaType, 2],
+    ['md', 'text/markdown', '# Plan\n\nShip café support.', 'text/markdown', 0],
+    ['MD', 'text/plain', '# Notes\n\nKeep hard breaks.  \nNext line.', 'text/markdown', 0],
+    ['txt', 'text/plain; charset=utf-8', 'Release notes: café.', 'text/plain', 0],
+    ['txt', 'application/octet-stream', 'Notes without a browser MIME type.', 'text/plain', 0],
+  ])('accepts a %s upload (%s), deduplicates it, and deletes temporary bytes', async (extension, mediaType, content, expectedMediaType, count) => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'tracemini-loopback-'));
     process.env.TRACEMINI_HOME = home;
     saveConfig({...loadConfig(), serverUrl: 'https://trace.example', workspaceId: 7, agentId: 9});
     let temporaryPath = '';
     let derivations = 0;
-    const server = http.createServer(createDocumentLoopbackHandler({derive: async file => {
+    const server = http.createServer(createDocumentLoopbackHandler({derive: async (file, displayName) => {
       derivations += 1;
       temporaryPath = file;
-      expect(fs.readFileSync(file).toString()).toBe('fake-pptx');
-      return {extracted: {format: 'pptx', pageOrSlideCount: 2, text: 'bounded', warnings: []}, metadata: document.metadata};
+      expect(fs.readFileSync(file).toString()).toBe(content);
+      const extracted = extension === 'pptx' ? {format: 'pptx' as const, pageOrSlideCount: 2, text: 'bounded', warnings: []} : await extractDocument(file, displayName);
+      if (extension !== 'pptx') expect(extracted.text).toBe(content);
+      return {extracted, metadata: document.metadata};
     }}));
     const status = (await request(server).get('/v1/status').set('Host', '127.0.0.1:43127').set('Origin', 'https://trace.example').expect(200)).body;
-    const result = (await request(server).post('/v1/documents/derive-metadata').set('Host', '127.0.0.1:43127').set('Origin', 'https://trace.example').set('x-tracemini-nonce', status.nonce).set('x-tracemini-consent', 'true').set('x-tracemini-workspace', '7').set('x-tracemini-file-name', encodeURIComponent('roadmap.pptx')).set('content-type', 'application/octet-stream').send(Buffer.from('fake-pptx')).expect(201)).body;
-    expect(result).toMatchObject({displayName: 'roadmap.pptx', pageOrSlideCount: 2});
+    const result = (await request(server).post('/v1/documents/derive-metadata').set('Host', '127.0.0.1:43127').set('Origin', 'https://trace.example').set('x-tracemini-nonce', status.nonce).set('x-tracemini-consent', 'true').set('x-tracemini-workspace', '7').set('x-tracemini-file-name', encodeURIComponent(`roadmap.${extension}`)).set('content-type', String(mediaType)).send(Buffer.from(String(content))).expect(201)).body;
+    expect(result).toMatchObject({displayName: `roadmap.${extension}`, format: String(extension).toLowerCase(), mediaType: expectedMediaType, pageOrSlideCount: count});
+    const {localId, workspaceId, sha256, ...hosted} = result;
+    expect(validateDocumentContext([hosted])).toEqual([hosted]);
     expect(fs.existsSync(temporaryPath)).toBe(false);
     expect(loadConfig().documents).toHaveLength(1);
     const duplicateStatus = (await request(server).get('/v1/status').set('Host', '127.0.0.1:43127').set('Origin', 'https://trace.example').expect(200)).body;
-    const duplicate = (await request(server).post('/v1/documents/derive-metadata').set('Host', '127.0.0.1:43127').set('Origin', 'https://trace.example').set('x-tracemini-nonce', duplicateStatus.nonce).set('x-tracemini-consent', 'true').set('x-tracemini-workspace', '7').set('x-tracemini-file-name', encodeURIComponent('renamed.pptx')).set('content-type', 'application/octet-stream').send(Buffer.from('fake-pptx')).expect(200)).body;
+    const duplicate = (await request(server).post('/v1/documents/derive-metadata').set('Host', '127.0.0.1:43127').set('Origin', 'https://trace.example').set('x-tracemini-nonce', duplicateStatus.nonce).set('x-tracemini-consent', 'true').set('x-tracemini-workspace', '7').set('x-tracemini-file-name', encodeURIComponent(`renamed.${extension}`)).set('content-type', 'application/octet-stream').send(Buffer.from(String(content))).expect(200)).body;
     expect(duplicate.localId).toBe(result.localId);
     expect(derivations).toBe(1);
     fs.rmSync(home, {recursive: true, force: true});

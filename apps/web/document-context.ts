@@ -2,7 +2,7 @@ export type LocalContextDocument = {
   localId: string;
   workspaceId: number;
   displayName: string;
-  format: 'pdf' | 'pptx';
+  format: 'pdf' | 'pptx' | 'md' | 'txt';
   mediaType: string;
   byteSize: number;
   sha256?: string;

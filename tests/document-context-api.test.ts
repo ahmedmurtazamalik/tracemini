@@ -14,6 +14,9 @@ const documentContext = [{
   displayName: 'Plan.pdf', format: 'pdf', mediaType: 'application/pdf', byteSize: 1200, pageOrSlideCount: 2,
   consentedAt: '2026-09-02T10:00:00.000Z', metadata: {title: 'Plan', shortSummary: 'Release context.', keyPoints: [], decisions: [], actionItems: [], projects: [], people: [], relevantDates: [], warnings: []},
 }];
+for (const [format, mediaType] of [['md', 'text/markdown'], ['txt', 'text/plain']]) {
+  documentContext.push({...documentContext[0], displayName: `Plan.${format}`, format, mediaType, pageOrSlideCount: 0});
+}
 
 describe('document context API without schema changes', () => {
   it('stores manual metadata in the existing custom_prompt field', async () => {

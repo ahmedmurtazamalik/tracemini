@@ -10,11 +10,7 @@ import {MAX_DOCUMENT_BYTES, type ExtractedDocument} from './document-inspection.
 export const DOCUMENT_LOOPBACK_PORT = 43127;
 const nonces = new Map<string, number>();
 const developmentOrigins = new Set(['http://localhost:5173', 'http://127.0.0.1:5173']);
-const acceptedMediaTypes = new Set([
-  'application/octet-stream',
-  'application/pdf',
-  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-]);
+const documentMediaTypes = {pdf: 'application/pdf', pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', md: 'text/markdown', txt: 'text/plain'};
 
 const json = (res: ServerResponse, status: number, value: unknown, origin?: string) => {
   res.statusCode = status;
@@ -109,9 +105,10 @@ export function createDocumentLoopbackHandler(options: {
       const workspaceId = Number(req.headers['x-tracemini-workspace']);
       let displayName = '';
       try { displayName = safeName(decodeURIComponent(String(req.headers['x-tracemini-file-name'] || ''))); } catch {}
-      if (!Number.isInteger(workspaceId) || workspaceId < 1 || !displayName || !/\.(?:pdf|pptx)$/i.test(displayName)) return json(res, 422, {error: 'valid workspace and PDF/PPTX filename required'}, origin);
+      if (!Number.isInteger(workspaceId) || workspaceId < 1 || !displayName || !/\.(?:pdf|pptx|md|txt)$/i.test(displayName)) return json(res, 422, {error: 'valid workspace and PDF/PPTX/MD/TXT filename required'}, origin);
       const mediaType = String(req.headers['content-type'] || '').split(';', 1)[0].trim().toLowerCase();
-      if (!acceptedMediaTypes.has(mediaType)) return json(res, 415, {error: 'Only PDF and PPTX document uploads are accepted.'}, origin);
+      const format = path.extname(displayName).slice(1).toLowerCase() as ExtractedDocument['format'];
+      if (mediaType !== 'application/octet-stream' && mediaType !== documentMediaTypes[format] && !(format === 'md' && ['text/plain', 'text/x-markdown'].includes(mediaType))) return json(res, 415, {error: 'The media type must match the PDF, PPTX, Markdown (.md), or text (.txt) file.'}, origin);
       const existing = (config.documents || []).filter(document => document.workspaceId === workspaceId);
       if (existing.length >= 5) return json(res, 409, {error: 'Remove a local document before adding another (maximum five).'}, origin);
       const currentBytes = existing.reduce((total, document) => total + document.byteSize, 0);
@@ -127,7 +124,7 @@ export function createDocumentLoopbackHandler(options: {
         const duplicate = existing.find(document => document.sha256 === sha256);
         if (duplicate) return json(res, 200, duplicate, origin);
         const {extracted, metadata} = await derive(temporary, displayName);
-        const document: LocalDocument = {localId: crypto.randomUUID(), workspaceId, displayName, format: extracted.format, mediaType: extracted.format === 'pdf' ? 'application/pdf' : 'application/vnd.openxmlformats-officedocument.presentationml.presentation', byteSize, sha256, pageOrSlideCount: extracted.pageOrSlideCount, consentedAt: new Date().toISOString(), metadata: {...metadata, warnings: [...((metadata as any).warnings || []), ...extracted.warnings]}};
+        const document: LocalDocument = {localId: crypto.randomUUID(), workspaceId, displayName, format: extracted.format, mediaType: documentMediaTypes[extracted.format], byteSize, sha256, pageOrSlideCount: extracted.pageOrSlideCount, consentedAt: new Date().toISOString(), metadata: {...metadata, warnings: [...((metadata as any).warnings || []), ...extracted.warnings]}};
         updateConfig(current => { current.documents = [...(current.documents || []), document]; });
         return json(res, 201, document, origin);
       } catch (error: any) { return json(res, 422, {error: String(error?.message || error).slice(0, 500)}, origin); }
