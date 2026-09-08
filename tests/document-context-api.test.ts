@@ -14,8 +14,8 @@ const documentContext = [{
   displayName: 'Plan.pdf', format: 'pdf', mediaType: 'application/pdf', byteSize: 1200, pageOrSlideCount: 2,
   consentedAt: '2026-09-02T10:00:00.000Z', metadata: {title: 'Plan', shortSummary: 'Release context.', keyPoints: [], decisions: [], actionItems: [], projects: [], people: [], relevantDates: [], warnings: []},
 }];
-for (const [format, mediaType] of [['md', 'text/markdown'], ['txt', 'text/plain']]) {
-  documentContext.push({...documentContext[0], displayName: `Plan.${format}`, format, mediaType, pageOrSlideCount: 0});
+for (const [format, mediaType] of [['md', 'text/markdown'], ['txt', 'text/plain'], ['pptx', 'application/vnd.openxmlformats-officedocument.presentationml.presentation']]) {
+  documentContext.push({...documentContext[0], displayName: `Plan.${format}`, format, mediaType, pageOrSlideCount: format === 'pptx' ? 1 : 0});
 }
 
 describe('document context API without schema changes', () => {
@@ -44,18 +44,73 @@ describe('document context API without schema changes', () => {
     expect(await db.prepare('SELECT COUNT(*) count FROM report_jobs').get()).toMatchObject({count: 0});
   });
 
-  it('stores scheduled metadata in selected_days and copies it into a due job', async () => {
+  it('adds context after saving a weekday schedule, consumes it once, and preserves job snapshots', async () => {
     db = await openTestDb();
     const app = createApp(db);
     const account = (await request(app).post('/api/auth/register').send({name: 'Schedule docs', email: 'schedule-docs@example.test', password: 'password123'}).expect(201)).body;
     const workspace = (await request(app).get('/api/workspaces').set(auth(account.token)).expect(200)).body[0];
-    const schedule = (await request(app).put(`/api/workspaces/${workspace.id}/report-schedule`).set(auth(account.token)).send({name: 'Context schedule', enabled: true, frequency: 'DAILY', selectedDays: [], localTime: '09:00', timezone: 'UTC', reporter: 'codex', format: 'summary', includeDiff: false, notifySlack: false, windowDays: 1, documentContext}).expect(200)).body;
-    expect(schedule).toMatchObject({selected_days: [], document_context: documentContext});
-    const stored: any = await db.prepare('SELECT selected_days FROM report_schedules WHERE id=?').get(schedule.id);
-    expect(decodeScheduleDays(stored.selected_days).documents).toEqual(documentContext);
-    await db.prepare('UPDATE report_schedules SET next_run_at=? WHERE id=?').run('2026-09-02T09:00:00.000Z', schedule.id);
-    await materializeDueReportSchedules(db, account.user.id, new Date('2026-09-02T10:00:00.000Z'));
-    const job: any = await db.prepare('SELECT custom_prompt FROM report_jobs WHERE schedule_id=?').get(schedule.id);
-    expect(decodeReportContext(job.custom_prompt).documents).toEqual(documentContext);
+    const url = `/api/workspaces/${workspace.id}/report-schedule`;
+    const rule = {name: 'Context schedule', enabled: true, frequency: 'WEEKDAYS', selectedDays: [], localTime: '09:00', timezone: 'UTC', reporter: 'codex', format: 'summary', includeDiff: false, notifySlack: false, windowDays: 1};
+    await request(app).patch(`${url}/context`).set(auth(account.token)).send({add: documentContext}).expect(404);
+    const schedule = (await request(app).put(url).set(auth(account.token)).send(rule).expect(200)).body;
+    expect(schedule.document_context).toEqual([]);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const attached = (await request(app).patch(`${url}/context`).set(auth(account.token)).send({add: documentContext}).expect(200)).body;
+      expect(attached).toMatchObject({next_run_at: schedule.next_run_at, configured_by: schedule.configured_by, frequency: 'WEEKDAYS', document_context: documentContext});
+    }
+    // A stale settings form does not clear attachments or reattach consumed ones.
+    const renamed = (await request(app).put(url).set(auth(account.token)).send({...rule, name: 'Renamed schedule'}).expect(200)).body;
+    expect(renamed.document_context).toEqual(documentContext);
+    await db.prepare('UPDATE report_schedules SET next_run_at=? WHERE id=?').run('2026-09-04T09:00:00.000Z', schedule.id);
+    expect(await materializeDueReportSchedules(db, account.user.id, new Date('2026-09-04T10:00:00.000Z'))).toBe(1);
+    expect(await materializeDueReportSchedules(db, account.user.id, new Date('2026-09-04T10:00:00.000Z'))).toBe(0);
+    const firstJob: any = await db.prepare('SELECT * FROM report_jobs WHERE schedule_id=?').get(schedule.id);
+    expect(decodeReportContext(firstJob.custom_prompt).documents).toEqual(documentContext);
+    const consumed = (await request(app).get(url).set(auth(account.token)).expect(200)).body;
+    expect(consumed).toMatchObject({document_context: [], next_run_at: '2026-09-07T09:00:00.000Z'});
+    await request(app).put(url).set(auth(account.token)).send(rule).expect(200);
+    await db.prepare('UPDATE report_schedules SET next_run_at=? WHERE id=?').run('2026-09-07T09:00:00.000Z', schedule.id);
+    await materializeDueReportSchedules(db, account.user.id, new Date('2026-09-07T10:00:00.000Z'));
+    const jobs: any[] = await db.prepare('SELECT * FROM report_jobs WHERE schedule_id=? ORDER BY id').all(schedule.id);
+    expect(jobs).toHaveLength(2);
+    expect(decodeReportContext(jobs[1].custom_prompt).documents).toEqual([]);
+    const nextDocument = {...documentContext[1], displayName: 'Monday work.md'};
+    await request(app).patch(`${url}/context`).set(auth(account.token)).send({add: [nextDocument]}).expect(200);
+    await materializeDueReportSchedules(db, account.user.id, new Date('2026-09-08T10:00:00.000Z'));
+    const latest: any[] = await db.prepare('SELECT * FROM report_jobs WHERE schedule_id=? ORDER BY id').all(schedule.id);
+    expect(latest).toHaveLength(3);
+    expect(decodeReportContext(latest[0].custom_prompt).documents).toEqual(documentContext);
+    expect(decodeReportContext(latest[1].custom_prompt).documents).toEqual([]);
+    expect(decodeReportContext(latest[2].custom_prompt).documents).toEqual([nextDocument]);
+  });
+
+  it('protects scheduled attachments and preserves timing and generator ownership when another Manager adds context', async () => {
+    db = await openTestDb();
+    const app = createApp(db);
+    const register = async (name: string) => (await request(app).post('/api/auth/register').send({name, email: `${name}@example.test`, password: 'password123'}).expect(201)).body;
+    const owner = await register('owner');
+    const contributor = await register('contributor');
+    const workspaceId = owner.workspaceId;
+    const url = `/api/workspaces/${workspaceId}/report-schedule`;
+    const rule = {enabled: false, frequency: 'SELECTED_DAYS', selectedDays: [1, 3], localTime: '09:00', timezone: 'UTC', reporter: 'codex', windowDays: 1, documentContext};
+    const schedule = (await request(app).put(url).set(auth(owner.token)).send(rule).expect(200)).body;
+    await request(app).patch(`${url}/context`).send({add: documentContext}).expect(401);
+    await request(app).patch(`${url}/context`).set(auth(contributor.token)).send({add: documentContext}).expect(403);
+    const invitation = (await request(app).post(`/api/workspaces/${workspaceId}/invitations`).set(auth(owner.token)).send({email: contributor.user.email, role: 'Developer'}).expect(201)).body;
+    await request(app).post(`/api/invitations/${invitation.id}/accept`).set(auth(contributor.token)).expect(200);
+    await request(app).patch(`${url}/context`).set(auth(contributor.token)).send({remove: [`${documentContext[0].displayName}\0${documentContext[0].consentedAt}`]}).expect(403);
+    await request(app).patch(`/api/workspaces/${workspaceId}/members/${contributor.user.id}`).set(auth(owner.token)).send({role: 'Manager'}).expect(200);
+    const extra = {...documentContext[1], displayName: 'Extra.md'};
+    const attached = (await request(app).patch(`${url}/context`).set(auth(contributor.token)).send({add: [extra]}).expect(200)).body;
+    expect(attached).toMatchObject({configured_by: owner.user.id, next_run_at: schedule.next_run_at, enabled: false, selected_days: [1, 3], document_context: [...documentContext, extra]});
+    await request(app).patch(`${url}/context`).set(auth(owner.token)).send({add: [{...extra, displayName: 'Sixth.md'}]}).expect(422);
+    await request(app).patch(`${url}/context`).set(auth(owner.token)).send({add: [{...extra, extractedText: 'private text'}]}).expect(422);
+    await request(app).patch(`${url}/context`).set(auth(owner.token)).send({remove: [123]}).expect(422);
+    expect(await materializeDueReportSchedules(db, owner.user.id, new Date('2026-09-09T10:00:00.000Z'))).toBe(0);
+    const retained = (await request(app).get(url).set(auth(owner.token)).expect(200)).body;
+    expect(retained.document_context).toEqual([...documentContext, extra]);
+    const removed = (await request(app).patch(`${url}/context`).set(auth(contributor.token)).send({remove: [`${extra.displayName}\0${extra.consentedAt}`]}).expect(200)).body;
+    expect(removed).toMatchObject({configured_by: owner.user.id, selected_days: [1, 3], document_context: documentContext});
+    expect(decodeScheduleDays((await db.prepare('SELECT selected_days FROM report_schedules WHERE id=?').get(schedule.id) as any).selected_days).documents).toEqual(documentContext);
   });
 });

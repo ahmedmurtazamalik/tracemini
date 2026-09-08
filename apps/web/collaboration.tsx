@@ -137,8 +137,7 @@ export function ReportSchedule({api, workspaceId, timezone, documents = []}: {ap
       if (!alive.current || generation !== loadGeneration.current) return;
       setSchedule(schedule); setEditing(!schedule); setConfirmingDelete(false);
       if (!schedule) { setName('Scheduled workspace report'); setEnabled(true); setFrequency('WEEKDAYS'); setSelectedDays([]); setSelectedDocumentIds([]); setLocalTime('09:00'); setZone(timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'); setReporter('hermes'); setFormat('summary'); setIncludeDiff(false); setNotifySlack(false); setWindowDays(7); return; }
-      const selected = new Set((schedule.document_context || []).map(documentIdentity));
-      setName(schedule.name || 'Scheduled workspace report'); setEnabled(Boolean(schedule.enabled)); setFrequency(schedule.frequency); setSelectedDays(schedule.selected_days || []); setSelectedDocumentIds(documents.filter(document => selected.has(documentIdentity(document))).map(document => document.localId)); setLocalTime(schedule.local_time); setZone(schedule.timezone); setReporter(schedule.reporter); setFormat(schedule.format); setIncludeDiff(Boolean(schedule.include_diff)); setNotifySlack(Boolean(schedule.notify_slack)); setWindowDays(Number(schedule.window_days)); setNextRun(schedule.next_run_at);
+      setName(schedule.name || 'Scheduled workspace report'); setEnabled(Boolean(schedule.enabled)); setFrequency(schedule.frequency); setSelectedDays(schedule.selected_days || []); setSelectedDocumentIds([]); setLocalTime(schedule.local_time); setZone(schedule.timezone); setReporter(schedule.reporter); setFormat(schedule.format); setIncludeDiff(Boolean(schedule.include_diff)); setNotifySlack(Boolean(schedule.notify_slack)); setWindowDays(Number(schedule.window_days)); setNextRun(schedule.next_run_at);
     }).catch((caught: any) => { if (alive.current && generation === loadGeneration.current) setError(caught.message); })
       .finally(() => { if (alive.current && generation === loadGeneration.current) setLoading(false); });
     return () => { loadGeneration.current += 1; };
@@ -148,12 +147,25 @@ export function ReportSchedule({api, workspaceId, timezone, documents = []}: {ap
     const generation = loadGeneration.current;
     event.preventDefault(); setPending(true); setError(''); setMessage('');
     try {
-      const documentContext = documents.filter(document => selectedDocumentIds.includes(document.localId)).map(hostedDocument);
-      const schedule = await api(`/workspaces/${workspaceId}/report-schedule`, {method: 'PUT', body: JSON.stringify({name, enabled, frequency, selectedDays, localTime, timezone: zone, reporter, format, includeDiff, notifySlack, windowDays, documentContext})});
+      const schedule = await api(`/workspaces/${workspaceId}/report-schedule`, {method: 'PUT', body: JSON.stringify({name, enabled, frequency, selectedDays, localTime, timezone: zone, reporter, format, includeDiff, notifySlack, windowDays})});
       if (!alive.current || generation !== loadGeneration.current) return; setSchedule(schedule); setName(schedule.name); setNextRun(schedule.next_run_at); setEditing(false); setMessage(enabled ? 'Schedule saved.' : 'Schedule paused.');
     } catch (caught: any) { if (alive.current && generation === loadGeneration.current) setError(caught.message); }
     finally { if (alive.current && generation === loadGeneration.current) setPending(false); }
   };
+  const syncContext = async (change?: {add?: ReturnType<typeof hostedDocument>[]; remove?: string[]}) => {
+    const generation = loadGeneration.current;
+    setPending(true); setError(''); setMessage('');
+    try {
+      const latest = await api(`/workspaces/${workspaceId}/report-schedule${change ? '/context' : ''}`, change ? {method: 'PATCH', body: JSON.stringify(change)} : undefined);
+      if (!alive.current || generation !== loadGeneration.current) return;
+      setSchedule(latest); setNextRun(latest?.next_run_at); setSelectedDocumentIds([]);
+      if (!latest) setEditing(true);
+      setMessage(change ? 'Context saved for the next scheduled report only.' : 'Scheduled context refreshed.');
+    } catch (caught: any) { if (alive.current && generation === loadGeneration.current) setError(caught.message); }
+    finally { if (alive.current && generation === loadGeneration.current) setPending(false); }
+  };
+  const scheduledDocuments: LocalContextDocument[] = schedule?.document_context || [];
+  const availableDocuments = documents.filter(document => !scheduledDocuments.some(saved => documentIdentity(saved) === documentIdentity(document)));
   const remove = async () => {
     const generation = loadGeneration.current;
     setPending(true); setError(''); setMessage('');
@@ -183,9 +195,17 @@ export function ReportSchedule({api, workspaceId, timezone, documents = []}: {ap
       <label>Writing style<select value={format} onChange={event => setFormat(event.target.value)}><option value="summary">Bullet-point summary</option><option value="detailed">Detailed report</option></select></label>
       <label className="diff-consent"><input type="checkbox" checked={includeDiff} onChange={event => setIncludeDiff(event.target.checked)} /><span><strong>Share bounded diff excerpts</strong><small>Add redacted code excerpts for better detail.</small></span></label>
       <label className="diff-consent"><input type="checkbox" checked={notifySlack} onChange={event => setNotifySlack(event.target.checked)} /><span><strong>Notify Slack</strong><small>Post the full report when it is ready.</small></span></label>
-      {documents.length > 0 && <fieldset className="document-selector span-all"><legend>Include document context in scheduled reports</legend>{documents.map(document => <label key={document.localId}><input type="checkbox" checked={selectedDocumentIds.includes(document.localId)} onChange={() => setSelectedDocumentIds(current => current.includes(document.localId) ? current.filter(id => id !== document.localId) : [...current, document.localId].slice(0, 5))} /><span><strong>{document.displayName}</strong><small>{document.metadata.shortSummary}</small></span></label>)}</fieldset>}
       <div className="actions span-two"><button className="button primary" disabled={pending || (frequency === 'SELECTED_DAYS' && !selectedDays.length)} type="submit">{pending ? 'Saving…' : schedule ? 'Save changes' : 'Create schedule'}</button>{schedule && <button className="button secondary" disabled={pending} type="button" onClick={() => setEditing(false)}>Cancel</button>}</div>
     </form>}
+    {!loading && schedule && <div className="next-report-context">
+      <div className="section-heading"><div><h3>Context for next report</h3><span className="muted">{scheduledDocuments.length}/5 files attached</span></div><button className="button secondary" type="button" disabled={pending} onClick={() => void syncContext()}>Refresh context</button></div>
+      <p className="muted">Attach PDF, PPTX, MD, or TXT files using Add context files above, then select them here. Work notes should name the engineer, the date, and the completed work. These files apply once, when the next scheduled report is queued; later runs will not reuse them. You can add more context after each run.</p>
+      {!schedule.enabled && <p className="muted">The schedule is paused. Attached context will wait until it is enabled and a report is queued.</p>}
+      <div className="document-list">{scheduledDocuments.map(document => <article className="document-row" key={documentIdentity(document)}><div><strong>{document.displayName}</strong><small>{document.metadata.shortSummary}</small></div><button className="button secondary" type="button" disabled={pending} onClick={() => void syncContext({remove: [documentIdentity(document)]})}>Remove from next report</button></article>)}</div>
+      {!scheduledDocuments.length && <p className="muted">No context is attached to the next report.</p>}
+      {availableDocuments.length > 0 && <fieldset className="document-selector"><legend>Add to next scheduled report</legend>{availableDocuments.map(document => <label key={document.localId}><input type="checkbox" disabled={pending || (!selectedDocumentIds.includes(document.localId) && scheduledDocuments.length + selectedDocumentIds.length >= 5)} checked={selectedDocumentIds.includes(document.localId)} onChange={() => setSelectedDocumentIds(current => current.includes(document.localId) ? current.filter(id => id !== document.localId) : [...current, document.localId])} /><span><strong>{document.displayName}</strong><small>{document.metadata.shortSummary}</small></span></label>)}</fieldset>}
+      {availableDocuments.length > 0 && <div className="actions"><button className="button primary" type="button" disabled={pending || !selectedDocumentIds.length} onClick={() => void syncContext({add: availableDocuments.filter(document => selectedDocumentIds.includes(document.localId)).map(hostedDocument)})}>{pending ? 'Saving…' : 'Add to next report'}</button></div>}
+    </div>}
     {message && <div className="alert success" role="status">{message}</div>}{error && <div className="alert error" role="alert">{error}</div>}
   </section>;
 }

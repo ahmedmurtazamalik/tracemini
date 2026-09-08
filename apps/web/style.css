@@ -46,3 +46,5 @@ html[data-theme=day] .activity-chart-composite{border-color:#b9c2b6;background:#
 .logo-lap-message{position:absolute;left:50%;bottom:1.25rem;transform:translateX(-50%);width:max-content;max-width:calc(100% - 2rem);display:grid;gap:.3rem;padding:.85rem 1rem;border:1px solid var(--signal);color:var(--ink);background:var(--surface);box-shadow:3px 3px 0 var(--line-strong);font-size:.75rem;line-height:1.5;text-align:center}
 .logo-lap-message strong{color:var(--signal)}
 @media(prefers-reduced-motion:reduce){.logo-lap-track{display:none}.logo-on-lap .brand-mark img{visibility:visible}}
+
+.next-report-context{display:grid;gap:.8rem;margin-top:1.25rem;padding-top:1.25rem;border-top:1px solid var(--line)}.next-report-context .document-row>div{display:grid;gap:.25rem;min-width:0;overflow-wrap:anywhere}.next-report-context .document-selector input[type=checkbox]{flex:0 0 auto;width:16px;height:16px;min-height:0;margin:2px 0 0;padding:0;accent-color:var(--signal)}

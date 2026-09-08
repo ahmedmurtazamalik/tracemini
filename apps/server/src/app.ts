@@ -1003,11 +1003,36 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
       }
       return await db.prepare(`INSERT INTO report_schedules(workspace_id,configured_by,name,enabled,frequency,selected_days,local_time,timezone,reporter,format,include_diff,notify_slack,window_days,next_run_at,created_at,updated_at)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(workspace_id) DO UPDATE SET configured_by=EXCLUDED.configured_by,name=EXCLUDED.name,enabled=EXCLUDED.enabled,frequency=EXCLUDED.frequency,selected_days=EXCLUDED.selected_days,local_time=EXCLUDED.local_time,timezone=EXCLUDED.timezone,reporter=EXCLUDED.reporter,format=EXCLUDED.format,include_diff=EXCLUDED.include_diff,notify_slack=EXCLUDED.notify_slack,window_days=EXCLUDED.window_days,next_run_at=EXCLUDED.next_run_at,updated_at=EXCLUDED.updated_at RETURNING *`)
-        .get(req.params.id, req.user.id, scheduleName, enabled, rule.frequency, JSON.stringify(encodeScheduleDays(rule.selectedDays, documentContext)), rule.localTime, rule.timezone, req.body.reporter, normalizeReportFormat(req.body.format), req.body.includeDiff === true, req.body.notifySlack === true, windowDays, nextRunAt, configuredAt.toISOString(), configuredAt.toISOString());
+        .get(req.params.id, req.user.id, scheduleName, enabled, rule.frequency, JSON.stringify(encodeScheduleDays(rule.selectedDays, req.body.documentContext === undefined && existing ? decodeScheduleDays(eventData(existing.selected_days)).documents : documentContext)), rule.localTime, rule.timezone, req.body.reporter, normalizeReportFormat(req.body.format), req.body.includeDiff === true, req.body.notifySlack === true, windowDays, nextRunAt, configuredAt.toISOString(), configuredAt.toISOString());
     });
     if (!outcome) return res.status(403).json({error: 'Manager required'});
     const state = decodeScheduleDays(eventData(outcome.selected_days));
     res.json({...outcome, selected_days: state.days, document_context: state.documents});
+  });
+  app.patch('/api/workspaces/:id/report-schedule/context', userAuth, requireManager, async (req: Authed, res) => {
+    let additions;
+    try { additions = validateDocumentContext(req.body.add); }
+    catch (error: any) { return res.status(422).json({error: error.message}); }
+    const removals = req.body.remove ?? [];
+    if (!Array.isArray(removals) || removals.length > 5 || removals.some((key: unknown) => typeof key !== 'string' || key.length > 256)) return res.status(422).json({error: 'invalid document removal list'});
+    const outcome: any = await db.transaction(async () => {
+      await db.prepare('SELECT id FROM workspaces WHERE id=? FOR UPDATE').get(req.params.id);
+      if (!(await hasLockedManagerAuthority(+req.params.id, req.user.id))) return {status: 403, error: 'Manager required'};
+      const schedule: any = await db.prepare('SELECT * FROM report_schedules WHERE workspace_id=? FOR UPDATE').get(req.params.id);
+      if (!schedule) return {status: 404, error: 'Save a schedule before adding context.'};
+      const state = decodeScheduleDays(eventData(schedule.selected_days));
+      const identity = (document: {displayName: string; consentedAt: string}) => `${document.displayName}\0${document.consentedAt}`;
+      const documents = new Map(state.documents.filter(document => !removals.includes(identity(document))).map(document => [identity(document), document]));
+      for (const document of additions) documents.set(identity(document), document);
+      let context;
+      try { context = validateDocumentContext([...documents.values()]); }
+      catch (error: any) { return {status: 422, error: error.message}; }
+      const row: any = await db.prepare('UPDATE report_schedules SET selected_days=?,updated_at=? WHERE id=? RETURNING *')
+        .get(JSON.stringify(encodeScheduleDays(state.days, context)), now(), schedule.id);
+      return {row: {...row, selected_days: state.days, document_context: context}};
+    });
+    if (outcome.error) return res.status(outcome.status).json({error: outcome.error});
+    res.json(outcome.row);
   });
   app.delete('/api/workspaces/:id/report-schedule', userAuth, requireManager, async (req: Authed, res) => {
     const outcome: any = await db.transaction(async () => {

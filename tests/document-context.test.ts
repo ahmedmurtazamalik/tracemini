@@ -58,13 +58,19 @@ describe('schema-free document context', () => {
   });
 
   it('adds document metadata separately without changing Git evidence', () => {
-    const prompt = contextPrompt({job: {start_date: '2026-09-01', end_date: '2026-09-01', custom_prompt: encodeReportContext(null, [document])}, events: []}, []);
+    const workNotes = {...document, metadata: {...document.metadata, keyPoints: [{text: 'Ali completed a design review on 2026-09-01.', references: ['Slide 1']}]}};
+    const prompt = contextPrompt({job: {report_scope: 'workspace', start_date: '2026-09-01', end_date: '2026-09-01', custom_prompt: encodeReportContext(null, [workNotes])}, events: []}, []);
     expect(prompt).toContain('Additional document context');
-    expect(prompt).toContain('not proof of engineering work');
+    expect(prompt).toContain('Plans, proposals, and open action items are not completed work');
     expect(prompt).toContain('Plans the reporting release.');
     expect(prompt).not.toContain('application/vnd');
     expect(prompt).toContain('Include a clearly labeled Document context section');
-    const completed = ensureDocumentContextSection('# Engineering report', encodeReportContext(null, [document]));
+    expect(prompt).toContain('Ali completed a design review on 2026-09-01.');
+    expect(prompt).toContain('even if they have no Git events');
+    expect(prompt).toContain('attribute it to the named document');
+    const completed = ensureDocumentContextSection('# Engineering report', encodeReportContext(null, [workNotes]));
+    expect(completed).toContain('Ali completed a design review');
+    expect(completed).toContain('Document-reported work');
     expect(completed).toContain('## Document context');
     expect(completed).toContain('Plans the reporting release');
     expect(ensureDocumentContextSection('# Git-only report', null)).toBe('# Git-only report');

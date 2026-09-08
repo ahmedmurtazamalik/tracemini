@@ -1580,7 +1580,7 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error, timezon
       />
       <section className="card reports-create-card document-context-card">
         <div className="section-heading"><div><span>Local context</span><h2 className="heading-with-tip">Add document context <InfoTip label="Scanned PDF OCR">Scanned PDFs need Poppler and Tesseract on this PC. Copy and paste into a terminal:<CopyableOcrCommand /></InfoTip></h2></div><span className="count-badge">{documents.length}/5</span></div>
-        <p className="muted document-context-note">PDF, PPTX, Markdown (.md), and text (.txt) files are analyzed on this PC; only structured metadata is attached to reports. Git remains the evidence of completed work. Scanned PDFs require local OCR.</p>
+        <p className="muted document-context-note">PDF, PPTX, Markdown (.md), and text (.txt) files are analyzed on this PC; only structured metadata is attached to reports. Include who did the work, when, and what was completed so the report can credit work outside Git. Scanned PDFs require local OCR.</p>
         {ocrInstallNeeded && <div className="alert error ocr-install-alert" role="alert"><strong>Local OCR is not installed.</strong><span>Copy and paste this command into a terminal, then retry the PDF:</span><CopyableOcrCommand /></div>}
         <div className="actions">
           <label className={`button secondary file-button${documentPending || documents.length >= 5 ? " disabled" : ""}`}>
@@ -1619,7 +1619,7 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error, timezon
           if (role === "Manager") {
             const schedule = await request(`/workspaces/${workspaceId}/report-schedule`);
             const retained = (schedule?.document_context || []).filter((item: LocalContextDocument) => documentIdentity(item) !== documentIdentity(document));
-            if (schedule && retained.length !== (schedule.document_context || []).length) await request(`/workspaces/${workspaceId}/report-schedule`, {method: "PUT", body: JSON.stringify({name: schedule.name, enabled: schedule.enabled, frequency: schedule.frequency, selectedDays: schedule.selected_days, localTime: schedule.local_time, timezone: schedule.timezone, reporter: schedule.reporter, format: schedule.format, includeDiff: schedule.include_diff, notifySlack: schedule.notify_slack, windowDays: schedule.window_days, documentContext: retained})});
+            if (schedule && retained.length !== (schedule.document_context || []).length) await request(`/workspaces/${workspaceId}/report-schedule/context`, {method: "PATCH", body: JSON.stringify({remove: [documentIdentity(document)]})});
           }
           await deleteLocalDocument(document.localId); setDocuments(current => current.filter(item => item.localId !== document.localId)); setSelectedDocumentIds(current => current.filter(id => id !== document.localId));
         } catch (caught: any) { setActionError(caught.message); } }}>Delete</button></article>)}</div></>}
