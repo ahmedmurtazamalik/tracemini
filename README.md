@@ -2,9 +2,11 @@
 
 TraceMini helps small development teams see what they worked on and turn that work into useful reports.
 
+**[Open TraceMini →](https://tracemini.vercel.app)**
+
 Connect your Git repositories, work as usual, and review your activity in a shared dashboard. When you need an update, TraceMini uses your installed Codex or Hermes CLI to help write it.
 
-Built for a small team of 4–6 developers, with a self-hosted web app and a lightweight Linux agent on each developer’s machine.
+Built for a small team of 4–6 developers, with a ready-to-use web app and a lightweight Linux agent on each developer’s machine. You can use the public app or host your own instance.
 
 ## What you can do
 
@@ -18,9 +20,7 @@ TraceMini stores activity information and generated reports. It does not upload 
 
 ## Start using TraceMini
 
-If your team already has a running instance:
-
-1. Create an account and create a workspace, or accept an invitation from your team.
+1. Open [tracemini.vercel.app](https://tracemini.vercel.app), create an account, and create a workspace or accept an invitation from your team.
 2. Open **Install CLI** in the web app and run the generated command on your Linux machine.
 3. Choose the folders containing your projects. You can skip this and add folders later.
 4. In **Settings**, select the repositories you want to track.
@@ -44,7 +44,7 @@ You can attach up to five Markdown, text, PDF, or PowerPoint files to explain wo
 
 Managers can also schedule recurring reports. Documents added under **Context for next report** apply to the next scheduled report only. The machine responsible for generating the report needs to be online.
 
-## Run your own instance
+## Optional: run your own instance
 
 You’ll need Node.js 22+, npm 10+, Git, and a PostgreSQL database. The example configuration uses Supabase.
 
