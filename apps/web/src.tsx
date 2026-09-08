@@ -27,6 +27,7 @@ import { InvitationInbox, ReportSchedule, WorkspaceInvitations } from "./collabo
 import { HelpDrawer, InfoTip, type HelpSection } from "./help.js";
 import {deleteLocalDocument, deriveLocalDocument, documentIdentity, hostedDocument, listLocalDocuments, OCR_INSTALL_COMMAND, requiresOcrInstall, type LocalContextDocument} from "./document-context.js";
 import { activitySummary } from "./activity-summary.js";
+import { LogoTrainButton } from "./logo-train.js";
 import "./style.css";
 
 class ApiRequestError extends Error {
@@ -97,13 +98,13 @@ function AuthShell({
   return (
     <main className="auth-page">
       <section className="auth-panel">
-        <button
+        <LogoTrainButton
           className="auth-brand"
           onClick={() => navigate("/")}
           aria-label="TraceMini home"
         >
           <Brand />
-        </button>
+        </LogoTrainButton>
         <div className="auth-copy">
           <span className="eyebrow">{eyebrow}</span>
           <h1>{title}</h1>
@@ -2004,12 +2005,12 @@ function App() {
         Skip to content
       </a>
       <aside className="sidebar">
-        <button
+        <LogoTrainButton
           className="sidebar-brand"
           onClick={() => navigate(workspacePath(workspaceId))}
         >
           <Brand />
-        </button>
+        </LogoTrainButton>
         <p className="workspace-label">Developer command center</p>
         <label className="workspace-select">
           <span className="label-with-tip">Workspace <InfoTip label="Workspace">A workspace is a separate team area with its own members, repositories, activity, and reports. You can create and switch between multiple workspaces.</InfoTip></span>
