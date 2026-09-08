@@ -2,37 +2,66 @@
 
 TraceMini is a small self-hosted activity dashboard and local Git agent for 4–6 developers. Express serves the API and built React/Vite app, Supabase-hosted PostgreSQL stores metadata and Markdown reports, and the local TypeScript CLI observes explicitly watched Git roots. TraceMini does not store source code or call Git-hosting provider APIs.
 
-## Requirements and verification
+## Run the server locally
 
-- Node.js 22 (the package engine requirement; development is also checked under the current local Node runtime)
-- npm 10+
-- Git
-- Linux with a working systemd user session
-- Optional for report generation: an authenticated local `codex` or `hermes` executable
-- `sudo`/APT access during CLI installation (the installer installs `poppler-utils` and `tesseract-ocr` for scanned/image-only PDFs)
+Requirements: Node.js 22+, npm 10+, Git, and a PostgreSQL connection. The Linux agent additionally requires a working systemd user session and `sudo`/APT access; report generation requires an installed, authenticated `codex` or `hermes` executable.
 
 ```bash
-npm install --workspaces --include-workspace-root
+npm ci
+cp -n .env.example .env.local
+```
+
+Edit `.env.local` and set `DATABASE_URL` to your Supabase PostgreSQL Session Pooler connection string before starting the server. Keep database credentials server-side; never put them in `VITE_*` variables. Then build all three workspaces and start Express:
+
+```bash
+npm run build
+npm start -w @tracemini/server
+```
+
+Open [http://localhost:3000](http://localhost:3000), register an account, and create a workspace. Express serves both the API and the built React/Vite app. `PORT` defaults to `3000`. For backend development, `npm run dev` watches the server source; rebuild the web workspace after UI changes to update the UI served by Express.
+
+Both `dev` and `start` load the root `.env.local`. Hosted deployments use process environment variables. See [.env.example](.env.example) for `DATABASE_URL`, `PORT`, the optional `PGSSLROOTCERT` certificate path, and optional `SLACK_REPORT_WEBHOOK_URL` notifications.
+
+The backend connects directly with `pg` and applies versioned migrations under a PostgreSQL advisory lock at startup. Supabase connections and connections using `sslmode=require` use certificate and hostname verification, with the bundled Supabase Root 2021 CA for Supabase (or the certificate at `PGSSLROOTCERT`). Keep the Supabase Data API disabled because clients access data only through this backend.
+
+## Verify changes
+
+```bash
 npm test
 npm run typecheck
 npm run build
 npm run acceptance
-npm start -w @tracemini/server
 ```
 
-The built Express process serves the API and `apps/web/dist` at `http://localhost:3000`. Set `DATABASE_URL` to the Supabase PostgreSQL Session Pooler connection string; the backend connects directly with `pg` and applies versioned migrations under a PostgreSQL advisory lock at startup. Connections using `sslmode=require` are upgraded to certificate and hostname verification with the bundled Supabase Root 2021 CA (or the certificate at `PGSSLROOTCERT`). Keep the Supabase Data API disabled because clients access data only through this backend. `PORT` defaults to `3000`. Tests and acceptance use isolated in-memory PostgreSQL emulation; the release gate additionally runs a temporary, cleaned-up workflow against the hosted PostgreSQL database. No persistent SQLite volume is required.
+Tests and acceptance use isolated in-memory PostgreSQL emulation and do not require hosted database credentials. Acceptance requires the built artifacts and exercises account/workspace onboarding, repository selection, real Git hooks and push confirmation, activity retrieval, and report storage using deterministic Markdown. It does not invoke Codex or Hermes. Hosted PostgreSQL, interactive AI authentication, and systemd installation need separate checks when those paths change.
+
+## Repository layout
+
+- `apps/server` — Express API, PostgreSQL storage, and generated Linux installer.
+- `apps/web` — React/Vite dashboard, workspace settings, and reports.
+- `packages/cli` — local Git agent, hooks, document extraction, and Codex/Hermes report execution.
+- `tests` — workflow and focused unit tests.
+- `scripts/acceptance.sh` — local end-to-end acceptance check.
+
+[AGENTS.md](AGENTS.md) defines the repository's simplification and testing rules. [TRACEMINI_SYSTEM_OVERVIEW.md](TRACEMINI_SYSTEM_OVERVIEW.md) is the original design reference; its SQLite, invite-code, and example CLI descriptions are historical. This README describes the current workflows.
 
 ## Workspace and CLI onboarding
 
 Roles are only **Manager** and **Developer**. A workspace creator is its first Manager. Managers invite an existing TraceMini account by email; the recipient receives a private inbox invitation and gets no workspace access until accepting it. Legacy shared invite codes and code-based joins are retired and are never returned by workspace APIs. Managers can revoke pending invitations, promote/demote existing developers, remove members, archive repositories, configure workspace report schedules, and delete the workspace. A mutation that would leave zero Managers is rejected. Every member chooses which repositories on their own device are traced; Managers see bounded identity/status metadata for all selected workspace repositories but cannot select or expose another member's filesystem paths. A device is account-level rather than owned by one workspace, so only its owner can revoke it; revocation disconnects that device from every workspace.
 
-From **Install CLI** in the authenticated web app, generate and run the one Linux install command. The command uses `curl` to download a server-generated installer file and then runs that local file; it does not pipe network content directly into a shell. The guided installer installs the OCR system packages with APT, checks prerequisites, stages and verifies the dependency-free CLI, connects the device with a short-lived single-use token, prompts for one or more explicitly approved watch paths, discovers repositories, enables `tracemini.service`, and verifies the server connection. It logs progress to `~/.local/state/tracemini/install.log`. A failed fresh install removes its partial state; a failed upgrade restores the previous executable and service without reverting a newly rotated valid credential. It requires Node.js 22+ and `sudo`/APT access but does not require npm, a package registry, or a preinstalled `tracemini` command.
+From **Install CLI** in the authenticated web app, generate and run the one Linux install command. The command uses `curl` to download a server-generated installer file and then runs that local file; it does not pipe network content directly into a shell. The guided installer installs the OCR system packages with APT, checks prerequisites, stages and verifies the dependency-free CLI, connects the device with a short-lived single-use token, prompts for explicitly approved watch paths, discovers repositories under those paths, enables `tracemini.service`, and verifies the server connection. It logs progress to `~/.local/state/tracemini/install.log`. A failed fresh install removes its partial state; a failed upgrade restores the previous executable and service without reverting a newly rotated valid credential. It requires Node.js 22+ and `sudo`/APT access but does not require npm, a package registry, or a preinstalled `tracemini` command.
+
+You can press Enter at the watch-folder prompt to finish setup without watching any folders. No repositories are discovered until you add a watch path. This also supports a Manager device used only to generate workspace summaries.
 
 ```bash
 tracemini status
 tracemini watch /absolute/path/to/a/root
+tracemini repositories
+tracemini use-workspace WORKSPACE_ID
 tracemini --help
 ```
+
+Replace `WORKSPACE_ID` with the numeric ID of a workspace you belong to.
 
 Add `export PATH="$HOME/.local/bin:$PATH"` to the appropriate shell startup file if `~/.local/bin` is not already on `PATH`. A newly started service can have no journal output; `-- No entries --` is normal immediately after installation. Agent credentials, watched roots, clone state, and the retry queue are stored with user-only permissions under `~/.tracemini`; `TRACEMINI_HOME` overrides the state directory. Configuration writes are atomic, and the background service reloads roots and clones written by interactive `tracemini watch` commands instead of overwriting them with an older in-memory snapshot.
 
@@ -44,7 +73,7 @@ The dashboard shows agent online/offline state. “Online” means authenticated
 
 ## Discovery and refresh
 
-`watch` requires an absolute path and recursively discovers repositories only below that explicit root. Multiple roots can be configured by running the command repeatedly. The web **Scan repositories on my devices** action queues a scan on the requesting member's own agents; each agent scans all roots that member previously approved with `tracemini watch`, irrespective of workspace. It publishes bounded workspace-scoped metadata. Each member explicitly selects their own repositories; that member's local agent then validates the immutable identity and starts or stops tracing. Selecting the same physical clone in another workspace links its already captured activity and shares future observations without duplicating them. Managers can review selected metadata from all workspace members, but another member's local filesystem path and path-bearing `file:`/`local:` identity are hidden. Discovery alone never installs hooks, imports history, or starts tracing. The agent never performs an unbounded device or full-disk scan.
+`watch` resolves the supplied path to an absolute path and recursively discovers repositories only below that explicit root. Multiple roots can be configured by running the command repeatedly. The web **Scan repositories on my devices** action queues a scan on the requesting member's own agents; each agent scans all roots that member previously approved with `tracemini watch`, irrespective of workspace. It publishes bounded workspace-scoped metadata. Each member explicitly selects their own repositories; that member's local agent then validates the immutable identity and starts or stops tracing. Selecting the same physical clone in another workspace links its already captured activity and shares future observations without duplicating them. Managers can review selected metadata from all workspace members, but another member's local filesystem path and path-bearing `file:`/`local:` identity are hidden. Discovery alone never installs hooks, imports history, or starts tracing. The agent never performs an unbounded device or full-disk scan.
 
 ## Git activity and push confirmation
 
@@ -62,17 +91,37 @@ The agent persists each clone’s branch, local HEAD, and upstream-tracking SHA.
 
 ## Dashboard and reports
 
-Dashboard cards aggregate **commit events only** for commits, files changed, insertions, and deletions. The obsolete bar chart is replaced by a smooth **Activity by member** line graph. For one selected local calendar day it returns 24 bounded hourly points; for a selected range of up to 90 days it returns one point per local day. Counts include commits, pushes, pulls, stages, branches, merges, and rewrites. The consolidated dashboard response refreshes every 15 seconds only while the dashboard tab is visible, with no request fan-out by member, repository, or point. User and repository drill-down pages keep stable URLs and use the same timeline filters. Repository archiving hides it from the active dashboard but preserves clones and all activity.
+Dashboard cards aggregate **commit events only** for commits, files changed, insertions, and deletions. The **Activity by member** line graph shows activity over time. For one selected local calendar day it returns 24 bounded hourly points; for a selected range of up to 90 days it returns one point per local day. Counts include commits, pushes, pulls, stages, branches, merges, and rewrites. The consolidated dashboard response refreshes every 15 seconds only while the dashboard tab is visible, with no request fan-out by member, repository, or point. User and repository drill-down pages keep stable URLs and use the same timeline filters. Repository archiving hides it from the active dashboard but preserves clones and all activity.
 
-Reports have URL-addressable history/detail pages and can be downloaded as portable UTF-8 Markdown files. Every workspace member can review the workspace's individual member reports and whole-workspace summaries; each entry is labeled by scope and author. Users choose either a concise bullet-point summary or a detailed narrative, including when regenerating an existing report. The Reports page can attach up to five PDF, PPTX, UTF-8 Markdown (`.md`), or plain-text (`.txt`) context documents, including selecting several files in one picker action. The installed agent accepts the bytes only over `127.0.0.1`, extracts bounded text in an isolated child process, uses bounded local OCR for up to the first ten pages of an image-only PDF when the optional OS packages are installed, asks the local Codex CLI for bounded structured metadata, deletes the temporary bytes/text/images, and sends only the selected metadata with a report. This uses the existing report/schedule fields and requires no additional PostgreSQL tables or migrations. Document context can describe completed work outside Git, such as design reviews, investigation, or coordination. Reports attribute that work to the supplied documents and named contributors, distinguish it from Git-observed activity, and do not treat plans or open action items as completed work. Managers can name or rename a scheduled report and schedule it daily, on weekdays, or on selected days at an IANA timezone or fixed UTC offset (`UTC-12:00` through `UTC+14:00`) with a 1–90 day evidence window. After saving a schedule, Managers can add or remove up to five MD, TXT, PDF, or PPTX documents under **Context for next report**, without changing the schedule timing or its generating device owner. Attachments apply only to the next queued occurrence: the server copies their metadata into the job and clears the pending schedule context in the same transaction. Retries of that job retain its context; later occurrences do not reuse it. Paused schedules retain pending context until resumed. Refresh context to see attachments added or consumed since opening the page. A due schedule is materialized idempotently when its configuring Manager's connected agent polls for work; no separate cron service is required. The Manager device needs a connected local agent and selected AI executable but does not need any local repository: the server sends bounded workspace activity metadata and report generation runs on that Manager device. After device downtime, TraceMini recovers the latest due evidence window, records how many older occurrences were coalesced, and includes a schedule-recovery disclosure in the generated report. When `SLACK_REPORT_WEBHOOK_URL` is configured, manual and scheduled reports can opt in to send the complete report to Slack as Block Kit `mrkdwn`, with workspace/date context and a TraceMini link. Local `dev` and `start` commands load this value from the root `.env.local`; hosted deployments read it from the process environment. Stored Markdown is rendered with `react-markdown` plus `remark-gfm`, including GFM tables and task lists. The polling local agent claims jobs, adds bounded `git show --stat` evidence for relevant local commits when explicitly enabled, and invokes the selected local Codex/Hermes executable. Tests complete reports with deterministic Markdown and do not spend model invocations.
+### Report generation
+
+Reports have URL-addressable history/detail pages and can be downloaded as portable UTF-8 Markdown files. Every workspace member can review the workspace's individual member reports and whole-workspace summaries; each entry is labeled by scope and author. Users choose either a concise bullet-point summary or a detailed narrative, including when regenerating an existing report.
+
+The polling local agent claims jobs, adds bounded `git show --stat` evidence for relevant local commits when explicitly enabled, and invokes the selected local Codex/Hermes executable. Tests complete reports with deterministic Markdown and do not spend model invocations.
+
+### Document context
+
+The Reports page can attach up to five PDF, PPTX, UTF-8 Markdown (`.md`), or plain-text (`.txt`) context documents, including selecting several files in one picker action. The installed agent accepts the bytes only over `127.0.0.1`, extracts bounded text in an isolated child process, uses bounded local OCR for up to the first ten pages of an image-only PDF when the optional OS packages are installed, asks the local Codex CLI for bounded structured metadata, deletes the temporary bytes/text/images, and sends only the selected metadata with a report. Document context can describe completed work outside Git, such as design reviews, investigation, or coordination. Reports attribute that work to the supplied documents and named contributors, distinguish it from Git-observed activity, and do not treat plans or open action items as completed work.
+
+### Scheduled reports
+
+Managers can name or rename a scheduled report and schedule it daily, on weekdays, or on selected days at an IANA timezone or fixed UTC offset (`UTC-12:00` through `UTC+14:00`) with a 1–90 day evidence window.
+
+After saving a schedule, Managers can add or remove up to five MD, TXT, PDF, or PPTX documents under **Context for next report**, without changing the schedule timing or its generating device owner. Attachments apply only to the next queued occurrence: the server copies their metadata into the job and clears the pending schedule context in the same transaction. Retries of that job retain its context; later occurrences do not reuse it. Paused schedules retain pending context until resumed. Refresh context to see attachments added or consumed since opening the page.
+
+A due schedule is materialized idempotently when its configuring Manager's connected agent polls for work; no separate cron service is required. The Manager device needs a connected local agent and selected AI executable but does not need any local repository: the server sends bounded workspace activity metadata and report generation runs on that Manager device. After device downtime, TraceMini recovers the latest due evidence window, records how many older occurrences were coalesced, and includes a schedule-recovery disclosure in the generated report.
+
+### Slack and Markdown output
+
+When `SLACK_REPORT_WEBHOOK_URL` is configured, manual and scheduled reports can opt in to send the complete report to Slack as Block Kit `mrkdwn`, with workspace/date context and a TraceMini link. Local `dev` and `start` commands load this value from the root `.env.local`; hosted deployments read it from the process environment. Stored Markdown is rendered with `react-markdown` plus `remark-gfm`, including GFM tables and task lists.
 
 ## Exact limitations and exclusions
 
-- No provider APIs/webhooks, cloud source/document upload, cloud OCR, embeddings, vector database, queues, Redis, message broker, additional service, deployment automation, or browser automation. Optional scanned-PDF OCR runs only on the user's device and is bounded to ten pages.
+- No Git-hosting provider APIs/webhooks, cloud source/document upload, cloud OCR, embeddings, vector database, queues, Redis, message broker, additional service, deployment automation, or browser automation. Optional scanned-PDF OCR runs only on the user's device and is bounded to ten pages.
 - No agent crash recovery or concurrent-agent coordination for one shared `TRACEMINI_HOME`; retry storage is a single local JSON file.
 - No OAuth or broad AI/report-output testing. Reports are workspace-scoped; there is no cross-workspace organization rollup. Account management is intentionally limited to registration, login/logout, and password recovery.
 - Install commands contain bearer-like install tokens internally. They expire after 10 minutes and are single-use, but commands can remain in shell history; protect terminal history and use HTTPS outside localhost.
-- The server must be deployed with built CLI artifacts. The installer is not a signed OS package and does not elevate privileges.
+- The server must be deployed with built CLI artifacts. The installer is not a signed OS package. It uses `sudo apt-get` to install `poppler-utils` and `tesseract-ocr`; the CLI and systemd service run as the installing user.
 - Linux installation depends on a working systemd user session. Windows and macOS startup installation are deferred.
 - Repository identity requires `origin` and is based on normalized remote text; unusual aliases can group incorrectly.
 - Activity endpoints cap results at 500. UI freshness is polling-based.
