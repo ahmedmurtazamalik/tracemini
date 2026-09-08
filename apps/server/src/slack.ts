@@ -28,8 +28,18 @@ function inlineMrkdwn(value: string) {
   return output.replace(/\u0000(\d+)\u0000/g, (_match, index) => tokens[Number(index)]);
 }
 
-export function markdownToSlackMrkdwn(markdown: string) {
+export function markdownToSlackBlocks(markdown: string) {
+  const engineerEmojis = new Map([
+    ['murtaza', '🟣'], ['ibrahim', '🟡'], ['ali', '🔵'], ['ashar', '🔴'],
+  ]);
+  const blocks: Array<{type: string; text: {type: string; text: string}}> = [];
   const output: string[] = [];
+  const flush = () => {
+    for (const text of chunkSlackMrkdwn(output.join('\n').trim())) {
+      blocks.push({type: 'section', text: {type: 'mrkdwn', text}});
+    }
+    output.length = 0;
+  };
   let inCodeBlock = false;
   let inTable = false;
   for (const rawLine of markdown.split(/\r?\n/)) {
@@ -47,8 +57,19 @@ export function markdownToSlackMrkdwn(markdown: string) {
       continue;
     }
     if (inCodeBlock) { output.push(escaped(line)); continue; }
-    const heading = /^\s*#{1,6}\s+(.+)$/.exec(line);
-    if (heading) { output.push(`*${inlineMrkdwn(heading[1])}*`); continue; }
+    const heading = /^\s*(#{1,6})\s+(.+)$/.exec(line);
+    if (heading) {
+      const title = heading[2].replace(/\s+#+\s*$/, '').replace(/^(\*\*|__)(.+)\1$/, '$2');
+      // Contributor sections use level two; repository labels retain inline code.
+      if (heading[1] === '##' && !/[`\[\]*_]/.test(title) && escaped(title).length <= 150) {
+        flush();
+        const emoji = engineerEmojis.get(title.toLowerCase());
+        blocks.push({type: 'header', text: {type: 'plain_text', text: escaped(emoji ? `${emoji} ${title}` : title)}});
+      } else {
+        output.push(`*${inlineMrkdwn(heading[2])}*`);
+      }
+      continue;
+    }
     if (/^\s*(?:---+|___+|\*\*\*+)\s*$/.test(line)) { output.push('──────────'); continue; }
     const task = /^\s*[-*+]\s+\[([ xX])]\s+(.+)$/.exec(line);
     if (task) { output.push(`${task[1].toLowerCase() === 'x' ? '☑' : '☐'} ${inlineMrkdwn(task[2])}`); continue; }
@@ -62,7 +83,8 @@ export function markdownToSlackMrkdwn(markdown: string) {
   }
   if (inTable) output.push('```');
   if (inCodeBlock) output.push('```');
-  return output.join('\n').trim();
+  flush();
+  return blocks;
 }
 
 export function slackReportRange(startDate: string, endDate: string) {
@@ -93,13 +115,13 @@ export function chunkSlackMrkdwn(text: string, limit = 2_900) {
 export async function sendSlackReport(webhookUrl: string, report: SlackReport) {
   const scope = report.scope === 'workspace' ? 'Workspace report' : 'Personal report';
   const range = slackReportRange(report.startDate, report.endDate);
-  const reportBlocks = chunkSlackMrkdwn(markdownToSlackMrkdwn(report.markdown));
+  const reportBlocks = markdownToSlackBlocks(report.markdown);
   if (reportBlocks.length > 45) throw new Error('Report is too long for one Slack message');
   const blocks = [
     {type: 'header', text: {type: 'plain_text', text: report.name.slice(0, 150)}},
     {type: 'context', elements: [{type: 'mrkdwn', text: `*Workspace:* ${escaped(report.workspaceName)}  •  *Range:* ${range}  •  *Type:* ${scope}`}]},
     {type: 'divider'},
-    ...reportBlocks.map(text => ({type: 'section', text: {type: 'mrkdwn', text}})),
+    ...reportBlocks,
   ];
   const response = await fetch(webhookUrl, {
     method: 'POST',

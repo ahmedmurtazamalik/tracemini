@@ -56,6 +56,8 @@ describe('engineering report prompt', () => {
     expect(prompt).toContain('whole-workspace');
     expect(prompt).toContain('Contributors with qualifying evidence: Manager, Developer');
     expect(prompt).toContain('section for each contributor');
+    expect(prompt).toContain('name alone as a level-two heading');
+    expect(prompt).toContain('Use level-three headings for any project subsections');
     expect(prompt).toContain('do not add "no qualifying contribution" commentary');
     expect(prompt).toContain('do not invent clock-time boundaries');
   });
