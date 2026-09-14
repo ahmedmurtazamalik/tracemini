@@ -9,7 +9,7 @@ export function LogoTrainButton({ children, className, onClick, "aria-label": la
 }) {
   const button = useRef<HTMLButtonElement>(null);
   const clicks = useRef({ count: 0, last: 0 });
-  const [lap, setLap] = useState<{ path: string; width: number; height: number } | null>(null);
+  const [lap, setLap] = useState<{ path: string; width: number; height: number; duration: number } | null>(null);
 
   useEffect(() => {
     const reset = (event: MouseEvent) => {
@@ -24,7 +24,7 @@ export function LogoTrainButton({ children, className, onClick, "aria-label": la
     const finish = () => setLap(null);
     const escape = (event: KeyboardEvent) => { if (event.key === "Escape") finish(); };
     const motion = matchMedia("(prefers-reduced-motion: reduce)");
-    const timer = window.setTimeout(finish, 5000);
+    const timer = window.setTimeout(finish, (lap.duration + .6) * 1000);
     window.addEventListener("resize", finish);
     window.addEventListener("scroll", finish, true);
     window.addEventListener("keydown", escape);
@@ -51,22 +51,56 @@ export function LogoTrainButton({ children, className, onClick, "aria-label": la
         const width = document.documentElement.clientWidth;
         const height = window.innerHeight;
         const home = [mark.x + mark.width / 2, mark.y + mark.height / 2];
-        // Visit every side of the viewport, with fresh waypoints and direction each lap.
-        const points = [[.5, .1], [.85, .2], [.9, .65], [.65, .9], [.25, .85], [.1, .5]]
-          .map(([x, y]) => [
-            Math.max(32, Math.min(width - 32, (x + (Math.random() - .5) * .14) * width)),
-            Math.max(32, Math.min(height - 32, (y + (Math.random() - .5) * .14) * height)),
-          ]);
-        if (Math.random() < .5) points.reverse();
+        const random = (min: number, max: number) => min + Math.random() * (max - min);
+        const points = [home];
+        // Cross the screen between independently placed figure-eights, coils and loops.
+        const stunts = Math.floor(random(7, 11));
+        for (let stunt = 0; stunt < stunts; stunt++) {
+          const radiusX = random(.08, .23) * width;
+          const radiusY = random(.08, .23) * height;
+          const centerX = random(radiusX + 32, width - radiusX - 32);
+          const centerY = random(radiusY + 32, height - radiusY - 32);
+          const rotation = random(0, Math.PI * 2);
+          const phase = random(0, Math.PI * 2);
+          const direction = Math.random() < .5 ? -1 : 1;
+          const shape = Math.floor(random(0, 3));
+          const turns = Math.floor(random(1, 4));
+          const steps = turns * 24;
+          points.push([random(32, width - 32), random(32, height - 32)]);
+          for (let step = 0; step <= steps; step++) {
+            const angle = phase + direction * step / 24 * Math.PI * 2;
+            const coil = shape === 2 ? 1 - .7 * step / steps : 1;
+            const x = Math.cos(angle) * coil;
+            const y = Math.sin(angle * (shape === 1 ? 2 : 1)) * coil;
+            points.push([
+              centerX + radiusX * (x * Math.cos(rotation) - y * Math.sin(rotation)) / Math.SQRT2,
+              centerY + radiusY * (x * Math.sin(rotation) + y * Math.cos(rotation)) / Math.SQRT2,
+            ]);
+          }
+        }
         points.push(home);
-        const path = `M ${home.join(" ")} ` + points.map((point, index) => {
-          const next = points[index + 1] || home;
-          return `Q ${point.join(" ")} ${(point[0] + next[0]) / 2} ${(point[1] + next[1]) / 2}`;
+        // Smooth the joins without turning the whole trip back into a circular lap.
+        const path = `M ${home.join(" ")} ` + points.slice(1).map((point, index) => {
+          const previous = points[index];
+          const before = points[Math.max(0, index - 1)];
+          const after = points[index + 2] || home;
+          const control = (axis: number, value: number) => Math.max(24, Math.min((axis ? height : width) - 24, value));
+          const start = previous.map((value, axis) => control(axis, value + (point[axis] - before[axis]) / 6));
+          const end = point.map((value, axis) => control(axis, value - (after[axis] - previous[axis]) / 6));
+          return `C ${start.join(" ")} ${end.join(" ")} ${point.join(" ")}`;
         }).join(" ");
-        setLap({ path: matchMedia("(prefers-reduced-motion: reduce)").matches ? "" : path, width, height });
+        const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+        setLap({ path: reduced ? "" : path, width, height, duration: reduced ? 4.5 : random(9, 12) });
       }
     }
     onClick();
+  };
+
+  const motion = {
+    path: lap?.path, dur: `${lap?.duration}s`, fill: "freeze" as const,
+    calcMode: "spline" as const, keyPoints: "0;.12;.16;.39;.43;.71;.75;1",
+    keyTimes: "0;.12;.25;.38;.5;.62;.75;1",
+    keySplines: Array(7).fill(".4 0 .8 1").join(";"),
   };
 
   return <>
@@ -76,12 +110,12 @@ export function LogoTrainButton({ children, className, onClick, "aria-label": la
     {lap && createPortal(
       <div className="logo-lap">
         {lap.path && <svg className="logo-lap-track" viewBox={`0 0 ${lap.width} ${lap.height}`} aria-hidden="true">
-          {[5, 4, 3, 2, 1].map(dot => <circle key={dot} r={3} fill="var(--signal)" stroke="var(--surface)" strokeWidth={1.5} opacity={1 - dot * .12}>
-            <animateMotion path={lap.path} dur="4.5s" begin={`${dot * .06}s`} fill="freeze" />
+          {[8, 7, 6, 5, 4, 3, 2, 1].map(dot => <circle key={dot} r={3} fill="var(--signal)" stroke="var(--surface)" strokeWidth={1.5} opacity={1 - dot * .1}>
+            <animateMotion {...motion} begin={`${dot * .06}s`} />
             <set attributeName="visibility" to="hidden" begin="0s" dur={`${dot * .06}s`} />
           </circle>)}
           <g shapeRendering="crispEdges" stroke="#13251c" strokeWidth={2} strokeLinejoin="miter">
-            <animateMotion path={lap.path} dur="4.5s" rotate="auto" fill="freeze" />
+            <animateMotion {...motion} rotate="auto" />
             <path d="M-22 8V-14H-8V-4H14V8Z" fill="#19df91" />
             <path d="M-25-14H-5M7-4V-15H14V-4M-24 8H20L15 1" fill="#166c45" />
             <path d="M-18-10H-12V-4H-18Z" fill="#d7ffe8" stroke="none" />
