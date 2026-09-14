@@ -29,6 +29,16 @@ describe('engineering report prompt', () => {
     expect(prompt).toContain('for example, `TraceMini`');
     expect(prompt).toContain('Use bold text sparingly');
     expect(prompt).toContain('Do not use tables');
+    expect(prompt).toContain('group related evidence by contributor, project, and distinct substantive contribution');
+    expect(prompt).toContain('Consolidate incremental fixes, retries, and commit/stage/push records for the same outcome');
+    expect(prompt).toContain('One commit can support multiple distinct contributions');
+    expect(prompt).toContain('The same work split into ten commits should receive substantially the same coverage');
+    expect(prompt).toContain('are not measures of effort, impact, or productivity');
+    expect(prompt).toContain('do not force equal word counts, rank engineers, or infer total effort');
+    expect(prompt).toContain('Numerous trivial edits must not overshadow a substantive change');
+    expect(prompt).toContain('Detailed commit messages alone do not establish stronger impact or verification');
+    expect(prompt).toContain('Describe supported work in progress as work in progress');
+    expect(prompt).toContain('do not infer lower contribution or inactivity from missing evidence');
   });
 
   it('uses visibly different structures for summary and detailed reports', () => {

@@ -40,6 +40,8 @@ Use `tracemini status` to check your connection or `tracemini --help` for availa
 
 Open **Reports**, choose a date range and writing style, and request a report. Your connected machine needs an installed, signed-in Codex or Hermes CLI to generate it.
 
+Reports are instructed to group related activity into substantive contributions, so splitting the same work into more commits should not earn more coverage. Commit counts and lines changed are not productivity measures. Local Git excerpts share a bounded allowance equally across contributors with available clones, then across their repositories and commits. Reports should qualify claims where evidence is incomplete; their length is not a measure of total effort or an engineer ranking.
+
 You can attach up to five Markdown, text, PDF, or PowerPoint files to explain work that Git does not capture. Document processing uses Codex, so it needs to be available even if you use Hermes for the report itself.
 
 Managers can also schedule recurring reports. Documents added under **Context for next report** apply to the next scheduled report only. The machine responsible for generating the report needs to be online.

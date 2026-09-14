@@ -1,14 +1,77 @@
-import {afterEach, describe, expect, it} from 'vitest';
+import {afterEach, describe, expect, it, vi} from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {execFileSync} from 'node:child_process';
 import {contextPrompt} from '../packages/cli/src/agent.js';
+import * as gitModule from '../packages/cli/src/git.js';
 
 let temporary = '';
-afterEach(() => { if (temporary) fs.rmSync(temporary, {recursive: true, force: true}); });
+afterEach(() => { vi.restoreAllMocks(); if (temporary) fs.rmSync(temporary, {recursive: true, force: true}); });
 
 describe('evidence-rich reports', () => {
+  it('preserves ordinary contribution evidence while redacting credential assignments', () => {
+    const message = 'Fix password reset and token validation: both tests passed.';
+    const source = [
+      '+const passed = true;',
+      '+const compass = "north";',
+      '+const tokenization = "complete";',
+      '+const summary = "Improve password reset";',
+      '+const authToken = "ASSIGNED_AUTH_VALUE";',
+      '+DB_PASSWORD=ASSIGNED_DATABASE_VALUE',
+      '+pass: ASSIGNED_PASS_VALUE',
+      String.raw`+const configJson = "{\"apiKey\":\"EMBEDDED_API_VALUE\"}";`,
+    ].join('\n');
+    vi.spyOn(gitModule, 'git').mockReturnValue(source);
+    const prompt = contextPrompt({
+      job: {start_date: '2026-09-14', end_date: '2026-09-14', include_diff: true},
+      events: [{repository_name: 'password-reset', normalized_remote: 'example/project', type: 'commit',
+        data: {commitSha: 'fixture', message, passed: true, compass: 'north', tokenization: 'complete',
+          authToken: 'NESTED_AUTH_VALUE', DB_PASSWORD: 'NESTED_DATABASE_VALUE'}}],
+    }, [{path: '/test/project', normalizedRemote: 'example/project'}] as any);
+
+    expect(prompt).toContain(message);
+    for (const line of source.split('\n').slice(0, 4)) expect(prompt).toContain(line);
+    expect(prompt).toContain('"passed": true');
+    expect(prompt).toContain('"compass": "north"');
+    expect(prompt).toContain('"tokenization": "complete"');
+    for (const secret of ['ASSIGNED_AUTH_VALUE', 'ASSIGNED_DATABASE_VALUE', 'ASSIGNED_PASS_VALUE', 'EMBEDDED_API_VALUE', 'NESTED_AUTH_VALUE', 'NESTED_DATABASE_VALUE']) expect(prompt).not.toContain(secret);
+  });
+
+  it('reserves the same contributor allowance for one or ten commits, across repositories and input orders', () => {
+    const patches = new Map<string, string>();
+    vi.spyOn(gitModule, 'git').mockImplementation((_cwd, args) => patches.get(args.at(-1)!)!);
+    const event = (user: string, repository: string, sha: string, patch: string) => {
+      patches.set(sha, patch);
+      return {user_id: user, user_name: user, repository_name: repository, normalized_remote: `example/${repository}`,
+        occurred_at: '2026-08-24T10:00:00Z', type: 'commit', data: {commitSha: sha, message: 'Implement contribution'}};
+    };
+    const completeWork = '+implemented behavior\n'.repeat(6000);
+    const clones = ['product', 'library'].map(name => ({path: `/test/${name}`, normalizedRemote: `example/${name}`})) as any;
+    for (const commitCount of [1, 10]) {
+      const events = Array.from({length: commitCount}, (_, index) => event('Alex', 'product', `work-${index}`,
+        completeWork.slice(index * completeWork.length / commitCount, (index + 1) * completeWork.length / commitCount)));
+      events.push(event('Alex', 'library', 'library-work', completeWork));
+      events.push(event('Blair', 'product', 'substantial-work', completeWork));
+      // A contributor without a local clone must retain metadata without consuming excerpt space.
+      events.push(event('Casey', 'unavailable', 'remote-work', ''));
+      for (const ordered of [events, [...events].reverse()]) {
+        const prompt = contextPrompt({job: {report_scope: 'workspace', include_diff: true}, events: ordered}, clones);
+        const lengths = new Map<string, number>();
+        for (const section of prompt.split('\n## Evidence: ').slice(1)) {
+          const contributor = section.match(/Contributor: (\w+)/)![1];
+          const length = [...section.matchAll(/Git evidence:\n```diff\n([\s\S]*?)\n```/g)]
+            .reduce((sum, match) => sum + match[1].length, 0);
+          lengths.set(contributor, (lengths.get(contributor) || 0) + length);
+        }
+        expect(Object.fromEntries(lengths)).toEqual({Alex: 40_000, Blair: 40_000, Casey: 0});
+        expect(prompt).toContain('Git excerpt truncated');
+        expect(prompt).toContain('Git evidence unavailable: no matching local clone');
+        expect(prompt).toContain('Contributor: Casey');
+      }
+    }
+  });
+
   it('grounds contribution-focused reports and only includes source patches after explicit consent', () => {
     temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'tracemini-report-evidence-'));
     execFileSync('git', ['init', '-q'], {cwd: temporary});
