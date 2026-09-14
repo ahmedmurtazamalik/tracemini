@@ -54,7 +54,7 @@ export function LogoTrainButton({ children, className, onClick, "aria-label": la
         const random = (min: number, max: number) => min + Math.random() * (max - min);
         const points = [home];
         // Cross the screen between independently placed figure-eights, coils and loops.
-        const stunts = Math.floor(random(7, 11));
+        const stunts = Math.floor(random(4, 7));
         for (let stunt = 0; stunt < stunts; stunt++) {
           const radiusX = random(.08, .23) * width;
           const radiusY = random(.08, .23) * height;
@@ -64,9 +64,8 @@ export function LogoTrainButton({ children, className, onClick, "aria-label": la
           const phase = random(0, Math.PI * 2);
           const direction = Math.random() < .5 ? -1 : 1;
           const shape = Math.floor(random(0, 3));
-          const turns = Math.floor(random(1, 4));
+          const turns = Math.floor(random(1, 3));
           const steps = turns * 24;
-          points.push([random(32, width - 32), random(32, height - 32)]);
           for (let step = 0; step <= steps; step++) {
             const angle = phase + direction * step / 24 * Math.PI * 2;
             const coil = shape === 2 ? 1 - .7 * step / steps : 1;
@@ -90,7 +89,7 @@ export function LogoTrainButton({ children, className, onClick, "aria-label": la
           return `C ${start.join(" ")} ${end.join(" ")} ${point.join(" ")}`;
         }).join(" ");
         const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
-        setLap({ path: reduced ? "" : path, width, height, duration: reduced ? 4.5 : random(9, 12) });
+        setLap({ path: reduced ? "" : path, width, height, duration: reduced ? 4.5 : random(8, 10) });
       }
     }
     onClick();
@@ -98,9 +97,9 @@ export function LogoTrainButton({ children, className, onClick, "aria-label": la
 
   const motion = {
     path: lap?.path, dur: `${lap?.duration}s`, fill: "freeze" as const,
-    calcMode: "spline" as const, keyPoints: "0;.12;.16;.39;.43;.71;.75;1",
-    keyTimes: "0;.12;.25;.38;.5;.62;.75;1",
-    keySplines: Array(7).fill(".4 0 .8 1").join(";"),
+    calcMode: "spline" as const, keyPoints: "0;.3;.65;1",
+    keyTimes: "0;.33;.66;1",
+    keySplines: Array(3).fill(".3 .2 .7 .8").join(";"),
   };
 
   return <>
@@ -110,7 +109,7 @@ export function LogoTrainButton({ children, className, onClick, "aria-label": la
     {lap && createPortal(
       <div className="logo-lap">
         {lap.path && <svg className="logo-lap-track" viewBox={`0 0 ${lap.width} ${lap.height}`} aria-hidden="true">
-          {[8, 7, 6, 5, 4, 3, 2, 1].map(dot => <circle key={dot} r={3} fill="var(--signal)" stroke="var(--surface)" strokeWidth={1.5} opacity={1 - dot * .1}>
+          {[6, 5, 4, 3, 2, 1].map(dot => <circle key={dot} r={3} fill="var(--signal)" stroke="var(--surface)" strokeWidth={1.5} opacity={1 - dot * .1}>
             <animateMotion {...motion} begin={`${dot * .06}s`} />
             <set attributeName="visibility" to="hidden" begin="0s" dur={`${dot * .06}s`} />
           </circle>)}
