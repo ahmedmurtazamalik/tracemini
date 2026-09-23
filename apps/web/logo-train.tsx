@@ -115,8 +115,8 @@ export function LogoTrainButton({ children, className, onClick, "aria-label": la
           </circle>)}
           <g shapeRendering="crispEdges" stroke="#13251c" strokeWidth={2} strokeLinejoin="miter">
             <animateMotion {...motion} rotate="auto" />
-            <path d="M-22 8V-14H-8V-4H14V8Z" fill="#19df91" />
-            <path d="M-25-14H-5M7-4V-15H14V-4M-24 8H20L15 1" fill="#166c45" />
+            <path d="M-22 8V-14H-8V-4H14V8Z" fill="var(--train-main, #ff9c77)" />
+            <path d="M-25-14H-5M7-4V-15H14V-4M-24 8H20L15 1" fill="var(--train-detail, #d65535)" />
             <path d="M-18-10H-12V-4H-18Z" fill="#d7ffe8" stroke="none" />
             <path d="M-18 8H-10V14H-18ZM1 8H9V14H1Z" fill="#13251c" />
             <path d="M-16 10H-12V12H-16ZM3 10H7V12H3Z" fill="#d7ffe8" stroke="none" />

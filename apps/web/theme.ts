@@ -15,7 +15,7 @@ export function themeToggleLabel(theme: Theme) {
 }
 
 export function themeColor(theme: Theme) {
-  return theme === 'night' ? '#05070a' : '#eef0e9';
+  return theme === 'night' ? '#05070a' : '#f5f6f8';
 }
 
 export function applyTheme(theme: Theme, root = document.documentElement) {
