@@ -29,6 +29,7 @@ import {deleteLocalDocument, deriveLocalDocument, documentIdentity, hostedDocume
 import { activitySummary } from "./activity-summary.js";
 import { LogoTrainButton } from "./logo-train.js";
 import "./style.css";
+import "./refresh.css";
 
 class ApiRequestError extends Error {
   constructor(message: string, readonly status: number) { super(message); }
@@ -84,6 +85,26 @@ function Brand() {
   );
 }
 
+function NavIcon({ name }: { name: string }) {
+  const paths: Record<string, ReactNode> = {
+    Dashboard: <><rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" /><rect x="3" y="14" width="7" height="7" rx="1.5" /><path d="M14 17.5h7M17.5 14v7" /></>,
+    Reports: <><path d="M7 3.5h8l4 4V20a1 1 0 0 1-1 1H7a2 2 0 0 1-2-2V5.5a2 2 0 0 1 2-2Z" /><path d="M14.5 3.5V8H19M8.5 12h7M8.5 16h7" /></>,
+    "Install CLI": <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="m7 9 3 3-3 3M12.5 15H17" /></>,
+    Settings: <><path d="M12 3v2m0 14v2M3 12h2m14 0h2M5.6 5.6 7 7m10 10 1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4" /><circle cx="12" cy="12" r="4" /></>,
+  };
+  return <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
+}
+
+function MetricIcon({ name }: { name: string }) {
+  const paths: Record<string, ReactNode> = {
+    commits: <><path d="M5 17 17 5M7 5h10v10" /></>,
+    filesChanged: <><rect x="4" y="4" width="6" height="6" rx="1" /><rect x="14" y="4" width="6" height="6" rx="1" /><rect x="4" y="14" width="6" height="6" rx="1" /><rect x="14" y="14" width="6" height="6" rx="1" /></>,
+    insertions: <><path d="M12 5v14M5 12h14" /></>,
+    deletions: <><path d="M5 12h14" /></>,
+  };
+  return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">{paths[name]}</svg>;
+}
+
 function AuthShell({
   eyebrow,
   title,
@@ -125,11 +146,16 @@ function AuthShell({
         </div>
         <div className="auth-message">
           <span />
-          <h2>See the shape of the work, not just the commits.</h2>
+          <h2>Make sense of the work behind every commit.</h2>
           <p>
-            TraceMini turns local Git signals into a clear, defensible narrative
-            of progress.
+            A shared view of development activity, with useful reports shaped by
+            the code on your own machine.
           </p>
+        </div>
+        <div className="auth-preview" aria-hidden="true">
+          <div className="auth-preview-top"><span><i /> Team activity</span><b>PREVIEW</b></div>
+          <div className="auth-preview-chart"><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /></div>
+          <div className="auth-preview-bottom"><span><i /> Local Git signals</span><span>Made readable <b>↗</b></span></div>
         </div>
         <dl>
           <div>
@@ -498,7 +524,7 @@ function PageHeading({
 }) {
   return (
     <div className="page-heading">
-      <span>{eyebrow}</span>
+      <span><i aria-hidden="true" />{eyebrow}</span>
       <h1>{title}</h1>
       <p>{description}</p>
     </div>
@@ -584,6 +610,10 @@ function ActivityTimelineGraph({timeline, rangePreset, timezone}: {timeline: any
       })}
       {activeIndex != null && <line x1={plot.left + (points.length === 1 ? 0 : activeIndex / (points.length - 1) * plot.width)} x2={plot.left + (points.length === 1 ? 0 : activeIndex / (points.length - 1) * plot.width)} y1={plot.top} y2={plot.top + plot.height} className="chart-hover-line" />}
     </svg>
+    {visibleUsers.length > 0 && observedMaximum === 0 && <div className="chart-empty-state">
+      <strong>No activity in this range</strong>
+      <span>Activity appears here after a connected device syncs Git work.</span>
+    </div>}
     {activeIndex != null && <div className={`chart-index-tooltip ${tooltipAlignment}`} style={{left: `${activeLeft}%`}} role="status" aria-live="polite">
       <strong>{points[activeIndex]?.label}</strong>
       {visibleUsers.map((user: any) => <span key={user.userId}><i style={{background: colors[seriesKey(user)]}} />{user.name}<b>{compactActivityNumber(Number(user.points[activeIndex]?.total || 0))}</b></span>)}
@@ -1225,17 +1255,21 @@ function Dashboard({
               ? "Repository activity"
               : "Activity dashboard"
         }
-        description="A focused view of commit evidence collected by local TraceMini devices."
+        description="Your team's development signals, collected from connected devices and organized in one place."
       />
+      <div className="dashboard-intro-actions">
+        <span><i className="status online" /> Workspace overview</span>
+        <button className="button primary" onClick={() => navigate(workspacePath(workspaceId, "reports"))}>Create a report <span aria-hidden="true">↗</span></button>
+      </div>
       <div className="metrics">
         {[
           ["commits", "Commits"],
           ["filesChanged", "Files changed"],
           ["insertions", "Insertions"],
           ["deletions", "Deletions"],
-        ].map(([key, label], index) => (
+        ].map(([key, label]) => (
           <article className="card metric-card" key={key}>
-            <span>0{index + 1}</span>
+            <span className="metric-symbol" aria-hidden="true"><MetricIcon name={key} /></span>
             <big>{stats.totals[key] || 0}</big>
             <small>{label}</small>
           </article>
@@ -1270,7 +1304,7 @@ function Dashboard({
       <ActivityTimelineGraph timeline={today} rangePreset={rangePreset} timezone={timezone} />
       </div>
       <div className="dashboard-grid">
-        <Activity events={events} workspaceId={workspaceId} timezone={timezone} height={repositorySignalsHeight} />
+        <Activity events={events} workspaceId={workspaceId} timezone={timezone} height={events.length ? repositorySignalsHeight : undefined} />
         <aside ref={repositorySignalsRef} className="card insight-card repository-signals-card" style={repositorySignalsHeight ? {height: repositorySignalsHeight} : undefined}>
           <div className="section-heading">
             <div>
@@ -2057,8 +2091,9 @@ function App() {
                 className={active ? "nav-link active" : "nav-link"}
                 onClick={() => navigate(path)}
               >
-                <span className="nav-index">0{navItems.indexOf(item) + 1}</span>
+                <NavIcon name={item.label} />
                 {item.label}
+                <span className="nav-arrow" aria-hidden="true">↗</span>
               </button>
             );
           })}
