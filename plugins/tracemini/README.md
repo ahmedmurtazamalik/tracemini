@@ -2,9 +2,21 @@
 
 This read-only plugin lets Codex answer questions about your TraceMini workspaces, Git activity, team timelines, and existing reports. Each person signs in with their own TraceMini account, and the TraceMini API checks their workspace membership on every request.
 
+## Install a ZIP
+
+Download the [TraceMini plugin ZIP](https://github.com/alimajidneo/tracemini/releases/download/tracemini-plugin-v0.2.0/tracemini-codex-plugin-0.2.0.zip), extract it, and run these commands with the extracted folder's absolute path:
+
+```bash
+codex plugin marketplace add /absolute/path/to/extracted-folder
+codex plugin add tracemini@tracemini
+node /absolute/path/to/extracted-folder/plugins/tracemini/scripts/login.mjs
+```
+
+Sign in with your own TraceMini account, then start a new Codex task. This version uses a local login command; it does not have TokenWatch's hosted OAuth **Authenticate** button.
+
 ## Install from GitHub
 
-While the upstream pull request is under review, install from the public fork branch:
+While the upstream pull request is under review, you can instead install from the public fork branch:
 
 ```bash
 codex plugin marketplace add alimajidneo/tracemini --ref codex/tracemini-plugin
