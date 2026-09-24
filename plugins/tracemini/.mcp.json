@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "tracemini": {
+      "command": "node",
+      "args": ["./scripts/mcp.mjs"],
+      "cwd": "."
+    }
+  }
+}

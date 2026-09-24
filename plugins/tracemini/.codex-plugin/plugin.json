@@ -1,0 +1,20 @@
+{
+  "name": "tracemini",
+  "version": "0.2.0",
+  "description": "Read your TraceMini workspaces, activity, and reports in Codex.",
+  "author": { "name": "TraceMini", "url": "https://github.com/ahmedmurtazamalik/tracemini" },
+  "repository": "https://github.com/ahmedmurtazamalik/tracemini",
+  "homepage": "https://tracemini.vercel.app",
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "TraceMini",
+    "shortDescription": "Ask about your team activity and reports.",
+    "longDescription": "Read workspaces, Git activity, team timelines, and reports from your TraceMini account. Sign in with your TraceMini account using the local login command; all plugin tools are read-only.",
+    "developerName": "TraceMini",
+    "category": "Productivity",
+    "capabilities": ["Read"],
+    "websiteURL": "https://tracemini.vercel.app",
+    "defaultPrompt": ["Summarize my TraceMini activity today.", "Show my team's activity this week.", "List recent TraceMini reports."]
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "name": "tracemini",
+  "interface": {
+    "displayName": "TraceMini"
+  },
+  "plugins": [
+    {
+      "name": "tracemini",
+      "source": {
+        "source": "local",
+        "path": "./plugins/tracemini"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
