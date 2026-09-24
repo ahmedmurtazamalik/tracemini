@@ -114,11 +114,15 @@ export function watchedPathsForWorkspace(config: Config, _workspaceId = config.w
   return config.watchedPaths || [];
 }
 
+function registeredRemoteUrl(config: Config, remoteUrl: string, repoPath: string) {
+  return remoteUrl.startsWith('local:') ? `local-device-${config.agentId}:${repoPath}` : remoteUrl;
+}
+
 export async function traceRepository(config: Config, repoPath: string, workspaceId = config.workspaceId) {
   if (!workspaceId) throw new Error('device has no selected workspace');
   const canonicalPath = fs.realpathSync(repoPath);
   const info = inspectRepo(canonicalPath);
-  const registrationRemoteUrl = info.remoteUrl.startsWith('local:') ? `local-device-${config.agentId}:${info.path}` : info.remoteUrl;
+  const registrationRemoteUrl = registeredRemoteUrl(config, info.remoteUrl, info.path);
   const scanStartedAt = new Date().toISOString();
   const fingerprint = repositoryFingerprint(info.path);
   const assertIdentity = () => {
@@ -183,9 +187,7 @@ export async function reconcileConfiguredCloneIdentities(config: Config, indexSt
     try {
       const info = inspectRepo(fs.realpathSync(clone.path));
       const fingerprint = repositoryFingerprint(info.path);
-      const remoteMatches = info.remoteUrl.startsWith('local:')
-        ? clone.normalizedRemote.startsWith(`local-device-${config.agentId}:`) || clone.normalizedRemote.startsWith(`local-device-${config.agentId}/`)
-        : normalizeRemote(info.remoteUrl) === clone.normalizedRemote;
+      const remoteMatches = normalizeRemote(registeredRemoteUrl(config, info.remoteUrl, info.path)) === clone.normalizedRemote;
       if (!remoteMatches || (clone.repositoryFingerprint && clone.repositoryFingerprint !== fingerprint)) invalid.push({clone, info, fingerprint});
       else if (!clone.repositoryFingerprint) adopted.set(clone.path, fingerprint);
     } catch {
@@ -248,7 +250,7 @@ export async function publishRepositoryCandidates(config: Config, root?: string)
       });
       const fingerprint = repositoryFingerprint(info.path);
       const identityChanged = Boolean(clone?.repositoryFingerprint && clone.repositoryFingerprint !== fingerprint);
-      repositories.push({localKey: info.path, name: info.name, remoteUrl: info.remoteUrl, branch: info.branch, traced: Boolean(clone && !identityChanged), repositoryId: identityChanged ? undefined : clone?.repositoryId, identityFingerprint: fingerprint, identityChanged});
+      repositories.push({localKey: info.path, name: info.name, remoteUrl: registeredRemoteUrl(config, info.remoteUrl, info.path), branch: info.branch, traced: Boolean(clone && !identityChanged), repositoryId: identityChanged ? undefined : clone?.repositoryId, identityFingerprint: fingerprint, identityChanged});
     } catch {
       const clone = config.clones.find(candidate => candidate.path === repoPath && (candidate.workspaceId == null || candidate.workspaceId === config.workspaceId));
       if (clone) repositories.push({localKey: path.resolve(clone.path), name: clone.name, remoteUrl: clone.normalizedRemote, branch: clone.branch, traced: false, identityFingerprint: null, identityChanged: true});
@@ -283,7 +285,7 @@ export function verifyRepositorySelection(config: Config, selection: {local_key:
   });
   if (!withinRoot) throw new Error('repository is outside the approved discovery root');
   const current = inspectRepo(target);
-  if (normalizeRemote(current.remoteUrl) !== selection.normalized_remote) throw new Error('repository identity changed after discovery; wait for the next scan');
+  if (normalizeRemote(registeredRemoteUrl(config, current.remoteUrl, current.path)) !== selection.normalized_remote) throw new Error('repository identity changed after discovery; wait for the next scan');
   if (selection.repository_fingerprint && repositoryFingerprint(target) !== selection.repository_fingerprint) throw new Error('repository identity changed after discovery; wait for the next scan');
   return current;
 }

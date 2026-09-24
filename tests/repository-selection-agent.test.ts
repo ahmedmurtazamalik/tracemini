@@ -113,9 +113,9 @@ describe('device repository selection', () => {
     const future = createRepo(watchedRoot, 'future');
     await publishRepositoryCandidates(loadConfig(), ordinaryRoot);
     expect(candidateBodies.at(-1).repositories).toEqual(expect.arrayContaining([expect.objectContaining({localKey: future, traced: false})]));
-    const info = inspectRepo(future);
-    expect(() => verifyRepositorySelection(loadConfig(), {local_key: future, normalized_remote: normalizeRemote(info.remoteUrl)}, ordinaryRoot)).not.toThrow();
-    expect(() => verifyRepositorySelection({...loadConfig(), watchedPaths: [], watchedRoots: []}, {local_key: future, normalized_remote: normalizeRemote(info.remoteUrl)})).toThrow('outside the approved discovery root');
+    const selectedRemote = normalizeRemote(`local-device-1:${future}`);
+    expect(() => verifyRepositorySelection(loadConfig(), {local_key: future, normalized_remote: selectedRemote}, ordinaryRoot)).not.toThrow();
+    expect(() => verifyRepositorySelection({...loadConfig(), watchedPaths: [], watchedRoots: []}, {local_key: future, normalized_remote: selectedRemote})).toThrow('outside the approved discovery root');
   });
 
   it('keeps repository roots valid when only the preferred workspace changes', async () => {
@@ -141,8 +141,8 @@ describe('device repository selection', () => {
     saveConfig(config, {replaceCollections: true});
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
       const pathname = new URL(url).pathname;
-      if (pathname === '/api/agents/repository-selections') return new Response(JSON.stringify([{id: 9, workspace_id: 2, revision: 1, local_key: repo, name: 'selected', remote_url: `local:${repo}`, normalized_remote: normalizeRemote(`local:${repo}`), desired_traced: true, traced: false}]), {status: 200});
-      if (pathname === '/api/repositories/register') return new Response(JSON.stringify({id: 77, name: 'selected', normalized_remote: `local/${repo}`}), {status: 200});
+      if (pathname === '/api/agents/repository-selections') return new Response(JSON.stringify([{id: 9, workspace_id: 2, revision: 1, local_key: repo, name: 'selected', remote_url: `local-device-1:${repo}`, normalized_remote: normalizeRemote(`local-device-1:${repo}`), desired_traced: true, traced: false}]), {status: 200});
+      if (pathname === '/api/repositories/register') return new Response(JSON.stringify({id: 77, name: 'selected', normalized_remote: normalizeRemote(`local-device-1:${repo}`)}), {status: 200});
       return new Response(JSON.stringify({ok: true}), {status: 200});
     }));
 
@@ -165,7 +165,7 @@ describe('device repository selection', () => {
     const requested = new Promise<void>(resolve => { started = resolve; });
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
       const pathname = new URL(url).pathname;
-      if (pathname === '/api/agents/repository-selections') return new Response(JSON.stringify([{id: 9, workspace_id: 1, revision: 1, local_key: repo, name: 'selected', remote_url: `local:${repo}`, normalized_remote: normalizeRemote(`local:${repo}`), desired_traced: true, traced: false}]), {status: 200});
+      if (pathname === '/api/agents/repository-selections') return new Response(JSON.stringify([{id: 9, workspace_id: 1, revision: 1, local_key: repo, name: 'selected', remote_url: `local-device-1:${repo}`, normalized_remote: normalizeRemote(`local-device-1:${repo}`), desired_traced: true, traced: false}]), {status: 200});
       if (pathname === '/api/repositories/register') {
         started();
         await blocked;
@@ -540,15 +540,18 @@ describe('device repository selection', () => {
       const pathname = new URL(url).pathname;
       const body = init.body ? JSON.parse(String(init.body)) : undefined;
       if (pathname === '/api/agents/repository-candidates') candidateBodies.push(body);
-      if (pathname === '/api/agents/repository-selections' && (!init.method || init.method === 'GET')) return new Response(JSON.stringify([{id: 9, workspace_id: 2, revision: 1, local_key: available, name: 'available', remote_url: `local:${available}`, normalized_remote: normalizeRemote(`local:${available}`), desired_traced: desiredTraced, traced: !desiredTraced}]), {status: 200});
-      if (pathname === '/api/repositories/register') return new Response(JSON.stringify({id: 77, name: 'available', normalized_remote: `local/${available}`}), {status: 200});
+      if (pathname === '/api/agents/repository-selections' && (!init.method || init.method === 'GET')) return new Response(JSON.stringify([{id: 9, workspace_id: 2, revision: 1, local_key: available, name: 'available', remote_url: `local-device-1:${available}`, normalized_remote: normalizeRemote(`local-device-1:${available}`), desired_traced: desiredTraced, traced: !desiredTraced}]), {status: 200});
+      if (pathname === '/api/repositories/register') {
+        if (body.remoteUrl !== candidateBodies[0].repositories.find((candidate: any) => candidate.localKey === available).remoteUrl) return new Response(JSON.stringify({error: 'repository must be selected before registration'}), {status: 409});
+        return new Response(JSON.stringify({id: 77, name: 'available', normalized_remote: normalizeRemote(body.remoteUrl)}), {status: 200});
+      }
       return new Response(JSON.stringify({ok: true}), {status: 200});
     }));
 
     await publishRepositoryCandidates(config, projects);
     expect(candidateBodies[0].repositories).toEqual(expect.arrayContaining([
       expect.objectContaining({localKey: selected, traced: false}),
-      expect.objectContaining({localKey: available, traced: false}),
+      expect.objectContaining({localKey: available, remoteUrl: `local-device-1:${available}`, traced: false}),
     ]));
 
     await processRepositorySelections(config);
