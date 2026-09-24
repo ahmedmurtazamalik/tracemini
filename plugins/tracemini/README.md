@@ -4,14 +4,14 @@ This read-only plugin lets Codex answer questions about your TraceMini workspace
 
 ## Install from GitHub
 
-From Codex CLI, add the TraceMini repository as a marketplace, then install the plugin:
+While the upstream pull request is under review, install from the public fork branch:
 
 ```bash
-codex plugin marketplace add ahmedmurtazamalik/tracemini --ref main
+codex plugin marketplace add alimajidneo/tracemini --ref codex/tracemini-plugin
 codex plugin add tracemini@tracemini
 ```
 
-The marketplace entry is on the plugin branch until it is merged into `main`. Before then, use `--ref codex/tracemini-plugin` if the branch has been pushed. Start a new Codex task after installing so it loads the new skill and tools.
+After the pull request is merged, new users can add `ahmedmurtazamalik/tracemini --ref main` instead. Start a new Codex task after installing so it loads the new skill and tools.
 
 ## Sign in
 
