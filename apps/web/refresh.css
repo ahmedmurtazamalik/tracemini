@@ -253,6 +253,12 @@ html[data-theme="day"] .activity-custom-dates input, html[data-theme="day"] .act
 .today-activity .chart-baseline, html[data-theme="day"] .today-activity .chart-baseline { stroke: var(--line-strong); }
 .today-activity .chart-hover-line, html[data-theme="day"] .today-activity .chart-hover-line { stroke: var(--muted); }
 .chart-index-tooltip, html[data-theme="day"] .chart-index-tooltip { border-color: var(--line); border-radius: 10px; color: var(--ink); background: var(--surface); box-shadow: 0 12px 30px #11182726; }
+.chart-series-line { stroke-dasharray: 1; stroke-dashoffset: 1; animation: chart-series-draw 760ms cubic-bezier(.22, 1, .36, 1) both; }
+.chart-series-points { opacity: 0; animation: chart-points-arrive 340ms ease-out both; }
+.chart-active-point, .chart-hover-line { pointer-events: none; transition: transform 180ms cubic-bezier(.22, 1, .36, 1); }
+.chart-index-tooltip { transition: left 180ms cubic-bezier(.22, 1, .36, 1), transform 180ms cubic-bezier(.22, 1, .36, 1); }
+@keyframes chart-series-draw { to { stroke-dashoffset: 0; } }
+@keyframes chart-points-arrive { to { opacity: 1; } }
 .chart-empty-state { position: absolute; z-index: 1; top: 43%; left: 50%; width: min(80%, 22rem); display: grid; justify-items: center; gap: .32rem; padding: 1rem; border: 1px solid var(--line); border-radius: 12px; color: var(--ink); background: color-mix(in srgb, var(--surface) 94%, transparent); box-shadow: var(--app-shadow); text-align: center; pointer-events: none; transform: translate(-50%, -50%); }
 .chart-empty-state strong { font-size: .8rem; font-weight: 730; }.chart-empty-state span { color: var(--muted); font-size: .7rem; line-height: 1.45; }
 .activity-legend-item { border-radius: 7px; padding: .35rem .5rem; }
@@ -399,5 +405,8 @@ html[data-theme="night"] .command pre { color: #d7ffe8; }
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
   .auth-preview, .auth-preview-chart i { animation: none; }
+  .chart-series-line { stroke-dashoffset: 0; animation: none; }
+  .chart-series-points { opacity: 1; animation: none; }
+  .chart-active-point, .chart-hover-line, .chart-index-tooltip { transition: none; }
   .metric-card:hover, .nav-link:hover, .repo:hover { transform: none; }
 }

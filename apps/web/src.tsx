@@ -600,15 +600,19 @@ function ActivityTimelineGraph({timeline, rangePreset, timezone}: {timeline: any
           <text x={x} y="199" textAnchor={index === 0 ? "start" : index === points.length - 1 ? "end" : "middle"} className="chart-axis-label">{timeline?.granularity === "hour" ? point?.label : point?.label?.slice(5)}</text>
         </g>;
       })}
-      {visibleUsers.map((user: any) => {
+      {visibleUsers.map((user: any, seriesIndex: number) => {
         const color = colors[seriesKey(user)];
-        return <g key={user.userId}>
-          <path d={activityGraphPath(user.points, plot.width, plot.height, scale.maximum)} transform={`translate(${plot.left} ${plot.top})`} fill="none" stroke={color} strokeWidth="3" strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke"><title>{activityUserSummary(user)}</title></path>
-          {user.points.map((point: any, index: number) => <circle key={index} className="chart-series-point" cx={plot.left + (user.points.length === 1 ? 0 : index / (user.points.length - 1) * plot.width)} cy={plot.top + plot.height - Number(point.total || 0) / scale.maximum * plot.height} r="2.2" fill={color} />)}
-          {activeIndex != null && <circle cx={plot.left + (user.points.length === 1 ? 0 : activeIndex / (user.points.length - 1) * plot.width)} cy={plot.top + plot.height - Number(user.points[activeIndex]?.total || 0) / scale.maximum * plot.height} r="4.5" fill={color} stroke="#0f1011" strokeWidth="2" />}
+        const delay = Math.min(seriesIndex, 5) * 90;
+        const seriesData = user.points.map((point: any) => `${point.label}:${point.total}`).join(",");
+        return <g key={`${seriesKey(user)}-${rangePreset}-${timeline?.from}-${timeline?.to}-${scale.maximum}-${seriesData}`}>
+          <path className="chart-series-line" pathLength="1" style={{animationDelay: `${delay}ms`}} d={activityGraphPath(user.points, plot.width, plot.height, scale.maximum)} transform={`translate(${plot.left} ${plot.top})`} fill="none" stroke={color} strokeWidth="3" strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke"><title>{activityUserSummary(user)}</title></path>
+          <g className="chart-series-points" style={{animationDelay: `${delay + 560}ms`}}>
+            {user.points.map((point: any, index: number) => <circle key={index} className="chart-series-point" cx={plot.left + (user.points.length === 1 ? 0 : index / (user.points.length - 1) * plot.width)} cy={plot.top + plot.height - Number(point.total || 0) / scale.maximum * plot.height} r="2.2" fill={color} />)}
+          </g>
+          {activeIndex != null && <circle className="chart-active-point" cx="0" cy="0" style={{transform: `translate(${plot.left + (user.points.length === 1 ? 0 : activeIndex / (user.points.length - 1) * plot.width)}px, ${plot.top + plot.height - Number(user.points[activeIndex]?.total || 0) / scale.maximum * plot.height}px)`}} r="4.5" fill={color} stroke="var(--chart-panel)" strokeWidth="2" />}
         </g>;
       })}
-      {activeIndex != null && <line x1={plot.left + (points.length === 1 ? 0 : activeIndex / (points.length - 1) * plot.width)} x2={plot.left + (points.length === 1 ? 0 : activeIndex / (points.length - 1) * plot.width)} y1={plot.top} y2={plot.top + plot.height} className="chart-hover-line" />}
+      {activeIndex != null && <line x1="0" x2="0" y1={plot.top} y2={plot.top + plot.height} className="chart-hover-line" style={{transform: `translateX(${plot.left + (points.length === 1 ? 0 : activeIndex / (points.length - 1) * plot.width)}px)`}} />}
     </svg>
     {visibleUsers.length > 0 && observedMaximum === 0 && <div className="chart-empty-state">
       <strong>No activity in this range</strong>
