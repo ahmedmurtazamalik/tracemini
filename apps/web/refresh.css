@@ -136,7 +136,7 @@ html[data-theme="night"] .auth-panel { position: relative; padding: clamp(2.5rem
 .brand-lockup { gap: .68rem; font-size: 1.1rem; font-weight: 800; letter-spacing: -.055em; }
 .brand-lockup small { margin-top: .29rem; color: var(--muted); font-size: .54rem; font-weight: 700; letter-spacing: .125em; }
 .brand-mark, html[data-theme="night"] .brand-mark { width: 2.2rem; height: 2.2rem; border-radius: 8px; background: #fff0eb; box-shadow: none; }
-.brand-mark img, html[data-theme="night"] .brand-mark img { filter: grayscale(1) brightness(.34) sepia(1) saturate(2) hue-rotate(320deg); }
+.brand-mark img { filter: brightness(0) saturate(100%) invert(42%) sepia(69%) saturate(995%) hue-rotate(335deg) brightness(92%) contrast(91%); }
 .auth-copy h1 { margin: .75rem 0 .85rem; font-size: clamp(2.65rem, 4vw, 4.2rem); font-weight: 750; line-height: 1.05; letter-spacing: -.067em; }
 .auth-copy p { color: var(--muted); font-size: .95rem; font-weight: 480; line-height: 1.65; }
 .auth-form { gap: 1.05rem; margin-top: 2.4rem; }
@@ -184,9 +184,7 @@ html[data-theme="night"] :where(input:not([type="checkbox"]), textarea, select) 
 .sidebar .brand-lockup, html[data-theme="night"] .sidebar .brand-lockup { color: #fff; }
 .sidebar .brand-lockup small, html[data-theme="night"] .sidebar .brand-lockup small { color: #929cad; }
 .sidebar .brand-mark, html[data-theme="night"] .sidebar .brand-mark { background: #353b49; }
-.sidebar .brand-mark img, html[data-theme="night"] .sidebar .brand-mark img { filter: grayscale(1) brightness(0) invert(1); }
-html[data-theme="day"] .sidebar .brand-mark { background: #f2fff8; }
-html[data-theme="day"] .sidebar .brand-mark img { filter: none; }
+html[data-theme="day"] .sidebar .brand-mark { background: var(--signal-soft); }
 .workspace-label { margin: 2.7rem .85rem .8rem; color: #8e97a7; font-size: .61rem; letter-spacing: .14em; }
 .workspace-select { gap: .45rem; margin: 0 .4rem .85rem; color: #aeb6c4; }
 .workspace-select .label-with-tip { color: #aeb6c4; }
