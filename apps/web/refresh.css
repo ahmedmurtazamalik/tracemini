@@ -185,6 +185,8 @@ html[data-theme="night"] :where(input:not([type="checkbox"]), textarea, select) 
 .sidebar .brand-lockup small, html[data-theme="night"] .sidebar .brand-lockup small { color: #929cad; }
 .sidebar .brand-mark, html[data-theme="night"] .sidebar .brand-mark { background: #353b49; }
 .sidebar .brand-mark img, html[data-theme="night"] .sidebar .brand-mark img { filter: grayscale(1) brightness(0) invert(1); }
+html[data-theme="day"] .sidebar .brand-mark { background: #f2fff8; }
+html[data-theme="day"] .sidebar .brand-mark img { filter: none; }
 .workspace-label { margin: 2.7rem .85rem .8rem; color: #8e97a7; font-size: .61rem; letter-spacing: .14em; }
 .workspace-select { gap: .45rem; margin: 0 .4rem .85rem; color: #aeb6c4; }
 .workspace-select .label-with-tip { color: #aeb6c4; }
