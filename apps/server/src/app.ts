@@ -102,6 +102,30 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
   app.set('trust proxy', 1);
   app.use(express.json({limit: '512kb'}));
 
+  const deliverReportToSlack = async (reportId: number) => {
+    const attemptedAt = now();
+    // A short lease prevents repeated clicks and lets an interrupted server
+    // request be retried. Slack webhooks do not support idempotency keys.
+    const report: any = await db.prepare(`UPDATE reports SET slack_status='sending',slack_attempted_at=?
+      WHERE id=? AND (slack_status IN ('pending','failed','unknown') OR (slack_status='sending' AND slack_attempted_at<?)) RETURNING *`)
+      .get(attemptedAt, reportId, new Date(Date.now() - 60_000).toISOString());
+    if (!report) return undefined;
+    let status = 'sent';
+    try {
+      const webhookUrl = process.env.SLACK_REPORT_WEBHOOK_URL;
+      if (!webhookUrl) throw new Error('Slack webhook is not configured');
+      const workspace: any = await db.prepare('SELECT name FROM workspaces WHERE id=?').get(report.workspace_id);
+      await slackNotifier(webhookUrl, {id: Number(report.id), workspaceId: Number(report.workspace_id), workspaceName: workspace.name,
+        name: report.name, startDate: isoDate(report.start_date), endDate: isoDate(report.end_date), scope: report.report_scope, markdown: report.markdown});
+    } catch {
+      // Never persist or log fetch errors containing a secret webhook URL.
+      status = 'failed';
+      console.error(`Slack report ${report.id} delivery failed`);
+    }
+    await db.prepare('UPDATE reports SET slack_status=? WHERE id=? AND slack_attempted_at=?').run(status, report.id, attemptedAt);
+    return {slack_status: status, slack_attempted_at: attemptedAt};
+  };
+
   const userAuth = async (req: Authed, res: Response, next: NextFunction) => {
     const raw = req.headers.authorization?.replace(/^Bearer\s+/i, '');
     const row = raw && await db.prepare('SELECT u.* FROM sessions s JOIN users u ON u.id=s.user_id AND u.auth_version=s.auth_version WHERE s.token_hash=?').get(hash(raw));
@@ -1154,27 +1178,31 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
       if (!job) return undefined;
       let reportId = job.target_report_id;
       if (job.target_report_id) {
-        const updated = await db.prepare('UPDATE reports SET job_id=?,markdown=?,format=?,report_scope=?,created_at=? WHERE id=? AND workspace_id=? AND user_id=?').run(job.id, markdown, job.format, job.report_scope, now(), job.target_report_id, job.workspace_id, job.user_id);
+        const updated = await db.prepare("UPDATE reports SET job_id=?,markdown=?,format=?,report_scope=?,created_at=?,slack_status=CASE WHEN slack_status IS NULL THEN NULL ELSE 'pending' END,slack_attempted_at=NULL WHERE id=? AND workspace_id=? AND user_id=?").run(job.id, markdown, job.format, job.report_scope, now(), job.target_report_id, job.workspace_id, job.user_id);
         if (updated.changes !== 1) return undefined;
       } else {
         const inserted = await db.prepare('INSERT INTO reports(job_id,workspace_id,user_id,start_date,end_date,timezone,include_diff,name,format,report_scope,schedule_id,scheduled_for,coalesced_runs,markdown,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id').run(job.id, job.workspace_id, job.user_id, job.start_date, job.end_date, job.timezone, job.include_diff, job.report_name || defaultReportName(job.start_date, job.end_date), job.format, job.report_scope, job.schedule_id, job.scheduled_for, job.coalesced_runs, markdown, now());
         reportId = inserted.lastInsertRowid;
       }
       await db.prepare("UPDATE report_jobs SET status='completed',completed_at=? WHERE id=?").run(now(), job.id);
-      return {id: Number(reportId), workspaceId: Number(job.workspace_id), workspaceName: job.workspace_name, name: job.report_name || defaultReportName(job.start_date, job.end_date), startDate: isoDate(job.start_date), endDate: isoDate(job.end_date), scope: job.report_scope, markdown, notifySlack: Boolean(job.notify_slack)};
+      if (job.notify_slack) await db.prepare("UPDATE reports SET slack_status='pending',slack_attempted_at=NULL WHERE id=?").run(reportId);
+      return {id: Number(reportId), notifySlack: Boolean(job.notify_slack)};
     });
     if (!completed) return res.status(409).json({error: 'job not claimed'});
-    if (completed.notifySlack) {
-      const webhookUrl = process.env.SLACK_REPORT_WEBHOOK_URL;
-      if (!webhookUrl) console.error('Slack report notification skipped: SLACK_REPORT_WEBHOOK_URL is not configured');
-      else try { await slackNotifier(webhookUrl, completed); }
-      catch (error) { console.error('Slack report notification failed:', error); }
-    }
+    if (completed.notifySlack) await deliverReportToSlack(completed.id);
     res.status(201).json({ok: true});
   });
   app.post('/api/agents/jobs/:id/fail', agentAuth, required(['error']), async (req: Authed, res) => { const result = await db.prepare("UPDATE report_jobs SET status='failed',error=?,completed_at=? WHERE id=? AND user_id=? AND agent_id=? AND status='running' AND workspace_id IN (SELECT workspace_id FROM workspace_members WHERE user_id=?) AND (report_scope<>'workspace' OR workspace_id IN (SELECT workspace_id FROM workspace_members WHERE user_id=? AND role='Manager'))").run(req.body.error, now(), req.params.id, req.agent.user_id, req.agent.id, req.agent.user_id, req.agent.user_id); res.status(result.changes ? 200 : 409).json({ok: Boolean(result.changes)}); });
+  app.post('/api/reports/:id/retry-slack', userAuth, async (req: Authed, res) => {
+    const report: any = await db.prepare(`SELECT r.id FROM reports r JOIN workspace_members wm ON wm.workspace_id=r.workspace_id
+      WHERE r.id=? AND wm.user_id=? AND (r.user_id=? OR wm.role='Manager')`).get(req.params.id, req.user.id, req.user.id);
+    if (!report) return res.status(404).json({error: 'not found'});
+    const delivery = await deliverReportToSlack(report.id);
+    if (!delivery) return res.status(409).json({error: 'Slack delivery is already sent, in progress, or was not requested. Refresh the report.'});
+    res.json(delivery);
+  });
   app.get('/api/workspaces/:id/reports', userAuth, requireMember, async (req, res) => {
-    const rows = await db.prepare('SELECT r.id,r.job_id,r.workspace_id,r.user_id,r.start_date,r.end_date,r.timezone,r.include_diff,r.name,r.format,r.report_scope,r.schedule_id,r.scheduled_for,r.coalesced_runs,r.created_at,u.name user_name FROM reports r JOIN users u ON u.id=r.user_id WHERE r.workspace_id=? ORDER BY r.created_at DESC').all(req.params.id);
+    const rows = await db.prepare('SELECT r.id,r.job_id,r.workspace_id,r.user_id,r.start_date,r.end_date,r.timezone,r.include_diff,r.name,r.format,r.report_scope,r.schedule_id,r.scheduled_for,r.coalesced_runs,r.slack_status,r.slack_attempted_at,r.created_at,u.name user_name FROM reports r JOIN users u ON u.id=r.user_id WHERE r.workspace_id=? ORDER BY r.created_at DESC').all(req.params.id);
     res.json(rows.map(reportOutput));
   });
   app.get('/api/reports/:id', userAuth, async (req: Authed, res) => {

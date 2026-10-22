@@ -1363,7 +1363,7 @@ function Dashboard({
   );
 }
 
-function ReportDetail({ report, workspaceId, currentUserId, reload }: any) {
+function ReportDetail({ report, workspaceId, currentUserId, role, reload }: any) {
   const [showRename, setShowRename] = useState(false);
   const [showRegenerate, setShowRegenerate] = useState(false);
   const [name, setName] = useState(report.name || "");
@@ -1372,6 +1372,7 @@ function ReportDetail({ report, workspaceId, currentUserId, reload }: any) {
   const [prompt, setPrompt] = useState("");
   const [pending, setPending] = useState(false);
   const [refreshPending, setRefreshPending] = useState(false);
+  const [slackPending, setSlackPending] = useState(false);
   const [regenerationStatus, setRegenerationStatus] = useState("");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -1381,6 +1382,24 @@ function ReportDetail({ report, workspaceId, currentUserId, reload }: any) {
     operationScope.current = {identity: operationIdentity, generation: operationScope.current.generation + 1};
   }
   useEffect(() => () => { operationScope.current.generation += 1; }, []);
+  const retrySlack = async () => {
+    const operation = ++operationScope.current.generation;
+    const active = () => operation === operationScope.current.generation;
+    setSlackPending(true); setMessage(""); setError("");
+    try {
+      const delivery = await request(`/reports/${report.id}/retry-slack`, {method: "POST"});
+      if (!active()) return;
+      if (delivery.slack_status === "sent") setMessage("Report delivered to Slack.");
+      else setError("Slack delivery failed. The report is saved; you can retry delivery again.");
+      await reload();
+    } catch (caught: any) {
+      if (active()) setError(caught.message);
+    } finally {
+      if (active()) setSlackPending(false);
+    }
+  };
+  const retryableSlack = ["failed", "unknown", "pending"].includes(report.slack_status)
+    || (report.slack_status === "sending" && Date.now() - new Date(report.slack_attempted_at).getTime() > 60_000);
   const rename = async (event: FormEvent) => {
     event.preventDefault();
     const operation = ++operationScope.current.generation;
@@ -1449,6 +1468,7 @@ function ReportDetail({ report, workspaceId, currentUserId, reload }: any) {
       <div className="section-heading report-heading">
         <div><span>{report.report_scope === "workspace" ? "Workspace summary" : "Individual report"} · {report.user_name || "Unknown author"}</span><h1>{report.name || `${report.start_date} — ${report.end_date}`}</h1></div>
       </div>
+      {report.slack_status && <p role="status" className="muted">{({failed: "Slack delivery failed. The report is saved.", unknown: "Earlier Slack delivery status is unknown. Retrying may post a duplicate.", pending: "Slack delivery is pending.", sending: "Slack delivery is in progress. If interrupted, refresh after a minute to retry.", sent: "Delivered to Slack."} as Record<string, string>)[report.slack_status]}</p>}
       <div className="actions report-actions">
         <button className="button secondary" onClick={() => navigate(workspacePath(workspaceId, "reports"))}>
           ← Report history
@@ -1459,12 +1479,15 @@ function ReportDetail({ report, workspaceId, currentUserId, reload }: any) {
         }}>
           {refreshPending ? <BusyIndicator label="Refreshing…" /> : "Refresh report"}
         </button>
+        {retryableSlack && (role === "Manager" || report.user_id === currentUserId) && <button className="button secondary" disabled={pending || slackPending} onClick={() => void retrySlack()}>
+          {slackPending ? "Sending to Slack…" : "Retry Slack delivery"}
+        </button>}
         {report.user_id === currentUserId && (
           <>
-            <button className="button secondary" onClick={() => setShowRename(!showRename)}>
+            <button className="button secondary" disabled={slackPending} onClick={() => setShowRename(!showRename)}>
               Rename
             </button>
-            <button className="button secondary" onClick={() => setShowRegenerate(!showRegenerate)}>
+            <button className="button secondary" disabled={slackPending} onClick={() => setShowRegenerate(!showRegenerate)}>
               Regenerate
             </button>
           </>
@@ -1480,7 +1503,7 @@ function ReportDetail({ report, workspaceId, currentUserId, reload }: any) {
               Report name
               <input required maxLength={120} value={name} onChange={(event) => setName(event.target.value)} />
             </label>
-            <button className="button primary" disabled={pending || !name.trim()} type="submit">
+            <button className="button primary" disabled={pending || slackPending || !name.trim()} type="submit">
               {pending ? "Saving…" : "Save name"}
             </button>
           </div>
@@ -1510,7 +1533,7 @@ function ReportDetail({ report, workspaceId, currentUserId, reload }: any) {
               Instructions
               <textarea required maxLength={4000} rows={3} value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="Example: Lead with an executive summary, then group contributions by project and outcome." />
             </label>
-            <div className="actions span-all regeneration-actions"><button className="button primary" disabled={pending || !prompt.trim()} type="submit">
+            <div className="actions span-all regeneration-actions"><button className="button primary" disabled={pending || slackPending || !prompt.trim()} type="submit">
               {pending ? "Regenerating…" : "Regenerate report"}
             </button></div>
           </div>
@@ -1792,6 +1815,7 @@ function Reports({ workspaceId, dates, setDates, reports, reload, error, timezon
           >
             <strong>{item.name || `${item.start_date} — ${item.end_date}`}</strong>
             <small>{item.report_scope === "workspace" ? "Workspace summary" : "Individual report"} · {item.start_date} — {item.end_date} · {item.user_name}</small>
+            {item.slack_status === "failed" && <small>Slack delivery failed</small>}
           </button>
         )) : <EmptyState title="No reports yet" text="Generate the first report for this workspace." />}
       </section>
@@ -2193,7 +2217,7 @@ function App() {
             />
           ) : view === "report" ? (
             reportMatchesRoute(report, route) ? (
-              <ReportDetail key={`${workspaceId}:${report.id}`} report={report} workspaceId={workspaceId} currentUserId={user?.id} reload={loadWorkspace} />
+              <ReportDetail key={`${workspaceId}:${report.id}`} report={report} workspaceId={workspaceId} currentUserId={user?.id} role={workspace?.role} reload={loadWorkspace} />
             ) : (
               <section className="card">
                 <h2>{error ? "Could not load report" : "Report unavailable"}</h2>

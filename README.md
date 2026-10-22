@@ -46,6 +46,8 @@ You can attach up to five Markdown, text, PDF, or PowerPoint files to explain wo
 
 Managers can also schedule recurring reports. Documents added under **Context for next report** apply to the next scheduled report only. The machine responsible for generating the report needs to be online.
 
+Slack delivery status is shown on saved reports. If delivery fails, open the report and select **Retry Slack delivery** to send the saved content without regenerating it. The report owner or a workspace Manager can retry. Earlier reports show **status unknown** because delivery outcomes were not previously recorded; retrying those may post a duplicate. An interrupted delivery can be retried after a minute by refreshing the report. Regenerating a previously notified report leaves its updated content pending manual Slack delivery. Slack webhooks cannot guarantee duplicate-free delivery after an ambiguous network failure.
+
 ### Send scheduled reports to Nexus
 
 The local agent can also send completed scheduled reports to a Nexus chat as plain text. Headings, lists, links, and repository names remain readable without Markdown or Slack formatting; long reports are sent in numbered parts. Manual reports are not forwarded. Slack delivery continues to use the schedule's existing Slack setting.
