@@ -6,6 +6,7 @@ import {type Config, enqueue, loadConfig, loadQueue, saveConfig, eventKey, updat
 import {commitHistory, commitHistoryAfterHeads, confirmPush, discover, git, historyHeads, inspectRepo, installHooks, uninstallHooks, normalizeRemote, observeRepositoryState, readRepositoryState, repositoryFingerprint, stagedData} from './git.js';
 import {CodexRunner, HermesRunner} from './runner.js';
 import {startDocumentLoopbackServer} from './document-loopback.js';
+import {sendScheduledNexusReport} from './nexus.js';
 
 export async function flush(config: Config) {
   const claimId = crypto.randomUUID();
@@ -621,6 +622,11 @@ export async function processJob(config: Config, job: any) {
     const runner = job.reporter === 'hermes' ? new HermesRunner() : new CodexRunner();
     const markdown = ensureDocumentContextSection(await runner.generate(contextPrompt(context, workspaceClones), cwd), context.job.custom_prompt);
     await api(config, `/api/agents/jobs/${job.id}/complete`, {method: 'POST', body: JSON.stringify({markdown})});
+    try {
+      if (await sendScheduledNexusReport(config, context.job, markdown)) console.log(`Nexus scheduled report ${job.id} sent`);
+    } catch (error: any) {
+      console.error(`Nexus scheduled report ${job.id} delivery failed: ${error.message}`);
+    }
   } catch (error: any) {
     await api(config, `/api/agents/jobs/${job.id}/fail`, {method: 'POST', body: JSON.stringify({error: String(error.message || error).slice(0, 2000)})});
     throw error;

@@ -46,6 +46,21 @@ You can attach up to five Markdown, text, PDF, or PowerPoint files to explain wo
 
 Managers can also schedule recurring reports. Documents added under **Context for next report** apply to the next scheduled report only. The machine responsible for generating the report needs to be online.
 
+### Send scheduled reports to Nexus
+
+The local agent can also send completed scheduled reports to a Nexus chat as plain text. Headings, lists, links, and repository names remain readable without Markdown or Slack formatting; long reports are sent in numbered parts. Manual reports are not forwarded. Slack delivery continues to use the schedule's existing Slack setting.
+
+On the machine generating the reports, create `~/.tracemini/nexus.env` (or `$TRACEMINI_HOME/nexus.env` if you use a custom agent directory):
+
+```dotenv
+NEXUS_CHAT_TOKEN=your-nexus-chat-token
+NEXUS_CHAT_CONVERSATION_ID=25
+```
+
+Run `chmod 600 ~/.tracemini/nexus.env` to restrict access. The agent reads this file when sending a scheduled report; these settings belong on the local machine and do not need to be configured in Vercel. Process environment variables with the same names take precedence. The repository's `.env.local` alone does not configure the installed agent.
+
+Nexus delivery happens after the report is saved and Slack delivery is attempted. Temporary network/server errors get one retry with the same idempotency key. If delivery still fails, the report stays saved and the agent logs the error (`journalctl --user -u tracemini.service`); there is no automatic catch-up after a sustained outage.
+
 ## Optional: run your own instance
 
 You’ll need Node.js 22+, npm 10+, Git, and a PostgreSQL database. The example configuration uses Supabase.
