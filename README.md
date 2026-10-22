@@ -44,7 +44,9 @@ Reports are instructed to group related activity into substantive contributions,
 
 You can attach up to five Markdown, text, PDF, or PowerPoint files to explain work that Git does not capture. Document processing uses Codex, so it needs to be available even if you use Hermes for the report itself.
 
-Managers can also schedule recurring reports. Documents added under **Context for next report** apply to the next scheduled report only. The machine responsible for generating the report needs to be online.
+Managers can also schedule recurring workspace reports. The schedule prefers a connected device belonging to the Manager who saved it. If that device is offline or generation fails, other workspace members’ connected devices are tried one at a time. Each device is tried once per report; the selected Codex or Hermes CLI must be installed and signed in on the fallback machine. Attempts move on after two minutes without device contact or five minutes without finishing. If untried devices are offline, the job waits for one to reconnect. Personal and manually requested reports still run on the requester’s devices.
+
+Documents added under **Context for next report** apply to the next scheduled report only. Fallback devices receive the same structured document context and workspace activity metadata, with other members’ private local paths removed. Source repositories remain on their respective machines; available local clones can enrich the report.
 
 Slack delivery status is shown on saved reports. If delivery fails, open the report and select **Retry Slack delivery** to send the saved content without regenerating it. The report owner or a workspace Manager can retry. Earlier reports show **status unknown** because delivery outcomes were not previously recorded; retrying those may post a duplicate. An interrupted delivery can be retried after a minute by refreshing the report. Regenerating a previously notified report leaves its updated content pending manual Slack delivery. Slack webhooks cannot guarantee duplicate-free delivery after an ambiguous network failure.
 

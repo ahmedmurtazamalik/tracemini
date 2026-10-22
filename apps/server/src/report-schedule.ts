@@ -131,15 +131,16 @@ function subtractDays(date: string, days: number) {
 }
 
 export async function materializeDueReportSchedules(db: DB, userId: number, at = new Date()) {
-  const due = await db.prepare("SELECT s.id FROM report_schedules s JOIN workspace_members wm ON wm.workspace_id=s.workspace_id AND wm.user_id=s.configured_by AND wm.role='Manager' WHERE s.configured_by=? AND s.enabled=TRUE AND s.next_run_at<=? ORDER BY s.next_run_at,s.id").all(userId, at.toISOString());
+  const due = await db.prepare("SELECT s.id,s.configured_by FROM report_schedules s JOIN workspace_members wm ON wm.workspace_id=s.workspace_id AND wm.user_id=s.configured_by AND wm.role='Manager' JOIN workspace_members caller ON caller.workspace_id=s.workspace_id WHERE caller.user_id=? AND s.enabled=TRUE AND s.next_run_at<=? ORDER BY s.next_run_at,s.id").all(userId, at.toISOString());
   let created = 0;
   for (const item of due) {
     created += await db.transaction(async () => {
-      const scope: any = await db.prepare('SELECT workspace_id FROM report_schedules WHERE id=? AND configured_by=? AND enabled=TRUE AND next_run_at<=?').get(item.id, userId, at.toISOString());
+      const scope: any = await db.prepare('SELECT workspace_id FROM report_schedules WHERE id=? AND configured_by=? AND enabled=TRUE AND next_run_at<=?').get(item.id, item.configured_by, at.toISOString());
       if (!scope) return 0;
       await db.prepare('SELECT id FROM workspaces WHERE id=? FOR UPDATE').get(scope.workspace_id);
-      if (!(await db.prepare("SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=? AND role='Manager'").get(scope.workspace_id, userId))) return 0;
-      const schedule: any = await db.prepare('SELECT * FROM report_schedules WHERE id=? AND configured_by=? AND enabled=TRUE AND next_run_at<=? FOR UPDATE').get(item.id, userId, at.toISOString());
+      if (!(await db.prepare("SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=? AND role='Manager'").get(scope.workspace_id, item.configured_by))) return 0;
+      if (!(await db.prepare('SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=?').get(scope.workspace_id, userId))) return 0;
+      const schedule: any = await db.prepare('SELECT * FROM report_schedules WHERE id=? AND configured_by=? AND enabled=TRUE AND next_run_at<=? FOR UPDATE').get(item.id, item.configured_by, at.toISOString());
       if (!schedule) return 0;
       const scheduleState = decodeScheduleDays(schedule.selected_days);
       const rule = validateScheduleRule({frequency: schedule.frequency, selectedDays: scheduleState.days, localTime: schedule.local_time, timezone: schedule.timezone});

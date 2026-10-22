@@ -37,12 +37,13 @@ describe('agent service work ordering', () => {
     fs.rmSync(temporary, {recursive: true, force: true});
   });
 
-  it('does not put another member local-device path into a Manager report prompt', () => {
+  it.each([{jobUserId: 1, agentUserId: 1, eventUserId: 2}, {jobUserId: 1, agentUserId: 2, eventUserId: 1}])('redacts another member’s local paths for executing user $agentUserId', ({jobUserId, agentUserId, eventUserId}) => {
     const prompt = contextPrompt({
-      job: {user_id: 1, start_date: '2026-08-26', end_date: '2026-08-26', timezone: 'UTC', format: 'summary'},
+      agentUserId,
+      job: {user_id: jobUserId, start_date: '2026-08-26', end_date: '2026-08-26', timezone: 'UTC', format: 'summary'},
       events: [
-        {user_id: 2, user_name: 'Developer', repository_name: '/opaque/QZ7M4N8891/private-project', normalized_remote: 'local-device-7//home/developer/private/project', type: 'push', occurred_at: '2026-08-26T10:00:00.000Z', data: {message: 'Work completed; EACCES:/opaque/QZ7M4N8891/private; UNC \\\\HOST\\AliHome\\repo', sourceCode: 'CANARY /opaque/QZ7M4N8891/source.ts', remoteUrl: 'file:///home/developer/private/project', localKey: '/home/developer/private/project'}},
-        ...['/CANARY_POSIX/home/alice/repo', 'C:\\CANARY_DRIVE\\Users\\Alice\\repo', '\\\\CANARY_UNC\\AliceHome\\repo', 'local:/CANARY_LOCAL/home/alice/repo', 'local-device-9:/CANARY_DEVICE/home/alice/repo'].map((normalized_remote, index) => ({user_id: 2, user_name: 'Developer', repository_name: 'legacy-private', normalized_remote, type: 'commit', occurred_at: `2026-08-26T1${index}:00:00.000Z`, data: {message: 'Legacy private repository activity'}})),
+        {user_id: eventUserId, user_name: 'Developer', repository_name: '/opaque/QZ7M4N8891/private-project', normalized_remote: 'local-device-7//home/developer/private/project', type: 'push', occurred_at: '2026-08-26T10:00:00.000Z', data: {message: 'Work completed; EACCES:/opaque/QZ7M4N8891/private; UNC \\\\HOST\\AliHome\\repo', sourceCode: 'CANARY /opaque/QZ7M4N8891/source.ts', remoteUrl: 'file:///home/developer/private/project', localKey: '/home/developer/private/project'}},
+        ...['/CANARY_POSIX/home/alice/repo', 'C:\\CANARY_DRIVE\\Users\\Alice\\repo', '\\\\CANARY_UNC\\AliceHome\\repo', 'local:/CANARY_LOCAL/home/alice/repo', 'local-device-9:/CANARY_DEVICE/home/alice/repo'].map((normalized_remote, index) => ({user_id: eventUserId, user_name: 'Developer', repository_name: 'legacy-private', normalized_remote, type: 'commit', occurred_at: `2026-08-26T1${index}:00:00.000Z`, data: {message: 'Legacy private repository activity'}})),
       ],
     }, []);
 

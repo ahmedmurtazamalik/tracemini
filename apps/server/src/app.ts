@@ -7,7 +7,8 @@ import {fileURLToPath} from 'node:url';
 import type {DB} from './db.js';
 import {linuxInstallCommand, linuxInstaller, linuxSyncCommand} from './linux-installer.js';
 import {activityBucketMinutes, dateKeyInTimezone, dateRangeUtc, hourInTimezone, normalizeTimezone} from './timezone.js';
-import {materializeDueReportSchedules, nextScheduledRun, normalizeReportFormat, validateScheduleRule} from './report-schedule.js';
+import {nextScheduledRun, normalizeReportFormat, validateScheduleRule} from './report-schedule.js';
+import {claimReportJob, failReportJob, pendingReportJobs, runningReportJob} from './report-jobs.js';
 import {sendSlackReport} from './slack.js';
 import {decodeReportContext, decodeScheduleDays, encodeReportContext, encodeScheduleDays, validateDocumentContext} from './document-context.js';
 
@@ -166,7 +167,8 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
   const revokeDeviceWork = async (agentId: number, reason = 'device revoked') => {
     await db.prepare('UPDATE agents SET revoked_at=?,installation_id=NULL WHERE id=? AND revoked_at IS NULL').run(now(), agentId);
     await db.prepare("UPDATE pending_pushes SET status='unconfirmed',completed_at=? WHERE agent_id=? AND status='pending'").run(now(), agentId);
-    await db.prepare("UPDATE report_jobs SET status='failed',error=?,completed_at=? WHERE agent_id=? AND status='running'").run(reason, now(), agentId);
+    const jobs = await db.prepare("SELECT * FROM report_jobs WHERE agent_id=? AND status='running'").all(agentId);
+    for (const job of jobs) await failReportJob(db, job, reason);
   };
   const freshInviteCode = async () => {
     for (let attempt = 0; attempt < 5; attempt++) {
@@ -425,6 +427,8 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
       await db.prepare("UPDATE report_jobs SET status='failed',error='workspace membership removed',completed_at=? WHERE workspace_id=? AND user_id=? AND status IN ('pending','running')").run(now(), req.params.id, req.params.userId);
       await db.prepare('UPDATE report_schedules SET enabled=FALSE,next_run_at=NULL,updated_at=? WHERE workspace_id=? AND configured_by=?').run(now(), req.params.id, req.params.userId);
       await db.prepare('DELETE FROM workspace_members WHERE workspace_id=? AND user_id=?').run(req.params.id, req.params.userId);
+      const claimed = await db.prepare("SELECT j.* FROM report_jobs j JOIN agents a ON a.id=j.agent_id WHERE j.workspace_id=? AND a.user_id=? AND j.status='running'").all(req.params.id, req.params.userId);
+      for (const job of claimed) await failReportJob(db, job, 'workspace membership removed');
       return 'deleted';
     });
     if (outcome === 'forbidden') return res.status(403).json({error: 'Manager required'});
@@ -561,10 +565,9 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
   app.get('/api/agents/status', agentAuth, async (req: Authed, res) => res.json(await agentStatus(req.agent)));
   app.post('/api/agents/heartbeat', agentAuth, async (req: Authed, res) => res.json({ok: true, at: now(), workspaceIds: await agentWorkspaceIds(req.agent.user_id)}));
   app.get('/api/agents/sync', agentAuth, async (req: Authed, res) => {
-    await materializeDueReportSchedules(db, req.agent.user_id);
     const [workspaceIds, jobs, refreshRequests, repositorySelections, pushes] = await Promise.all([
       agentWorkspaceIds(req.agent.user_id),
-      db.prepare("SELECT j.* FROM report_jobs j JOIN workspace_members wm ON wm.workspace_id=j.workspace_id AND wm.user_id=? WHERE j.user_id=? AND j.status='pending' AND (j.report_scope<>'workspace' OR wm.role='Manager') ORDER BY j.id LIMIT 1").all(req.agent.user_id, req.agent.user_id),
+      pendingReportJobs(db, req.agent),
       db.prepare("SELECT id,workspace_id,status,created_at FROM refresh_requests WHERE agent_id=? AND status='queued' AND workspace_id IN (SELECT workspace_id FROM workspace_members WHERE user_id=?) ORDER BY id LIMIT 1").all(req.agent.id, req.agent.user_id),
       db.prepare('SELECT c.id,c.workspace_id,c.local_key,c.name,c.remote_url,c.normalized_remote,c.branch,c.traced,c.desired_traced,c.revision,c.repository_fingerprint FROM repository_candidates c JOIN workspace_members wm ON wm.workspace_id=c.workspace_id AND wm.user_id=? WHERE c.agent_id=? AND c.desired_traced<>c.traced ORDER BY c.id').all(req.agent.user_id, req.agent.id),
       db.prepare("SELECT * FROM pending_pushes WHERE agent_id=? AND status='pending' AND (next_check_at IS NULL OR next_check_at<=?) ORDER BY id LIMIT 10").all(req.agent.id, now()),
@@ -1145,21 +1148,21 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
   });
   app.get('/api/reports/jobs/:id', userAuth, async (req: Authed, res) => { const row = await db.prepare('SELECT j.* FROM report_jobs j JOIN workspace_members wm ON wm.workspace_id=j.workspace_id AND wm.user_id=? WHERE j.id=? AND j.user_id=?').get(req.user.id, req.params.id, req.user.id); row ? res.json(row) : res.status(404).json({error: 'not found'}); });
   app.get('/api/agents/jobs', agentAuth, async (req: Authed, res) => {
-    await materializeDueReportSchedules(db, req.agent.user_id);
-    res.json(await db.prepare("SELECT j.* FROM report_jobs j JOIN workspace_members wm ON wm.workspace_id=j.workspace_id AND wm.user_id=? WHERE j.user_id=? AND j.status='pending' AND (j.report_scope<>'workspace' OR wm.role='Manager') ORDER BY j.id LIMIT 1").all(req.agent.user_id, req.agent.user_id));
+    res.json(await pendingReportJobs(db, req.agent));
   });
-  app.post('/api/agents/jobs/:id/claim', agentAuth, async (req: Authed, res) => { const result = await db.prepare("UPDATE report_jobs SET status='running',agent_id=?,claimed_at=? WHERE id=? AND user_id=? AND status='pending' AND workspace_id IN (SELECT workspace_id FROM workspace_members WHERE user_id=?) AND (report_scope<>'workspace' OR workspace_id IN (SELECT workspace_id FROM workspace_members WHERE user_id=? AND role='Manager'))").run(req.agent.id, now(), req.params.id, req.agent.user_id, req.agent.user_id, req.agent.user_id); result.changes ? res.json(await db.prepare('SELECT * FROM report_jobs WHERE id=?').get(req.params.id)) : res.status(409).json({error: 'job unavailable'}); });
+  app.post('/api/agents/jobs/:id/claim', agentAuth, async (req: Authed, res) => {
+    const job = await claimReportJob(db, req.agent, req.params.id);
+    job ? res.json(job) : res.status(409).json({error: 'job unavailable'});
+  });
   app.get('/api/agents/jobs/:id/context', agentAuth, async (req: Authed, res) => {
-    const job: any = await db.prepare("SELECT j.* FROM report_jobs j JOIN workspace_members wm ON wm.workspace_id=j.workspace_id AND wm.user_id=? WHERE j.id=? AND j.user_id=? AND j.agent_id=? AND j.status='running' AND (j.report_scope<>'workspace' OR wm.role='Manager')").get(req.agent.user_id, req.params.id, req.agent.user_id, req.agent.id);
+    const job: any = await runningReportJob(db, req.agent, req.params.id);
     if (!job) return res.status(404).json({error: 'not found'});
     const bounds = dateRangeUtc(isoDate(job.start_date), isoDate(job.end_date), normalizeTimezone(job.timezone));
     const events = (await db.prepare(`SELECT e.*,u.name user_name,r.name repository_name,r.remote_url repository_remote_url,r.normalized_remote
-      FROM report_jobs j JOIN workspace_members wm ON wm.workspace_id=j.workspace_id AND wm.user_id=j.user_id
-      JOIN repositories r ON r.workspace_id=j.workspace_id JOIN activity_event_repositories aer ON aer.repository_id=r.id JOIN activity_events e ON e.id=aer.event_id JOIN users u ON u.id=e.user_id
-      WHERE j.id=? AND j.user_id=? AND j.agent_id=? AND j.status='running' AND (j.report_scope<>'workspace' OR wm.role='Manager')
-        AND (j.report_scope='workspace' OR e.user_id=j.user_id) AND e.occurred_at>=? AND e.occurred_at<=? ORDER BY e.occurred_at`).all(job.id, req.agent.user_id, req.agent.id, bounds.from, bounds.to)).map((row: any) => {
+      FROM repositories r JOIN activity_event_repositories aer ON aer.repository_id=r.id JOIN activity_events e ON e.id=aer.event_id JOIN users u ON u.id=e.user_id
+      WHERE r.workspace_id=? AND (?='workspace' OR e.user_id=?) AND e.occurred_at>=? AND e.occurred_at<=? ORDER BY e.occurred_at`).all(job.workspace_id, job.report_scope, job.user_id, bounds.from, bounds.to)).map((row: any) => {
           const {repository_remote_url: repositoryRemoteUrl, ...event} = row;
-          const crossMember = Number(row.user_id) !== Number(job.user_id);
+          const crossMember = Number(row.user_id) !== Number(req.agent.user_id);
           return {
             ...event,
             repository_name: crossMember ? safeRepositoryName(row.repository_name) : row.repository_name,
@@ -1168,13 +1171,13 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
             data: crossMember ? redactCrossMemberEvidence(eventData(row.data)) : eventData(row.data),
           };
         });
-    res.json({job, events});
+    res.json({job, events, agentUserId: Number(req.agent.user_id)});
   });
   app.post('/api/agents/jobs/:id/complete', agentAuth, required(['markdown']), async (req: Authed, res) => {
     if (typeof req.body.markdown !== 'string' || !req.body.markdown.trim()) return res.status(422).json({error: 'report output was empty'});
     const markdown = req.body.markdown.trim();
     const completed = await db.transaction(async () => {
-      const job: any = await db.prepare("SELECT j.*,w.name workspace_name FROM report_jobs j JOIN workspaces w ON w.id=j.workspace_id JOIN workspace_members wm ON wm.workspace_id=j.workspace_id AND wm.user_id=? WHERE j.id=? AND j.user_id=? AND j.status='running' AND j.agent_id=? AND (j.report_scope<>'workspace' OR wm.role='Manager') FOR UPDATE").get(req.agent.user_id, req.params.id, req.agent.user_id, req.agent.id);
+      const job: any = await runningReportJob(db, req.agent, req.params.id, true);
       if (!job) return undefined;
       let reportId = job.target_report_id;
       if (job.target_report_id) {
@@ -1192,7 +1195,13 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
     if (completed.notifySlack) await deliverReportToSlack(completed.id);
     res.status(201).json({ok: true});
   });
-  app.post('/api/agents/jobs/:id/fail', agentAuth, required(['error']), async (req: Authed, res) => { const result = await db.prepare("UPDATE report_jobs SET status='failed',error=?,completed_at=? WHERE id=? AND user_id=? AND agent_id=? AND status='running' AND workspace_id IN (SELECT workspace_id FROM workspace_members WHERE user_id=?) AND (report_scope<>'workspace' OR workspace_id IN (SELECT workspace_id FROM workspace_members WHERE user_id=? AND role='Manager'))").run(req.body.error, now(), req.params.id, req.agent.user_id, req.agent.id, req.agent.user_id, req.agent.user_id); res.status(result.changes ? 200 : 409).json({ok: Boolean(result.changes)}); });
+  app.post('/api/agents/jobs/:id/fail', agentAuth, required(['error']), async (req: Authed, res) => {
+    const result = await db.transaction(async () => {
+      const job = await runningReportJob(db, req.agent, req.params.id, true);
+      return job && await failReportJob(db, job, req.body.error.slice(0, 2000));
+    });
+    res.status(result?.changes ? 200 : 409).json({ok: Boolean(result?.changes)});
+  });
   app.post('/api/reports/:id/retry-slack', userAuth, async (req: Authed, res) => {
     const report: any = await db.prepare(`SELECT r.id FROM reports r JOIN workspace_members wm ON wm.workspace_id=r.workspace_id
       WHERE r.id=? AND wm.user_id=? AND (r.user_id=? OR wm.role='Manager')`).get(req.params.id, req.user.id, req.user.id);

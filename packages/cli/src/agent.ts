@@ -524,7 +524,7 @@ export function contextPrompt(context: any, clones: Config['clones']) {
   };
   const isCrossMemberEvent = (event: any) => {
     const eventUserId = Number(event.user_id);
-    const jobUserId = Number(context.job.user_id);
+    const jobUserId = Number(context.agentUserId ?? context.job.user_id);
     return Number.isFinite(eventUserId) && Number.isFinite(jobUserId) && eventUserId !== jobUserId;
   };
   const safeRemote = (event: any) => {
