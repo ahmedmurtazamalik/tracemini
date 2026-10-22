@@ -388,6 +388,13 @@ export class DB {
         {version: 21, name: 'shared activity observations', sql: sharedActivityMigrationSql},
         {version: 22, name: 'scheduled report naming', sql: reportScheduleNamingMigrationSql},
         {version: 23, name: 'canonical engineer names', sql: canonicalEngineerNamesMigrationSql},
+        {version: 24, name: 'report delivery status and device fallback', sql: `
+          ALTER TABLE report_jobs ADD COLUMN attempted_agent_ids JSONB NOT NULL DEFAULT '[]';
+          ALTER TABLE reports ADD COLUMN slack_status TEXT;
+          ALTER TABLE reports ADD CONSTRAINT reports_slack_status_check CHECK(slack_status IS NULL OR slack_status IN ('unknown','pending','sending','sent','failed'));
+          ALTER TABLE reports ADD COLUMN slack_attempted_at TIMESTAMPTZ;
+          UPDATE reports SET slack_status='unknown' WHERE job_id IN (SELECT id FROM report_jobs WHERE notify_slack=TRUE);
+        `},
       ];
       for (const migration of migrations) {
         const checksum = crypto.createHash('sha256').update(migration.sql).digest('hex');

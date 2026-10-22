@@ -27,8 +27,6 @@ describe('document context API without schema changes', () => {
     const job = (await request(app).post('/api/reports/jobs').set(auth(account.token)).send({workspaceId: String(workspace.id), startDate: '2026-09-01', endDate: '2026-09-01', reporter: 'codex', documentContext}).expect(201)).body;
     const row: any = await db.prepare('SELECT custom_prompt FROM report_jobs WHERE id=?').get(job.id);
     expect(decodeReportContext(row.custom_prompt).documents).toEqual(documentContext);
-    const migrations: any[] = await db.prepare('SELECT version FROM schema_migrations ORDER BY version').all();
-    expect(Math.max(...migrations.map(item => Number(item.version)))).toBe(23);
   });
 
   it('rejects document bytes, extracted text, and local paths at the hosted API boundary', async () => {
