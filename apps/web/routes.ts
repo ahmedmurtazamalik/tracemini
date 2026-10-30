@@ -1,4 +1,4 @@
-export type RouteView = 'dashboard' | 'reports' | 'install' | 'settings' | 'workspace-required' | 'report';
+export type RouteView = 'dashboard' | 'journey' | 'reports' | 'install' | 'settings' | 'workspace-required' | 'report';
 
 export type RouteContext = {workspaceId?: number; reportId?: number};
 
@@ -25,7 +25,9 @@ export function workspacePath(workspaceId: number, section = '') {
 export function getRouteView(pathname: string, workspaceId: number): RouteView {
   const isInstall = /\/(?:install)\/?$/.test(pathname);
   const isSettings = /\/(?:settings)\/?$/.test(pathname);
-  if (!workspaceId && (isInstall || isSettings)) return 'workspace-required';
+  const isJourney = /\/journey\/?$/.test(pathname);
+  if (!workspaceId && (isInstall || isSettings || isJourney)) return 'workspace-required';
+  if (isJourney) return 'journey';
   if (isInstall) return 'install';
   if (isSettings) return 'settings';
   if (/\/reports\/\d+\/?$/.test(pathname)) return 'report';

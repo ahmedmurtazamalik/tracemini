@@ -1,6 +1,6 @@
 import {getRouteContext, getRouteView} from './routes.js';
 
-export type WorkspaceLoadKey = 'dashboard' | 'settings' | 'reports' | 'agents' | 'report';
+export type WorkspaceLoadKey = 'dashboard' | 'journey' | 'settings' | 'reports' | 'agents' | 'report';
 export type WorkspaceLoadItem = {key: WorkspaceLoadKey; path: string};
 
 export function workspaceLoadPlan(
@@ -13,6 +13,7 @@ export function workspaceLoadPlan(
   if (!workspaceId) return [];
   const view = getRouteView(route, workspaceId);
   const base = `/workspaces/${workspaceId}`;
+  if (view === 'journey') return [{key: 'journey', path: `${base}/journey${timezone ? `?timezone=${encodeURIComponent(timezone)}` : ''}`}];
   if (view === 'install') return [{key: 'agents', path: `${base}/agents`}];
   if (view === 'settings') return [{key: 'settings', path: `${base}/settings`}];
   if (view === 'reports') return [{key: 'reports', path: `${base}/reports`}];

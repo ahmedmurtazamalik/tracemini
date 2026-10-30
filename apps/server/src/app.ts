@@ -10,6 +10,7 @@ import {activityBucketMinutes, dateKeyInTimezone, dateRangeUtc, hourInTimezone, 
 import {nextScheduledRun, normalizeReportFormat, validateScheduleRule} from './report-schedule.js';
 import {claimReportJob, failReportJob, pendingReportJobs, runningReportJob} from './report-jobs.js';
 import {sendSlackReport} from './slack.js';
+import {developmentJourney} from './journey.js';
 import {decodeReportContext, decodeScheduleDays, encodeReportContext, encodeScheduleDays, validateDocumentContext} from './document-context.js';
 
 const now = () => new Date().toISOString();
@@ -858,6 +859,8 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
   const activityForWorkspace = async (workspaceId: number, query: Request['query'], extra = '', args: any[] = []) => {
     let sql = 'SELECT e.*,r.id repository_id,u.name user_name,r.name repository_name FROM activity_events e JOIN activity_event_repositories aer ON aer.event_id=e.id JOIN users u ON u.id=e.user_id JOIN repositories r ON r.id=aer.repository_id WHERE r.workspace_id=?' + extra;
     const values: any[] = [workspaceId, ...args];
+    if (query.userId) { sql += ' AND e.user_id=?'; values.push(Number(query.userId)); }
+    if (query.repositoryId) { sql += ' AND r.id=?'; values.push(Number(query.repositoryId)); }
     const repositoryFilters: string[] = [];
     addRepositorySelection(repositoryFilters, values, query);
     if (repositoryFilters.length) sql += ` AND ${repositoryFilters.join(' AND ')}`;
@@ -945,6 +948,11 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
   const queryActivity = async (req: Authed, res: Response, extra: string, args: any[]) => {
     const workspaceId = Number(req.params.workspaceId || req.query.workspaceId || 0);
     if (!workspaceId || !(await membership(req.user.id, workspaceId))) return res.status(403).json({error: 'forbidden'});
+    for (const key of ['userId', 'repositoryId']) {
+      if (req.query[key] !== undefined && (!/^\d+$/.test(String(req.query[key])) || !Number.isSafeInteger(Number(req.query[key])) || Number(req.query[key]) < 1)) {
+        return res.status(400).json({error: `${key} must be a positive integer`});
+      }
+    }
     res.json(await activityForWorkspace(workspaceId, req.query, extra, args));
   };
   app.get('/api/workspaces/:workspaceId/activity', userAuth, async (req: Authed, res) => await queryActivity(req, res, '', []));
@@ -952,6 +960,10 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
   app.get('/api/users/:id/activity', userAuth, async (req: Authed, res) => await queryActivity(req, res, ' AND e.user_id=?', [+req.params.id]));
   app.get('/api/workspaces/:id/stats', userAuth, requireMember, async (req, res) => {
     res.json(await statsForWorkspace(req.params.id, req.query));
+  });
+  app.get('/api/workspaces/:id/journey', userAuth, requireMember, async (req, res) => {
+    const journey = await developmentJourney(db, Number(req.params.id), normalizeTimezone(req.query.timezone));
+    res.json({...journey, repositories: journey.repositories.map(repository => ({...repository, name: safeRepositoryName(repository.name)}))});
   });
   app.get('/api/workspaces/:id/timeline', userAuth, requireMember, async (req, res) => {
     const from = req.query.from === undefined ? undefined : String(req.query.from);

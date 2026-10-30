@@ -4,6 +4,11 @@ import {workspaceLoadPlan} from '../apps/web/workspace-loading.js';
 const dates = {from: '2026-08-01', to: '2026-08-25'};
 
 describe('route-specific workspace loading', () => {
+  it('loads only the bounded journey summary, independently of dashboard date and repository filters', () => {
+    expect(workspaceLoadPlan('/workspaces/8/journey', 8, dates, 'UTC+05:20', [])).toEqual([
+      {key: 'journey', path: '/workspaces/8/journey?timezone=UTC%2B05%3A20'},
+    ]);
+  });
   it('loads only device state on the install route', () => {
     expect(workspaceLoadPlan('/workspaces/8/install', 8, dates)).toEqual([
       {key: 'agents', path: '/workspaces/8/agents'},
