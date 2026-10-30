@@ -3,7 +3,7 @@ import request from 'supertest';
 import {createApp} from '../apps/server/src/app.js';
 import {openTestDb} from '../apps/server/src/test-db.js';
 import {dateKeyInTimezone, dateRangeUtc} from '../apps/server/src/timezone.js';
-import {journeyChains, journeyDates, type JourneyData} from '../apps/web/journey-data.js';
+import {journeyChains, journeyDates, workDescription, type JourneyData} from '../apps/web/journey-data.js';
 import type {DB} from '../apps/server/src/db.js';
 
 let db: DB | undefined;
@@ -11,16 +11,16 @@ afterEach(async () => { await db?.close(); db = undefined; });
 const auth = (token: string) => ({authorization: `Bearer ${token}`});
 
 describe('development journey', () => {
-  it('groups observed projects per member without mixing contributors or losing quiet tracked projects', () => {
+  it('shows only active projects in the visible window, newest first, without mixing contributors', () => {
     const data: JourneyData = {
       from: '2026-10-17', to: '2026-10-30', timezone: 'UTC',
       people: [{id: 1, name: 'Ada'}, {id: 2, name: 'Grace'}],
       repositories: [{id: 10, name: 'App', archived: false, userIds: [1, 2]}, {id: 11, name: 'Quiet', archived: false, userIds: [1]}, {id: 12, name: 'Archived', archived: true, userIds: [1]}],
       days: [
-        {userId: 1, repositoryId: 10, date: '2026-10-29', total: 2, counts: {commit: 2}, previews: [{repositoryId: 10, type: 'commit', text: 'Fix sign-in validation', at: '2026-10-29T10:00:00Z'}]},
+        {userId: 1, repositoryId: 10, date: '2026-10-29', total: 2, counts: {commit: 2}, lastActivityAt: '2026-10-29T10:00:00Z', previews: [{repositoryId: 10, type: 'commit', text: 'Fix sign-in validation', at: '2026-10-29T10:00:00Z'}]},
         {userId: 2, repositoryId: 10, date: '2026-10-29', total: 3, counts: {commit: 1, push: 2}},
         {userId: 1, repositoryId: 12, date: '2026-10-18', total: 1, counts: {stage: 1}},
-        {userId: 1, repositoryId: 12, date: '2026-10-29', total: 1, counts: {commit: 1}, previews: [{repositoryId: 12, type: 'commit', text: 'Update account navigation', at: '2026-10-29T11:00:00Z'}]},
+        {userId: 1, repositoryId: 12, date: '2026-10-29', total: 1, counts: {commit: 1}, lastActivityAt: '2026-10-29T11:00:00Z', previews: [{repositoryId: 12, type: 'commit', text: 'Update account navigation', at: '2026-10-29T11:00:00Z'}]},
       ],
     };
     const dates = journeyDates(data.from, data.to);
@@ -28,19 +28,23 @@ describe('development journey', () => {
     expect(dates.slice(7)).toHaveLength(7);
     expect(dates.at(-1)).toBe(data.to);
     const person = journeyChains(data, 1);
-    expect(person.map(chain => chain.id)).toEqual([10, 11, 12]);
-    expect(person[0].days.get('2026-10-29')).toEqual({total: 2, counts: {commit: 2}, previews: data.days[0].previews});
-    expect(person[1].days.size).toBe(0);
+    expect(person.map(chain => chain.id)).toEqual([12, 10]);
+    expect(person[1].days.get('2026-10-29')).toMatchObject({total: 2, counts: {commit: 2}, previews: data.days[0].previews});
+    expect(journeyChains(data, undefined, undefined, false, '2026-10-17', '2026-10-23').map(chain => chain.id)).toEqual([12]);
+    expect(journeyChains(data, 2, undefined, false, '2026-10-17', '2026-10-23')).toEqual([]);
     expect(journeyChains(data, 2).map(chain => chain.id)).toEqual([10]);
-    expect(journeyChains(data, undefined, 10)[0].days.get('2026-10-29')).toEqual({total: 5, counts: {commit: 3, push: 2}, previews: data.days[0].previews});
-    expect(journeyChains(data, 2, 12)[0].days.size).toBe(0);
+    expect(journeyChains(data, undefined, 10)[0].days.get('2026-10-29')).toMatchObject({total: 5, counts: {commit: 3, push: 2}, previews: data.days[0].previews});
+    expect(journeyChains(data, 2, 12)).toEqual([]);
     expect(data.days[0].total).toBe(2);
     const general = journeyChains(data, 1, undefined, true);
     expect(general).toHaveLength(1);
-    expect(general[0]).toMatchObject({id: 0, name: 'All projects', projectCount: 3});
-    expect(general[0].days.get('2026-10-29')).toEqual({total: 3, counts: {commit: 3}, previews: [data.days[3].previews![0], data.days[0].previews![0]]});
-    expect(general[0].days.get('2026-10-18')).toEqual({total: 1, counts: {stage: 1}});
+    expect(general[0]).toMatchObject({id: 0, name: 'All projects', projectCount: 2});
+    expect(general[0].days.get('2026-10-29')).toMatchObject({total: 3, counts: {commit: 3}, previews: [data.days[3].previews![0], data.days[0].previews![0]]});
+    expect(general[0].days.get('2026-10-18')).toMatchObject({total: 1, counts: {stage: 1}});
     expect(data.days[0].previews).toHaveLength(1);
+    expect(workDescription('feat(accounts): improve sign-in validation\nEvidence')).toBe('Improve sign-in validation');
+    for (const message of ['Merge pull request #29 from team/branch', "Merge branch 'main'", 'On main: save work', 'WIP on main: abc123 work', 'index on main: abc123 work', 'untracked files on main: abc123 work', 'fixup! work', 'squash! work']) expect(workDescription(message)).toBe('');
+    expect(workDescription('Merge duplicate customer records')).toBe('Merge duplicate customer records');
   });
 
   it('serves complete fortnight counts and bounded, scoped evidence with timezone and membership boundaries', async () => {
@@ -66,12 +70,14 @@ describe('development journey', () => {
     entries.push({repo: repo.id, user: owner.user.id, type: 'stage', at: new Date(midnight - 1).toISOString()});
     entries.push({repo: foreign.id, user: outsider.user.id, type: 'commit', at});
     entries.push({repo: repo.id, user: outsider.user.id, type: 'commit', at: new Date(midnight + 60_000).toISOString()});
+    const mechanics = ['Merge pull request #29 from team/branch', 'On main: save work', 'index on main: abc123 work'];
+    entries.push(...mechanics.map(() => ({repo: repo.id, user: owner.user.id, type: 'commit', at: new Date(midnight + 60_000).toISOString()})));
     // Bulk insert only disposable test evidence; there is no application seed.
     const values: unknown[] = [];
     const tuples = entries.map((event, index) => {
       const start = values.length;
       values.push(`journey-${index}`, event.user, agent.id, event.repo, event.type, event.at,
-        JSON.stringify({message: index === 0 ? 'Change 0 /private/source\nMore details' : event.type === 'stage' ? `Long ${'x'.repeat(300)}` : `Change ${index}`, branch: 'main', commitSha: String(index).padStart(40, 'a'), privatePath: '/private/source'}), at);
+        JSON.stringify({message: index === 0 ? 'Work 0 /private/source\nMore details' : index >= entries.length - mechanics.length ? mechanics[index - (entries.length - mechanics.length)] : event.user === outsider.user.id && event.repo === repo.id ? `Long ${'x'.repeat(300)}` : `Work ${index}`, branch: 'main', commitSha: String(index).padStart(40, 'a'), privatePath: '/private/source'}), at);
       return `(${Array.from({length: 8}, (_, offset) => `$${start + offset + 1}`).join(',')})`;
     });
     await db.query(`INSERT INTO activity_events(event_key,user_id,agent_id,repository_id,type,occurred_at,data,created_at) VALUES ${tuples.join(',')}`, values);
@@ -86,7 +92,7 @@ describe('development journey', () => {
     const summary: JourneyData = (await request(app).get(endpoint).set(auth(owner.token)).expect(200)).body;
     expect(journeyDates(summary.from, summary.to)).toHaveLength(14);
     expect(summary.timezone).toBe(timezone);
-    expect(summary.days.find(day => day.userId === owner.user.id && day.repositoryId === repo.id && day.date === today)).toMatchObject({total: 501, counts: {commit: 500, push: 1}});
+    expect(summary.days.find(day => day.userId === owner.user.id && day.repositoryId === repo.id && day.date === today)).toMatchObject({total: 504, counts: {commit: 503, push: 1}, lastActivityAt: new Date(midnight + 60_000).toISOString()});
     expect(summary.days.find(day => day.date === previous)).toMatchObject({total: 1, counts: {stage: 1}});
     expect(summary.repositories).toContainEqual({id: quiet.id, name: 'Quiet', archived: false, userIds: [owner.user.id]});
     expect(summary.repositories.find(item => item.id === repo.id)?.name).toBe('App');
@@ -94,9 +100,11 @@ describe('development journey', () => {
     expect(summary.people.some(person => person.id === outsider.user.id)).toBe(true); // Historical contributor.
     expect(JSON.stringify(summary)).not.toMatch(/\/private\/|privatePath|"token"|"email"|More details/);
     const previewDay = summary.days.find(day => day.userId === owner.user.id && day.repositoryId === repo.id && day.date === today)!;
-    expect(previewDay.previews).toHaveLength(2);
-    expect(previewDay.previews![0]).toMatchObject({repositoryId: repo.id, type: 'commit', text: 'Change 0 [private local path]'});
-    expect(summary.days.find(day => day.date === previous)?.previews![0].text).toHaveLength(160);
+    expect(previewDay.previews).toHaveLength(1);
+    expect(previewDay.previews![0]).toMatchObject({repositoryId: repo.id, type: 'commit', text: 'Work 0 [private local path]'});
+    expect(summary.days.find(day => day.userId === outsider.user.id)?.previews![0].text).toHaveLength(160);
+    expect(summary.days.find(day => day.date === previous)?.previews).toEqual([]);
+    expect(summary.days.flatMap(day => day.previews || []).some(preview => mechanics.includes(preview.text))).toBe(false);
 
     const evidence = `/api/workspaces/${workspace.id}/activity?from=${today}&to=${today}&timezone=${encodeURIComponent(timezone)}&repositoryId=${repo.id}&userId=${owner.user.id}`;
     const details = (await request(app).get(evidence).set(auth(owner.token)).expect(200)).body;
