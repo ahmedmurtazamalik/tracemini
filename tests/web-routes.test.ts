@@ -5,6 +5,7 @@ describe('workspace route guards', () => {
   it('sends workspace-free users to a useful setup state instead of broken settings or install screens', () => {
     expect(getRouteView('/settings', 0)).toBe('workspace-required');
     expect(getRouteView('/install', 0)).toBe('workspace-required');
+    expect(getRouteView('/journey', 0)).toBe('workspace-required');
     expect(workspacePath(0, 'settings')).toBe('/settings');
     expect(workspacePath(0, 'install')).toBe('/install');
   });
@@ -15,6 +16,8 @@ describe('workspace route guards', () => {
     expect(getRouteView('/install', 4)).toBe('install');
     expect(getRouteView('/workspaces/4/install', 4)).toBe('install');
     expect(getRouteView('/workspaces/4/reports', 4)).toBe('reports');
+    expect(getRouteView('/workspaces/4/journey', 4)).toBe('journey');
+    expect(workspacePath(4, 'journey')).toBe('/workspaces/4/journey');
     expect(workspacePath(4, 'settings')).toBe('/workspaces/4/settings');
     expect(workspacePath(4, 'install')).toBe('/workspaces/4/install');
     expect(workspacePath(4, 'reports')).toBe('/workspaces/4/reports');

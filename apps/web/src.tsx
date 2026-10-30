@@ -28,6 +28,7 @@ import { HelpDrawer, InfoTip, type HelpSection } from "./help.js";
 import {deleteLocalDocument, deriveLocalDocument, documentIdentity, hostedDocument, listLocalDocuments, OCR_INSTALL_COMMAND, requiresOcrInstall, type LocalContextDocument} from "./document-context.js";
 import { activitySummary } from "./activity-summary.js";
 import { LogoTrainButton } from "./logo-train.js";
+import type { JourneyData } from "./journey-data.js";
 import "./style.css";
 import "./refresh.css";
 
@@ -57,6 +58,7 @@ const request = async (path: string, init: RequestInit = {}) => {
     );
   return result;
 };
+const DevelopmentJourney = React.lazy(() => import("./journey.js"));
 const ReportMarkdown = React.lazy(async () => {
   const [{default: ReactMarkdown}, {default: remarkGfm}] = await Promise.all([
     import("react-markdown"),
@@ -88,6 +90,7 @@ function Brand() {
 function NavIcon({ name }: { name: string }) {
   const paths: Record<string, ReactNode> = {
     Dashboard: <><rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" /><rect x="3" y="14" width="7" height="7" rx="1.5" /><path d="M14 17.5h7M17.5 14v7" /></>,
+    Journey: <><rect x="3" y="3" width="6" height="6" rx="1.5" /><rect x="15" y="15" width="6" height="6" rx="1.5" /><path d="M9 6h7a3 3 0 0 1 0 6H8a3 3 0 0 0 0 6h7" /></>,
     Reports: <><path d="M7 3.5h8l4 4V20a1 1 0 0 1-1 1H7a2 2 0 0 1-2-2V5.5a2 2 0 0 1 2-2Z" /><path d="M14.5 3.5V8H19M8.5 12h7M8.5 16h7" /></>,
     "Install CLI": <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="m7 9 3 3-3 3M12.5 15H17" /></>,
     Settings: <><path d="M12 3v2m0 14v2M3 12h2m14 0h2M5.6 5.6 7 7m10 10 1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4" /><circle cx="12" cy="12" r="4" /></>,
@@ -1844,6 +1847,7 @@ function App() {
   const [agents, setAgents] = useState<any[]>([]);
   const [stats, setStats] = useState<any>({ totals: {}, daily: [] });
   const [today, setToday] = useState<any>({users: []});
+  const [journey, setJourney] = useState<JourneyData>();
   const [report, setReport] = useState<any>();
   const [error, setError] = useState("");
   const [timezone, setTimezone] = useState(initialTimezone);
@@ -1877,6 +1881,7 @@ function App() {
     setAgents([]);
     setStats({totals: {}, daily: []});
     setToday({users: []});
+    setJourney(undefined);
     setReport(undefined);
     setError("");
   }, [workspaceId]);
@@ -1943,6 +1948,7 @@ function App() {
     setAgents([]);
     setStats({totals: {}, daily: []});
     setToday({users: []});
+    setJourney(undefined);
     setReport(undefined);
     setWorkspacePending(false);
     setError("");
@@ -1980,6 +1986,7 @@ function App() {
       setAgents([]);
       setStats({ totals: {}, daily: [] });
       setToday({users: []});
+      setJourney(undefined);
       if (shouldBlock) setWorkspacePending(false);
       return;
     }
@@ -1992,6 +1999,7 @@ function App() {
 
       if (generation !== loadGeneration.current) return;
       const apply: Record<WorkspaceLoadKey, (value: any) => void> = {
+        journey: setJourney,
         dashboard: (value) => {
           setEvents(value.events);
           setRepositories(value.repositories);
@@ -2053,6 +2061,7 @@ function App() {
   };
   const navItems = [
     { label: "Dashboard", section: "" },
+    { label: "Journey", section: "journey" },
     { label: "Reports", section: "reports" },
     { label: "Install CLI", section: "install" },
     { label: "Settings", section: "settings" },
@@ -2203,6 +2212,17 @@ function App() {
                 if (selected === expectedWorkspace && dataWorkspaceId.current === expectedWorkspace) await loadWorkspace();
               }}
             />
+          ) : view === "journey" ? (
+            journey ? <React.Suspense fallback={<LoadingSurface label="Loading journey…" detail="Preparing your activity chains." />}><DevelopmentJourney
+              key={`${workspaceId}:${journey.timezone}`}
+              data={journey}
+              workspaceId={workspaceId}
+              currentUserId={user.id}
+              api={request}
+              reload={loadWorkspace}
+              error={error}
+              onAuthorizationFailure={handleAuthorizationFailure}
+            /></React.Suspense> : <section className="card"><h1>Development journey</h1><p role="alert">{error || "Journey unavailable."}</p><button className="button secondary" onClick={() => void loadWorkspace(true)}>Retry journey</button></section>
           ) : view === "reports" ? (
             <Reports
               key={workspaceId}
