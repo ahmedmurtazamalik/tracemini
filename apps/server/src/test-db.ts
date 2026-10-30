@@ -4,6 +4,14 @@ import {DB} from './db.js';
 
 export async function openTestDb() {
   const memory = newDb({autoCreateForeignKeyIndices: true});
+  memory.public.registerOperator({
+    operator: '!~*', left: DataType.text, right: DataType.text, returns: DataType.bool,
+    implementation: (value: string, pattern: string) => !new RegExp(pattern.replaceAll('[[:space:]]', '\\s').replaceAll('\\y', '\\b'), 'i').test(value),
+  });
+  memory.public.registerFunction({
+    name: 'left', args: [DataType.text, DataType.integer], returns: DataType.text,
+    implementation: (value: string, length: number) => [...value].slice(0, length).join(''),
+  });
   memory.public.registerFunction({
     name: 'date_trunc',
     args: [DataType.text, DataType.timestamptz],

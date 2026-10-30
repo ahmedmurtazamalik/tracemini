@@ -963,7 +963,10 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
   });
   app.get('/api/workspaces/:id/journey', userAuth, requireMember, async (req, res) => {
     const journey = await developmentJourney(db, Number(req.params.id), normalizeTimezone(req.query.timezone));
-    res.json({...journey, repositories: journey.repositories.map(repository => ({...repository, name: safeRepositoryName(repository.name)}))});
+    res.json({...journey,
+      repositories: journey.repositories.map(repository => ({...repository, name: safeRepositoryName(repository.name)})),
+      days: journey.days.map(day => ({...day, previews: day.previews.map(preview => ({...preview, text: redactLocalPathsInString(preview.text).slice(0, 160)}))})),
+    });
   });
   app.get('/api/workspaces/:id/timeline', userAuth, requireMember, async (req, res) => {
     const from = req.query.from === undefined ? undefined : String(req.query.from);

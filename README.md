@@ -11,7 +11,7 @@ Built for a small team of 4–6 developers, with a ready-to-use web app and a li
 ## What you can do
 
 - **See recent work.** Browse Git activity by teammate, repository, or date.
-- **Follow a development journey.** Open **Journey** to see the last 14 days of recorded activity for a person or project. Each person has a separate chain per tracked project; select a day for its commits and supporting Git events. Switch between 7 and 14 days or collapse a chain without reloading data. Quiet days mean no events have synced, not that no work took place. Day details show up to 500 recent events; counts cover the full fortnight. Use **Refresh journey** to retrieve newer activity.
+- **Follow a development journey.** Open **Journey** for a workspace-wide view of active projects, newest activity first. Only projects with recorded activity in the visible 7 or 14 days appear. Day blocks preview descriptions of the work; generated merge and stash subjects are excluded, and conventional commit prefixes are removed. Select a day for its work descriptions and expandable Git evidence. Filter to one project or contributor, or use Person view’s **General / By project** switch. Zoom and collapse reuse loaded data and preserve selected-day details. Quiet days mean no events have synced, not that no work took place. Day details show up to 500 recent events; counts cover the full fortnight. Use **Refresh journey** to retrieve newer activity.
 - **Choose what gets tracked.** Pick the folders to scan and the repositories to include.
 - **Write reports faster.** Generate a short bullet-point update or a detailed report, then download it as Markdown.
 - **Include work outside Git.** Add notes, PDFs, or presentations for context about reviews, research, and other work.
