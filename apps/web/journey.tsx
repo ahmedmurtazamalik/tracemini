@@ -4,7 +4,7 @@ import {formatInTimezone} from './timezone.js';
 import {emptyDay, journeyChains, journeyDates, type DayCounts, type JourneyData} from './journey-data.js';
 import './journey.css';
 
-type ActivityEvent = {id: number; user_name: string; type: string; occurred_at: string; data: Record<string, unknown>};
+type ActivityEvent = {id: number; repository_id: number; repository_name: string; user_name: string; type: string; occurred_at: string; data: Record<string, unknown>};
 type Detail = {key: string; events?: ActivityEvent[]; error?: string};
 type Props = {
   data: JourneyData; workspaceId: number; currentUserId: number;
@@ -21,14 +21,14 @@ const dateFormatters = {
 const dateLabel = (date: string, part: keyof typeof dateFormatters = 'full') => dateFormatters[part].format(new Date(`${date}T00:00:00Z`));
 const countLabel = (count: number, singular: string, plural = `${singular}s`) => `${count} ${count === 1 ? singular : plural}`;
 const summaryLabel = (day: DayCounts) => day.total
-  ? Object.entries(day.counts).map(([type, count]) => countLabel(count, type, type === 'push' ? 'pushes' : `${type}s`)).join(' · ')
+  ? Object.entries(day.counts).map(([type, count]) => countLabel(count, type, type === 'push' ? 'pushes' : type === 'branch' ? 'branches' : `${type}s`)).join(' · ')
   : 'No recorded activity';
 
-function EventEvidence({event, timezone}: {event: ActivityEvent; timezone: string}) {
+function EventEvidence({event, timezone, showProject}: {event: ActivityEvent; timezone: string; showProject: boolean}) {
   const message = event.type === 'commit' ? String(event.data.message || 'Commit') : event.type;
   return <article className="journey-evidence">
     <h4>{message}</h4>
-    <p>{event.user_name} · <time dateTime={event.occurred_at}>{formatInTimezone(event.occurred_at, timezone)}</time></p>
+    <p>{event.user_name}{showProject && ` · ${event.repository_name}`} · <time dateTime={event.occurred_at}>{formatInTimezone(event.occurred_at, timezone)}</time></p>
     {event.type !== 'commit' && <p>{activitySummary(event)}</p>}
     {event.data.branch != null && <p>Branch: <code>{String(event.data.branch)}</code></p>}
     {event.data.commitSha != null && <p>Commit: <code>{String(event.data.commitSha).slice(0, 12)}</code></p>}
@@ -40,6 +40,7 @@ function EventEvidence({event, timezone}: {event: ActivityEvent; timezone: strin
 
 export default function DevelopmentJourney({data, workspaceId, currentUserId, api, reload, error, onAuthorizationFailure}: Props) {
   const [view, setView] = useState<'person' | 'project'>('person');
+  const [personMode, setPersonMode] = useState<'projects' | 'general'>('projects');
   const [person, setPerson] = useState(currentUserId);
   const [project, setProject] = useState(0);
   const [projectFilter, setProjectFilter] = useState(0);
@@ -64,8 +65,10 @@ export default function DevelopmentJourney({data, workspaceId, currentUserId, ap
   const personId = data.people.some(item => item.id === person) ? person : data.people[0]?.id;
   const projectId = data.repositories.some(item => item.id === project) ? project : data.repositories[0]?.id;
   const userId = view === 'person' ? personId : contributor || undefined;
-  const repositoryId = view === 'project' ? projectId : projectFilter || undefined;
-  const chains = useMemo(() => journeyChains(data, userId, repositoryId), [data, userId, repositoryId]);
+  const general = view === 'person' && personMode === 'general';
+  const repositoryId = general ? undefined : view === 'project' ? projectId : projectFilter || undefined;
+  const chains = useMemo(() => journeyChains(data, userId, repositoryId, general), [data, userId, repositoryId, general]);
+  const projectNames = useMemo(() => new Map(data.repositories.map(repository => [repository.id, repository.name])), [data.repositories]);
   const activeChain = chains.find(chain => chain.id === selectedProject) || chains[0];
   const selected = activeChain?.days.get(date) || emptyDay;
   const detailKey = `${data.timezone}:${date}:${activeChain?.id || 0}:${userId || 0}`;
@@ -84,7 +87,8 @@ export default function DevelopmentJourney({data, workspaceId, currentUserId, ap
     if (!activeChain || !selected.total) { setDetail({key, events: []}); return; }
     const cached = cache.current.get(key);
     if (cached) { setDetail({key, events: cached}); return; }
-    const params = new URLSearchParams({from: date, to: date, timezone: data.timezone, repositoryId: String(activeChain.id)});
+    const params = new URLSearchParams({from: date, to: date, timezone: data.timezone});
+    if (activeChain.id) params.set('repositoryId', String(activeChain.id));
     if (userId !== undefined) params.set('userId', String(userId));
     void api(`/workspaces/${workspaceId}/activity?${params}`, {signal: controller.signal}).then(result => {
       if (controller.signal.aborted) return;
@@ -107,13 +111,13 @@ export default function DevelopmentJourney({data, workspaceId, currentUserId, ap
     collapsedByWorkspace.set(workspaceId, next);
     return next;
   });
-  const selectDay = (day: string, repository: number) => { setSelectedDate(day); setSelectedProject(repository); };
+  const selectDay = (day: string, repository: number) => { setSelectedDate(day); if (repository) setSelectedProject(repository); };
   const events = shownDetail?.events || [];
   const renderedEvents = events.slice(0, limit);
   const commits = renderedEvents.filter(event => event.type === 'commit');
   const supporting = renderedEvents.filter(event => event.type !== 'commit');
 
-  return <div className="page-stack development-journey" data-range={range} style={{'--journey-day-columns': range} as React.CSSProperties}>
+  return <div className="page-stack development-journey" data-range={range} data-person-mode={general ? 'general' : 'projects'} style={{'--journey-day-columns': range} as React.CSSProperties}>
     <div className="journey-page-heading">
       <div><span className="eyebrow">Development activity</span><h1>Development journey</h1><p>Follow recorded Git activity by person and project over the last 14 days.</p></div>
       <button className="button secondary" disabled={refreshPending} onClick={async () => {
@@ -130,7 +134,8 @@ export default function DevelopmentJourney({data, workspaceId, currentUserId, ap
       <div className="journey-selects">
         {view === 'person' ? <>
           <label>Person<select value={personId ?? ''} onChange={event => setPerson(Number(event.target.value))}>{data.people.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
-          <label>Project<select aria-label="Project filter" value={projectFilter} onChange={event => setProjectFilter(Number(event.target.value))}><option value={0}>All projects</option>{data.repositories.map(item => <option key={item.id} value={item.id}>{item.name}{item.archived ? ' (archived)' : ''}</option>)}</select></label>
+          <div className="journey-person-mode" role="group" aria-label="Person activity chains"><button aria-pressed={general} onClick={() => setPersonMode('general')}>General</button><button aria-pressed={!general} onClick={() => setPersonMode('projects')}>By project</button></div>
+          {!general && <label>Project<select aria-label="Project filter" value={projectFilter} onChange={event => setProjectFilter(Number(event.target.value))}><option value={0}>All projects</option>{data.repositories.map(item => <option key={item.id} value={item.id}>{item.name}{item.archived ? ' (archived)' : ''}</option>)}</select></label>}
         </> : <>
           <label>Project<select value={projectId ?? ''} onChange={event => setProject(Number(event.target.value))}>{data.repositories.map(item => <option key={item.id} value={item.id}>{item.name}{item.archived ? ' (archived)' : ''}</option>)}</select></label>
           <label>Contributor<select value={contributor} onChange={event => setContributor(Number(event.target.value))}><option value={0}>All contributors</option>{data.people.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
@@ -144,24 +149,33 @@ export default function DevelopmentJourney({data, workspaceId, currentUserId, ap
     </div>
     <div className="journey-layout">
       <section className="journey-map" aria-label="Project activity chains">
-        <div className="journey-map-heading"><h2>{subject || 'No projects yet'}</h2><p>{countLabel(activeDays, 'active day')} · {countLabel(chains.length, 'project')}</p></div>
+        <div className="journey-map-heading"><h2>{subject || 'No projects yet'}</h2><p>{countLabel(activeDays, 'active day')} · {countLabel(chains.reduce((count, chain) => count + chain.projectCount, 0), 'project')}{general ? ' combined' : ''}</p></div>
         {chains.map(chain => {
           const key = `${personId}:${chain.id}`;
-          const expanded = view === 'project' || !collapsed.has(key);
+          const expanded = general || view === 'project' || !collapsed.has(key);
           const visibleActive = visibleDates.filter(day => (chain.days.get(day)?.total || 0) > 0).length;
           return <section className="journey-project-chain" key={chain.id}>
-            <h3>{view === 'person' ? <button className="journey-chain-toggle" aria-expanded={expanded} aria-controls={`journey-chain-${chain.id}`} onClick={() => toggleChain(key)}>
+            <h3>{view === 'person' && !general ? <button className="journey-chain-toggle" aria-expanded={expanded} aria-controls={`journey-chain-${chain.id}`} onClick={() => toggleChain(key)}>
               <span aria-hidden="true">{expanded ? '⌄' : '›'}</span><span>{chain.name}{chain.archived ? ' (archived)' : ''}</span><small>{visibleActive}/{visibleDates.length} active days</small>
             </button> : chain.name}</h3>
             <div id={`journey-chain-${chain.id}`} hidden={!expanded}>
               {expanded && <ol className="journey-chain-days">{visibleDates.map(day => {
                 const activity = chain.days.get(day) || emptyDay;
                 const selected = day === date && chain.id === activeChain?.id;
+                const previews = (activity.previews || []).map(preview => ({
+                  ...preview,
+                  label: `${preview.type === 'commit' ? '' : `${preview.type}: `}${preview.text.replace(/^refs\/(?:heads|tags)\//, '')}`,
+                  project: general ? projectNames.get(preview.repositoryId) : undefined,
+                }));
+                const previewText = previews.map(preview => [preview.project, preview.label].filter(Boolean).join(': ')).join('\n');
                 return <li key={day}><button className={`journey-chain-day${activity.total ? ' active' : ' quiet'}${selected ? ' selected' : ''}`} aria-pressed={selected}
-                  aria-label={`${chain.name}, ${dateLabel(day)}, ${summaryLabel(activity)}`} onClick={() => selectDay(day, chain.id)}>
+                  aria-label={`${chain.name}, ${dateLabel(day)}, ${summaryLabel(activity)}${previewText ? `: ${previewText}` : ''}`} title={previewText || summaryLabel(activity)} onClick={() => selectDay(day, chain.id)}>
                   <span className="journey-chain-date">{dateLabel(day, 'weekday')}<strong>{dateLabel(day, 'day')}</strong></span>
                   <span className="journey-day-dot" aria-hidden="true" />
-                  <strong className="journey-chain-total">{activity.total || '—'}</strong><span className="journey-chain-caption">{activity.total ? 'events' : 'Quiet'}</span>
+                  {activity.total > 0 && <span className="journey-day-previews">{previews.length ? previews.map((preview, index) => <span className="journey-day-preview" key={index}>
+                    {preview.project && <small>{preview.project}</small>}<span>{preview.label}</span>
+                  </span>) : <span className="journey-day-preview"><span>{summaryLabel(activity)}</span></span>}</span>}
+                  <span className="journey-chain-footer"><strong className="journey-chain-total">{activity.total || '—'}</strong><span className="journey-chain-caption">{activity.total ? activity.total === 1 ? 'event' : 'events' : 'Quiet'}</span></span>
                 </button></li>;
               })}</ol>}
             </div>
@@ -177,8 +191,8 @@ export default function DevelopmentJourney({data, workspaceId, currentUserId, ap
           : shownDetail?.error ? <div className="journey-empty" role="alert"><p>{shownDetail.error}</p><button className="button secondary" onClick={() => setRetry(value => value + 1)}>Retry activity</button></div>
           : !shownDetail?.events ? <p className="journey-loading" role="status">Loading day activity…</p>
           : <div className="journey-detail-events">
-            {commits.length > 0 && <section><h3>Commits</h3>{commits.map(event => <EventEvidence key={event.id} event={event} timezone={data.timezone} />)}</section>}
-            {supporting.length > 0 && <details><summary>Supporting activity ({supporting.length})</summary>{supporting.map(event => <EventEvidence key={event.id} event={event} timezone={data.timezone} />)}</details>}
+            {commits.length > 0 && <section><h3>Commits</h3>{commits.map(event => <EventEvidence key={`${event.id}:${event.repository_id}`} event={event} timezone={data.timezone} showProject={general} />)}</section>}
+            {supporting.length > 0 && <details><summary>Supporting activity ({supporting.length})</summary>{supporting.map(event => <EventEvidence key={`${event.id}:${event.repository_id}`} event={event} timezone={data.timezone} showProject={general} />)}</details>}
             {!events.length && <p>No events remain for this selection. Refresh the journey to update its counts.</p>}
             {events.length > limit && <button className="button secondary" onClick={() => setLimit(value => value + 50)}>Show more activity ({events.length - limit})</button>}
             {(events.length >= 500 || events.length < selected.total) && <p className="journey-truncation">Showing the latest {Math.min(limit, events.length)} of {selected.total} events. Up to 500 recent events are available per day.</p>}

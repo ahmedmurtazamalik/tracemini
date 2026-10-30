@@ -5,6 +5,10 @@ import {DB} from './db.js';
 export async function openTestDb() {
   const memory = newDb({autoCreateForeignKeyIndices: true});
   memory.public.registerFunction({
+    name: 'left', args: [DataType.text, DataType.integer], returns: DataType.text,
+    implementation: (value: string, length: number) => [...value].slice(0, length).join(''),
+  });
+  memory.public.registerFunction({
     name: 'date_trunc',
     args: [DataType.text, DataType.timestamptz],
     returns: DataType.timestamptz,
