@@ -11,6 +11,7 @@ import {nextScheduledRun, normalizeReportFormat, validateScheduleRule} from './r
 import {claimReportJob, failReportJob, pendingReportJobs, runningReportJob} from './report-jobs.js';
 import {sendSlackReport} from './slack.js';
 import {developmentJourney} from './journey.js';
+import {registerMonitoring} from './monitoring.js';
 import {decodeReportContext, decodeScheduleDays, encodeReportContext, encodeScheduleDays, validateDocumentContext} from './document-context.js';
 
 const now = () => new Date().toISOString();
@@ -103,6 +104,7 @@ export function createApp(db: DB, webDir?: string, cliDir = defaultCliDir, slack
   const app = express();
   app.set('trust proxy', 1);
   app.use(express.json({limit: '512kb'}));
+  registerMonitoring(app, db);
 
   const deliverReportToSlack = async (reportId: number) => {
     const attemptedAt = now();
