@@ -86,6 +86,15 @@ Open [localhost:3000](http://localhost:3000) and create your account. See [.env.
 
 ## Development
 
+### Aggregate monitoring (optional)
+
+`GET /api/monitoring/workflow` requires a separate `NEXUS_MONITOR_TOKEN`
+(32+ random characters) in the Bearer header and a server-configured
+`NEXUS_MONITOR_WORKSPACE_ID`. It returns only 24/48-hour confirmed Slack delivery
+counts, last successful attempt time, and failed/overdue delivery counts for that
+workspace. It does not return report text or grant user/agent access. Unconfigured
+monitoring fails closed; historical unknown delivery outcomes are not successes.
+
 The project uses TypeScript, React/Vite, Express, and PostgreSQL. The web app lives in `apps/web`, the server in `apps/server`, and the local agent in `packages/cli`.
 
 Run the checks before submitting code changes:
